@@ -19,5 +19,6 @@
     // Type Checking & Safety
     "strict": true,
     "types": ["vite/client"]
-  }
+  },
+  "include": ["src", "server/dev-plugin.ts", "vite.config.ts"]
 }

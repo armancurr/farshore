@@ -1,0 +1,1191 @@
+import * as THREE from "three";
+import {
+  BOUNDARY,
+  EYE_HEIGHT,
+  HURRY_RATE,
+  MAX_PLAYERS,
+  PLAYER_HEIGHT,
+  STAMINA_MAX,
+  TICK_HZ,
+} from "../shared/constants";
+import { clamp, lerp } from "../shared/math";
+import { type Body, createBody, FLOAT_DEPTH, stepBody } from "../shared/physics";
+import {
+  FLAG,
+  type Held,
+  type Phase,
+  type Placement,
+  type PlayerSnap,
+  type RoundInfo,
+  type ServerMsg,
+} from "../shared/protocol";
+import { overSolid, Terrain } from "../shared/terrain";
+import {
+  COMBO_WINDOW,
+  type WeaponKind,
+  WEAPONS,
+  weaponDef,
+  weaponFromIndex,
+} from "../shared/weapons";
+import { tideAt, tidePhase } from "../shared/tide";
+import { TideAudio } from "./audio";
+import { Input } from "./input";
+import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
+import { Avatar } from "./scene/avatars";
+import { createTerrainMesh, createWater } from "./scene/land";
+import { shared } from "./scene/materials";
+import { PostPass } from "./scene/post";
+import { WorldProps } from "./scene/props";
+import { Sky } from "./scene/sky";
+import { ViewModel, WeaponDrops } from "./scene/weapons";
+
+export type Mode = "attract" | "solo" | "online";
+
+export type FeedItem = { id: number; text: string; at: number };
+
+export type HudState = {
+  mode: Mode;
+  connecting: boolean;
+  notice: string | null;
+  phase: Phase;
+  countdown: number;
+  time: number;
+  tide: number;
+  surge: { nextIn: number; surging: boolean; warning: boolean; grace: boolean; hurry: boolean };
+  above: number;
+  height: number;
+  alive: number;
+  total: number;
+  humans: number;
+  name: string;
+  player: boolean;
+  dead: boolean;
+  breath: number;
+  stamina: number;
+  stones: number;
+  shove: number;
+  underwater: boolean;
+  place: number | null;
+  feed: FeedItem[];
+  results: Placement[];
+  resultsIn: number;
+  locked: boolean;
+  me: number;
+  weapon: { kind: WeaponKind; name: string; uses: number; max: number; hint: string } | null;
+  stagger: number;
+  /* 0..1 while winding up a hammer or flail. */
+  charge: number | null;
+  blocking: boolean;
+  /* Fades from 1 after you land a hit, with what it did. */
+  hitMarker: number;
+  hitText: string | null;
+  prompt: string | null;
+  /* Weapons on the ground, as screen positions (0..1) or edge arrows. */
+  markers: { id: number; x: number; y: number; d: number; off: boolean; angle: number }[];
+  target: { name: string; stagger: number } | null;
+  music: boolean;
+};
+
+type Sample = {
+  t: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  flags: number;
+};
+type Remote = {
+  avatar: Avatar;
+  buf: Sample[];
+  name: string;
+  alive: boolean;
+  human: boolean;
+  stagger: number;
+};
+
+type World = {
+  terrain: Terrain;
+  group: THREE.Group;
+  water: THREE.Mesh;
+  props: WorldProps;
+  drops: WeaponDrops;
+};
+
+const STEP = 1 / 60;
+const BASE_FOV = 76;
+
+function disposeTree(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    m.geometry?.dispose();
+    const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+    if (Array.isArray(mat)) for (const x of mat) x.dispose();
+    else mat?.dispose();
+  });
+}
+
+export class Game {
+  readonly input: Input;
+  readonly touch: boolean;
+  /* Dev/test only: treat input as live without pointer lock. */
+  forceActive = false;
+  private renderer: THREE.WebGLRenderer;
+  private scene = new THREE.Scene();
+  private camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.08, 3000);
+  private post = new PostPass();
+  private sky = new Sky();
+  private audio = new TideAudio();
+  private viewmodel = new ViewModel();
+  private world: World | null = null;
+  private conn: Connection | null = null;
+  private mode: Mode = "attract";
+  private connecting = false;
+  private notice: string | null = null;
+  private noticeUntil = 0;
+
+  private myId = -1;
+  private myName = "";
+  private round: RoundInfo | null = null;
+  private body: Body | null = null;
+  private alive = false;
+  private breath = 100;
+  private stones = 0;
+  private weapon: Held | null = null;
+  private stagger = 0;
+  private chargeStart: number | null = null;
+  private blocking = false;
+  private sentStance = { block: false, charge: false };
+  private combo = 0;
+  private lastSwingAt = 0;
+  private hitMarker = 0;
+  private hitText: string | null = null;
+  private finalCued = false;
+  private place: number | null = null;
+  private remotes = new Map<number, Remote>();
+  private aliveCount = 0;
+  private humans = 0;
+  private feed: FeedItem[] = [];
+  private feedId = 0;
+
+  /* Clock: round time ≈ performance.now()/1000 + offset. */
+  private offset = 0;
+  private haveClock = false;
+  private snapTide = 0;
+  private phaseEndsAt = 0;
+
+  private acc = 0;
+  private sendAcc = 0;
+  private stepDist = 0;
+  private attackReadyAt = 0;
+  private kick = 0;
+  private dip = 0;
+  private flash = 0;
+  private bob = 0;
+  private bobAmp = 0;
+  private smoothEye = 0;
+  private under = 0;
+  private fov = BASE_FOV;
+  private ghost = new THREE.Vector3();
+  private lastWarning = false;
+  private lastSurging = false;
+  private lastCount = -1;
+  private wasUnder = false;
+
+  private raf = 0;
+  private last = performance.now();
+  private hudAcc = 0;
+  private visible = true;
+  private pixelRatio = 1;
+  private slowFrames = 0;
+  private resize: ResizeObserver;
+  private intersect: IntersectionObserver;
+  private disposed = false;
+  private lockHandler = () => this.onLockChange();
+  private visHandler = () => this.onVisibility();
+
+  constructor(
+    private container: HTMLElement,
+    private onHud: (state: HudState) => void,
+  ) {
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: false,
+      powerPreference: "high-performance",
+    });
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.autoClear = true;
+    const canvas = this.renderer.domElement;
+    canvas.style.display = "block";
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    canvas.style.touchAction = "none";
+    container.appendChild(canvas);
+
+    this.touch = matchMedia("(pointer: coarse)").matches;
+    this.input = new Input(canvas);
+    this.scene.add(this.sky.group);
+
+    this.resize = new ResizeObserver(() => this.fit());
+    this.resize.observe(container);
+    this.intersect = new IntersectionObserver(([entry]) => {
+      this.visible = entry.isIntersecting;
+      this.conn?.setPaused(this.shouldPause());
+    });
+    this.intersect.observe(container);
+    document.addEventListener("pointerlockchange", this.lockHandler);
+    document.addEventListener("visibilitychange", this.visHandler);
+    this.fit();
+    this.start("attract");
+    this.raf = requestAnimationFrame(this.frame);
+  }
+
+  get canvas() {
+    return this.renderer.domElement;
+  }
+
+  /* ---------- lifecycle ---------- */
+
+  start(mode: Mode) {
+    this.conn?.close();
+    this.conn = null;
+    this.reset();
+    this.mode = mode;
+    if (mode !== "attract") this.audio.start();
+
+    const handlers = {
+      message: (msg: ServerMsg) => this.onMessage(msg),
+      closed: (reason: string) => {
+        if (this.mode !== "online" || this.disposed) return;
+        this.say(`${reason}. Playing solo instead.`, 5);
+        this.start("solo");
+      },
+    };
+
+    if (mode === "online") {
+      const base = serverBase();
+      if (!base) {
+        this.say("Online play isn't available right now. Playing solo.", 5);
+        this.start("solo");
+        return;
+      }
+      this.connecting = true;
+      this.conn = new WsConnection(base, handlers);
+    } else {
+      this.conn = new LocalConnection(mode, handlers);
+    }
+    this.emitHud();
+  }
+
+  private reset() {
+    for (const r of this.remotes.values()) {
+      this.scene.remove(r.avatar.group);
+      r.avatar.dispose();
+    }
+    this.remotes.clear();
+    this.round = null;
+    this.body = null;
+    this.alive = false;
+    this.weapon = null;
+    this.stagger = 0;
+    this.chargeStart = null;
+    this.blocking = false;
+    this.place = null;
+    this.feed = [];
+    this.haveClock = false;
+    this.myId = -1;
+    this.lastWarning = this.lastSurging = false;
+    this.input.clear();
+  }
+
+  lock() {
+    if (this.touch) return;
+    this.audio.start();
+    this.input.lock();
+  }
+
+  setMuted(muted: boolean) {
+    this.audio.setMuted(muted);
+  }
+
+  toggleMusic() {
+    this.audio.setMusic(!this.audio.musicOn);
+    this.emitHud();
+  }
+
+  private shouldPause() {
+    if (!this.visible || document.hidden) return true;
+    /* Solo waits for you when you let go of the mouse. */
+    return (
+      this.mode === "solo" && !this.touch && !this.input.locked && this.round?.phase === "playing"
+    );
+  }
+
+  private onLockChange() {
+    this.conn?.setPaused(this.shouldPause());
+    if (!this.input.locked) this.input.clear();
+    this.emitHud();
+  }
+
+  private onVisibility() {
+    this.conn?.setPaused(this.shouldPause());
+    if (document.hidden) this.audio.suspend();
+    else if (this.mode !== "attract") this.audio.resume();
+  }
+
+  private fit() {
+    const w = Math.max(1, this.container.clientWidth);
+    const h = Math.max(1, this.container.clientHeight);
+    this.pixelRatio = Math.min(window.devicePixelRatio || 1, this.slowFrames > 90 ? 1 : 1.75);
+    this.renderer.setPixelRatio(this.pixelRatio);
+    this.renderer.setSize(w, h, false);
+    this.post.setSize(Math.floor(w * this.pixelRatio), Math.floor(h * this.pixelRatio));
+    this.sky.setPixelRatio(this.pixelRatio);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+  }
+
+  dispose() {
+    this.disposed = true;
+    cancelAnimationFrame(this.raf);
+    this.conn?.close();
+    this.reset();
+    this.resize.disconnect();
+    this.intersect.disconnect();
+    document.removeEventListener("pointerlockchange", this.lockHandler);
+    document.removeEventListener("visibilitychange", this.visHandler);
+    this.input.dispose();
+    this.audio.close();
+    this.viewmodel.dispose();
+    this.dropWorld();
+    this.sky.dispose();
+    this.post.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+  }
+
+  private say(text: string, seconds: number) {
+    this.notice = text;
+    this.noticeUntil = performance.now() / 1000 + seconds;
+  }
+
+  private pushFeed(text: string) {
+    this.feed.push({ id: this.feedId++, text, at: performance.now() / 1000 });
+    if (this.feed.length > 5) this.feed.shift();
+  }
+
+  /* ---------- world ---------- */
+
+  private dropWorld() {
+    if (!this.world) return;
+    this.scene.remove(this.world.group);
+    this.world.props.dispose();
+    this.world.group.remove(this.world.props.group);
+    this.world.drops.dispose();
+    this.world.group.remove(this.world.drops.group);
+    disposeTree(this.world.group);
+    this.world = null;
+  }
+
+  private buildWorld(seed: number) {
+    this.dropWorld();
+    const terrain = new Terrain(seed);
+    const group = new THREE.Group();
+    group.add(createTerrainMesh(terrain));
+    const water = createWater(terrain);
+    group.add(water);
+    const props = new WorldProps(terrain);
+    group.add(props.group);
+    const drops = new WeaponDrops();
+    group.add(drops.group);
+    this.scene.add(group);
+    this.world = { terrain, group, water, props, drops };
+  }
+
+  /* ---------- networking ---------- */
+
+  private roundTime() {
+    return performance.now() / 1000 + this.offset;
+  }
+
+  private tideNow() {
+    const r = this.round;
+    if (!r || r.phase !== "playing" || !this.haveClock) return this.snapTide;
+    return tideAt(this.roundTime(), r.hurryFrom ?? Number.POSITIVE_INFINITY, HURRY_RATE);
+  }
+
+  private nameOf(id: number | null) {
+    if (id === null) return null;
+    if (id === this.myId) return "you";
+    return (
+      this.remotes.get(id)?.name ?? this.round?.roster.find((r) => r.id === id)?.name ?? "someone"
+    );
+  }
+
+  private onMessage(msg: ServerMsg) {
+    switch (msg.t) {
+      case "welcome":
+        this.myId = msg.id;
+        this.myName = msg.name;
+        this.connecting = false;
+        if (this.mode === "online") this.pushFeed(`You are ${msg.name}`);
+        break;
+      case "full":
+        this.say("The online island is full. Playing solo.", 5);
+        this.start("solo");
+        break;
+      case "round":
+        this.onRound(msg);
+        break;
+      case "snap":
+        this.onSnap(msg);
+        break;
+      case "impulse": {
+        const b = this.body;
+        if (!b || !this.alive) break;
+        b.vx += msg.vx;
+        b.vz += msg.vz;
+        b.vy = Math.max(b.vy, msg.vy);
+        b.grounded = false;
+        b.ladderCooldown = 0.6;
+        this.flash = 1;
+        this.kick = 1;
+        this.audio.shoved();
+        navigator.vibrate?.(60);
+        break;
+      }
+      case "lift": {
+        const b = this.body;
+        if (!b) break;
+        b.y = Math.max(b.y, msg.y);
+        b.vy = 0;
+        b.grounded = true;
+        break;
+      }
+      case "pillar": {
+        if (!this.round || !this.world) break;
+        this.round.pillars.push(msg.pillar);
+        this.world.props.addPillar(msg.pillar, true);
+        if (this.distanceTo(msg.pillar.x, msg.pillar.z) < 45) this.audio.pillar();
+        break;
+      }
+      case "cairn":
+        this.round?.cairnsTaken.push(msg.id);
+        this.world?.props.setCairnTaken(msg.id, true);
+        if (msg.by === this.myId) {
+          this.audio.cairn();
+          this.pushFeed("You picked up a stone");
+        }
+        break;
+      case "swing":
+        if (msg.by !== this.myId) {
+          const r = this.remotes.get(msg.by);
+          r?.avatar.strike();
+          const s = r?.buf[r.buf.length - 1];
+          if (s && this.distanceTo(s.x, s.z) < 20) this.audio.swing(msg.kind, msg.heavy);
+        }
+        break;
+      case "hit":
+        this.onHit(msg);
+        break;
+      case "wspawn":
+        this.world?.drops.add(msg.weapon);
+        this.round?.weapons.push(msg.weapon);
+        break;
+      case "wtake": {
+        const w = this.world?.drops.list().find((d) => d.id === msg.id);
+        this.world?.drops.remove(msg.id);
+        if (this.round) this.round.weapons = this.round.weapons.filter((d) => d.id !== msg.id);
+        if (msg.by === this.myId && w) {
+          this.weapon = { kind: w.kind, uses: w.uses };
+          this.chargeStart = null;
+          this.audio.pickup();
+          this.pushFeed(`You picked up the ${WEAPONS[w.kind].name.toLowerCase()}`);
+        }
+        break;
+      }
+      case "wbreak":
+        if (msg.by === this.myId) {
+          this.weapon = null;
+          this.chargeStart = null;
+          this.audio.broke();
+          this.pushFeed(`Your ${WEAPONS[msg.kind].name.toLowerCase()} broke`);
+        }
+        break;
+      case "out": {
+        const who = this.nameOf(msg.id);
+        const by = this.nameOf(msg.by);
+        if (msg.id === this.myId) {
+          this.alive = false;
+          this.place = msg.place;
+          this.audio.drowned();
+          this.ghost.copy(this.camera.position);
+          this.pushFeed(by ? `${by} pushed you under` : "You were swept away");
+        } else {
+          const r = this.remotes.get(msg.id);
+          if (r) r.alive = false;
+          this.pushFeed(by ? `${by} drowned ${who}` : `${who} was swept away`);
+        }
+        break;
+      }
+      case "feed":
+        this.pushFeed(msg.text);
+        break;
+    }
+  }
+
+  private onRound(info: RoundInfo) {
+    const prev = this.round;
+    const fresh = !prev || prev.seed !== info.seed;
+    this.round = info;
+    this.phaseEndsAt = info.phaseEndsIn >= 0 ? performance.now() / 1000 + info.phaseEndsIn : 0;
+    this.offset = info.time - performance.now() / 1000;
+    this.haveClock = true;
+
+    if (fresh) {
+      this.buildWorld(info.seed);
+      this.place = null;
+    }
+    const world = this.world!;
+    for (const p of info.pillars) world.props.addPillar(p, false);
+    for (const id of info.cairnsTaken) world.props.setCairnTaken(id, true);
+    world.drops.clear();
+    for (const w of info.weapons) world.drops.add(w);
+    if (info.phase !== "playing") this.finalCued = false;
+
+    if (info.you.spawn) {
+      const s = info.you.spawn;
+      this.body = createBody(s.x, s.y, s.z, s.yaw);
+      this.input.yaw = s.yaw;
+      this.input.pitch = -0.05;
+      this.alive = true;
+      this.breath = 100;
+      this.place = null;
+      this.smoothEye = s.y + EYE_HEIGHT;
+    } else if (!info.you.player) {
+      this.body = null;
+      this.alive = false;
+    }
+
+    /* Avatars for everyone in the round but me. */
+    const ids = new Set(info.roster.map((r) => r.id));
+    for (const [id, r] of this.remotes) {
+      if (!ids.has(id) || id === this.myId || fresh) {
+        this.scene.remove(r.avatar.group);
+        r.avatar.dispose();
+        this.remotes.delete(id);
+      }
+    }
+    for (const entry of info.roster) {
+      if (entry.id === this.myId || this.remotes.has(entry.id)) continue;
+      const avatar = new Avatar(entry.id, entry.name);
+      avatar.group.visible = false;
+      this.scene.add(avatar.group);
+      this.remotes.set(entry.id, {
+        avatar,
+        buf: [],
+        name: entry.name,
+        alive: true,
+        human: !entry.bot,
+        stagger: 0,
+      });
+    }
+
+    if (info.phase === "results" && prev?.phase !== "results") {
+      const mine = info.results.find((r) => r.id === this.myId);
+      if (mine) {
+        this.place = mine.place;
+        if (mine.place === 1) this.audio.win();
+      }
+    }
+    this.emitHud();
+  }
+
+  private onSnap(msg: Extract<ServerMsg, { t: "snap" }>) {
+    const now = performance.now() / 1000;
+    const sample = msg.time - now;
+    if (!this.haveClock || Math.abs(sample - this.offset) > 0.75) this.offset = sample;
+    else this.offset += (sample - this.offset) * 0.08;
+    this.haveClock = true;
+    this.snapTide = msg.tide;
+
+    let alive = 0;
+    let humans = 0;
+    for (const p of msg.p as PlayerSnap[]) {
+      const [id, x, y, z, yaw, pitch, flags, , weapon, stagger] = p;
+      if (flags & FLAG.alive) alive++;
+      const r = this.remotes.get(id);
+      if (!r) continue;
+      if (r.human) humans++;
+      r.alive = (flags & FLAG.alive) !== 0;
+      r.stagger = stagger ?? 0;
+      r.avatar.setGear(weaponFromIndex(weapon ?? 0), r.stagger);
+      r.buf.push({ t: msg.time, x, y, z, yaw, pitch, flags });
+      if (r.buf.length > 12) r.buf.shift();
+    }
+    this.aliveCount = alive;
+    this.humans = humans + (this.round?.you.player ? 1 : 0);
+    /* Two left, and you're one of them: the music knows. */
+    if (alive === 2 && this.alive && this.round?.phase === "playing" && !this.finalCued) {
+      this.finalCued = true;
+      this.audio.stinger("final");
+    }
+
+    if (msg.me) {
+      this.breath = msg.me.breath;
+      this.stones = msg.me.stones;
+      this.weapon = msg.me.weapon;
+      this.stagger = msg.me.stagger;
+      if (!msg.me.alive && this.alive && this.round?.phase === "playing") {
+        this.alive = false;
+        this.ghost.copy(this.camera.position);
+      }
+    }
+  }
+
+  private onHit(msg: Extract<ServerMsg, { t: "hit" }>) {
+    const target = this.remotes.get(msg.target);
+    if (target) target.stagger = msg.stagger;
+    if (msg.target === this.myId) {
+      this.stagger = msg.stagger;
+      if (msg.blocked || msg.parry) this.audio.clang(msg.parry);
+      else this.audio.hit(msg.kind, msg.heavy);
+      return;
+    }
+    if (msg.by === this.myId) {
+      this.hitMarker = 1;
+      this.hitText = msg.parry ? "Parried" : msg.blocked ? "Blocked" : `+${msg.added}%`;
+      if (msg.blocked || msg.parry) this.audio.clang(msg.parry);
+      else this.audio.hit(msg.kind, msg.heavy);
+      return;
+    }
+    const s = target?.buf[target.buf.length - 1];
+    if (!s) return;
+    const near = 1 - this.distanceTo(s.x, s.z) / 30;
+    if (near <= 0) return;
+    if (msg.blocked || msg.parry) this.audio.clang(msg.parry);
+    else this.audio.hit(msg.kind, msg.heavy, near);
+  }
+
+  private foeInReach(b: Body, reach: number) {
+    const fx = -Math.sin(b.yaw);
+    const fz = -Math.cos(b.yaw);
+    for (const r of this.remotes.values()) {
+      if (!r.alive || !r.avatar.group.visible) continue;
+      const p = r.avatar.group.position;
+      const dx = p.x - b.x;
+      const dz = p.z - b.z;
+      const d = Math.hypot(dx, dz);
+      if (d < reach + 0.3 && Math.abs(p.y - b.y) < 2 && (dx * fx + dz * fz) / (d || 1) > 0.4)
+        return true;
+    }
+    return false;
+  }
+
+  /* Is there a wall or cliff right in front, worth a pickaxe? */
+  private wallAhead(b: Body) {
+    const world = this.world;
+    if (!world) return false;
+    const fx = -Math.sin(b.yaw);
+    const fz = -Math.cos(b.yaw);
+    for (const d of [0.65, 1]) {
+      const px = b.x + fx * d;
+      const pz = b.z + fz * d;
+      if (world.terrain.heightAt(px, pz) > b.y + 0.8) return true;
+      const solids = [...world.terrain.solidsNear(px, pz), ...(this.round?.pillars ?? [])];
+      for (const s of solids) {
+        if (s.bottom < b.y + 1.4 && s.top > b.y + 0.9 && overSolid(s, px, pz)) return true;
+      }
+    }
+    return false;
+  }
+
+  private tryAttack(b: Body, charge: number) {
+    const now = performance.now() / 1000;
+    if (now < this.attackReadyAt) return;
+    const kind = this.weapon?.kind ?? null;
+    const def = weaponDef(kind);
+    this.attackReadyAt = now + def.cooldown;
+    let heavy = false;
+    if (kind === "sword") {
+      this.combo = now - this.lastSwingAt < COMBO_WINDOW ? this.combo + 1 : 1;
+      if (this.combo >= 3) {
+        heavy = true;
+        this.combo = 0;
+      }
+    }
+    this.lastSwingAt = now;
+    /* A pickaxe swung at a wall hauls you up it, unless there's someone to hit. */
+    const climb = kind === "pickaxe" && !this.foeInReach(b, def.reach) && this.wallAhead(b);
+    if (climb) {
+      b.vy = Math.max(b.vy, 10.5);
+      b.vx += -Math.sin(b.yaw) * 2.5;
+      b.vz += -Math.cos(b.yaw) * 2.5;
+      b.grounded = false;
+      b.stamina = Math.max(0, b.stamina - 8);
+    }
+    this.conn?.send({ t: "attack", charge, climb });
+    this.viewmodel.swing(heavy);
+    this.audio.swing(kind, heavy);
+    this.kick = kind ? -0.3 : -0.6;
+  }
+
+  private distanceTo(x: number, z: number) {
+    return Math.hypot(this.camera.position.x - x, this.camera.position.z - z);
+  }
+
+  /* ---------- frame ---------- */
+
+  private frame = (now: number) => {
+    this.raf = requestAnimationFrame(this.frame);
+    const dt = Math.min(0.1, (now - this.last) / 1000);
+    this.last = now;
+    if (!this.visible || document.hidden) return;
+
+    if (dt > 1 / 40) this.slowFrames++;
+    else this.slowFrames = Math.max(0, this.slowFrames - 1);
+    if (this.slowFrames === 91) this.fit();
+
+    const t = now / 1000;
+    shared.uTime.value = t;
+    const tide = this.tideNow();
+    shared.uTide.value = tide;
+
+    this.update(dt, tide);
+
+    if (this.world) {
+      this.world.water.position.y = tide;
+      this.world.props.update(t, tide);
+      this.world.drops.update(t);
+    }
+    const holding = this.playing() ? (this.weapon?.kind ?? null) : null;
+    this.viewmodel.set(holding);
+    const def = weaponDef(holding);
+    this.viewmodel.update(dt, {
+      aspect: this.camera.aspect,
+      bob: this.bob,
+      bobAmp: this.bobAmp,
+      charge:
+        this.chargeStart !== null && def.charge
+          ? Math.min(1, (performance.now() / 1000 - this.chargeStart) / def.charge.max)
+          : null,
+      blocking: this.blocking,
+      kick: this.kick,
+    });
+    this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
+    this.updateRemotes(dt);
+    this.sky.follow(this.camera);
+
+    const under = this.camera.position.y < tide + 0.05 ? 1 : 0;
+    this.under += (under - this.under) * Math.min(1, dt * 10);
+    const u = this.post.uniforms;
+    u.uTime.value = t;
+    u.uUnder.value = this.under;
+    u.uBreath.value = this.playing() ? clamp(this.breath / 70, 0, 1) : 1;
+    u.uFlash.value = this.flash;
+    this.flash = Math.max(0, this.flash - dt * 3.5);
+    u.uFade.value = this.world ? 1 : 0;
+    this.post.render(
+      this.renderer,
+      this.scene,
+      this.camera,
+      this.viewmodel.visible ? this.viewmodel : undefined,
+    );
+
+    this.hudAcc += dt;
+    if (this.hudAcc > 0.08) {
+      this.hudAcc = 0;
+      this.emitHud();
+    }
+  };
+
+  private playing() {
+    return this.round?.phase === "playing" && this.alive && !!this.body;
+  }
+
+  private update(dt: number, tide: number) {
+    const r = this.round;
+    const world = this.world;
+    const active = this.touch || this.input.locked || this.forceActive;
+
+    if (r && world && this.body && this.round?.you.player && this.alive) {
+      const b = this.body;
+      b.yaw = this.input.yaw;
+
+      if (r.phase === "playing") {
+        const def = weaponDef(this.weapon?.kind ?? null);
+        this.blocking = this.weapon?.kind === "shield" && active && this.input.altHeld;
+        const charging = this.chargeStart !== null;
+        const intent = active
+          ? {
+              forward: this.input.forward,
+              right: this.input.right,
+              jump: this.input.take("jump") || this.input.jumpHeld,
+              sprint: this.input.sprint,
+              speedScale: (def.speed ?? 1) * (this.blocking ? 0.6 : 1),
+              noSprint: charging || this.blocking,
+            }
+          : { forward: 0, right: 0, jump: false, sprint: false };
+
+        this.acc += dt;
+        const stepWorld = { terrain: world.terrain, pillars: r.pillars, tide };
+        while (this.acc >= STEP) {
+          this.acc -= STEP;
+          const ev = stepBody(b, intent, STEP, stepWorld);
+          if (ev.jumped) this.audio.jump();
+          if (ev.landed > 3) {
+            this.audio.land(ev.landed);
+            this.dip = Math.min(1, ev.landed / 14);
+          }
+          if (ev.enteredWater) this.audio.splash(0.7);
+          if (b.grounded) {
+            this.stepDist += ev.moved;
+            const stride = b.sprinting ? 2.6 : 2.1;
+            if (this.stepDist > stride) {
+              this.stepDist = 0;
+              this.audio.step(b.y < tide);
+            }
+          }
+          this.bob += ev.moved * (b.grounded ? 1.9 : 0);
+        }
+        const speed = Math.hypot(b.vx, b.vz);
+        this.bobAmp = lerp(
+          this.bobAmp,
+          b.grounded ? Math.min(1, speed / 9) : 0,
+          Math.min(1, dt * 8),
+        );
+
+        /* Attack: instant swings on press; hammers and flails charge until release. */
+        const now = performance.now() / 1000;
+        if (this.input.take("attack") && !this.blocking) {
+          if (def.charge) {
+            if (now >= this.attackReadyAt) this.chargeStart = now;
+          } else this.tryAttack(b, 0);
+        }
+        if (this.input.take("attackUp") && this.chargeStart !== null) {
+          this.tryAttack(b, now - this.chargeStart);
+          this.chargeStart = null;
+        }
+        if (!def.charge) this.chargeStart = null;
+        if (this.input.take("alt") && this.weapon?.kind !== "shield" && this.stones > 0)
+          this.conn?.send({ t: "stone" });
+        this.input.take("altUp");
+        if (this.input.take("stone") && this.stones > 0) this.conn?.send({ t: "stone" });
+        if (this.input.take("pick")) this.conn?.send({ t: "pick" });
+        const stance = { block: this.blocking, charge: this.chargeStart !== null };
+        if (stance.block !== this.sentStance.block || stance.charge !== this.sentStance.charge) {
+          this.sentStance = stance;
+          this.conn?.send({ t: "stance", ...stance });
+        }
+
+        this.sendAcc += dt;
+        if (this.sendAcc >= 1 / TICK_HZ) {
+          this.sendAcc = 0;
+          this.conn?.send({
+            t: "move",
+            x: b.x,
+            y: b.y,
+            z: b.z,
+            yaw: b.yaw,
+            pitch: this.input.pitch,
+            vx: b.vx,
+            vy: b.vy,
+            vz: b.vz,
+            flags:
+              (b.sprinting ? FLAG.sprint : 0) |
+              (b.grounded ? FLAG.grounded : 0) |
+              (b.y < tide ? FLAG.wet : 0),
+          });
+        }
+
+        const depth = tide - b.y;
+        if (depth > FLOAT_DEPTH - 0.2 && !this.wasUnder) this.audio.splash(1);
+        this.wasUnder = depth > FLOAT_DEPTH - 0.2;
+        if (this.breath < 40) this.audio.heartbeat(lerp(0.45, 1.1, this.breath / 40));
+      } else {
+        this.dropInputs();
+        this.bobAmp = 0;
+      }
+      this.firstPerson(dt, b);
+    } else if (r && world && this.round?.you.player && !this.alive) {
+      this.ghostCamera(dt, tide);
+    } else {
+      this.orbitCamera(dt);
+    }
+
+    if (this.input.take("music")) this.toggleMusic();
+    this.cues();
+
+    const above = this.camera.position.y - tide;
+    this.audio.ambience(above, this.under > 0.5, this.camera.position.y);
+  }
+
+  private dropInputs() {
+    for (const a of ["attack", "attackUp", "alt", "altUp", "stone", "pick", "jump"] as const)
+      this.input.take(a);
+    this.chargeStart = null;
+  }
+
+  private firstPerson(dt: number, b: Body) {
+    const eye = b.y + EYE_HEIGHT;
+    if (eye > this.smoothEye && eye - this.smoothEye < 5) {
+      this.smoothEye += (eye - this.smoothEye) * Math.min(1, dt * 16);
+    } else this.smoothEye = eye;
+
+    this.dip = Math.max(0, this.dip - dt * 3);
+    this.kick += (0 - this.kick) * Math.min(1, dt * 7);
+    const bobY = Math.abs(Math.sin(this.bob * 0.5)) * 0.07 * this.bobAmp;
+    const bobX = Math.sin(this.bob * 0.5) * 0.04 * this.bobAmp;
+
+    this.camera.position.set(b.x, this.smoothEye + bobY - this.dip * 0.35, b.z);
+    this.camera.rotation.set(
+      this.input.pitch - this.kick * 0.06 - this.dip * 0.05,
+      this.input.yaw,
+      bobX * 0.3,
+      "YXZ",
+    );
+    this.camera.translateX(bobX);
+
+    const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + Math.abs(this.kick) * 4;
+    this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
+    this.setFov(this.fov);
+  }
+
+  /* After drowning you drift free, a ghost over the water. */
+  private ghostCamera(dt: number, tide: number) {
+    const active = this.touch || this.input.locked || this.forceActive;
+    const speed = this.input.sprint ? 30 : 13;
+    const dir = new THREE.Vector3();
+    if (active) {
+      const f = this.input.forward;
+      const s = this.input.right;
+      const yaw = this.input.yaw;
+      const pitch = this.input.pitch;
+      dir.set(
+        -Math.sin(yaw) * Math.cos(pitch) * f + Math.cos(yaw) * s,
+        Math.sin(pitch) * f + (this.input.jumpHeld ? 1 : 0) - (this.input.down ? 1 : 0),
+        -Math.cos(yaw) * Math.cos(pitch) * f - Math.sin(yaw) * s,
+      );
+    }
+    this.dropInputs();
+    this.ghost.addScaledVector(dir, speed * dt);
+    /* Float up out of the water on death. */
+    const floor = Math.max(
+      tide + 1.5,
+      (this.world?.terrain.heightAt(this.ghost.x, this.ghost.z) ?? 0) + 1.2,
+    );
+    if (this.ghost.y < floor) this.ghost.y += (floor - this.ghost.y) * Math.min(1, dt * 2);
+    this.ghost.x = clamp(this.ghost.x, -BOUNDARY * 1.5, BOUNDARY * 1.5);
+    this.ghost.z = clamp(this.ghost.z, -BOUNDARY * 1.5, BOUNDARY * 1.5);
+    this.ghost.y = Math.min(this.ghost.y, 140);
+    this.camera.position.copy(this.ghost);
+    this.camera.rotation.set(this.input.pitch, this.input.yaw, 0, "YXZ");
+    this.fov += (BASE_FOV - this.fov) * Math.min(1, dt * 4);
+    this.setFov(this.fov);
+  }
+
+  private orbitCamera(dt: number) {
+    const world = this.world;
+    if (!world) return;
+    const t = performance.now() / 1000;
+    const lh = world.terrain.lighthouse;
+    const a = t * 0.03;
+    const radius = 210;
+    const target = new THREE.Vector3(lh.x * 0.5, lh.y * 0.4, lh.z * 0.5);
+    this.camera.position.set(
+      target.x + Math.cos(a) * radius,
+      lh.y * 0.55 + 52 + Math.sin(t * 0.07) * 8,
+      target.z + Math.sin(a) * radius,
+    );
+    this.camera.lookAt(target);
+    this.fov += (58 - this.fov) * Math.min(1, dt * 3);
+    this.setFov(this.fov);
+  }
+
+  private setFov(fov: number) {
+    if (Math.abs(this.camera.fov - fov) < 0.01) return;
+    this.camera.fov = fov;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /* Horn before a surge, the swell itself, and the countdown ticks. */
+  private cues() {
+    const r = this.round;
+    if (!r || this.mode === "attract") return;
+    if (r.phase === "countdown") {
+      const n = Math.ceil(this.phaseEndsAt - performance.now() / 1000);
+      if (n !== this.lastCount && n > 0 && n <= 5) this.audio.tick();
+      this.lastCount = n;
+      return;
+    }
+    if (r.phase !== "playing") return;
+    const p = tidePhase(this.roundTime());
+    if (p.warning && !this.lastWarning) this.audio.horn();
+    if (p.surging && !this.lastSurging && !p.grace) this.audio.surge();
+    this.lastWarning = p.warning;
+    this.lastSurging = p.surging;
+  }
+
+  private updateRemotes(dt: number) {
+    const delay = this.mode === "online" ? 0.12 : 0.07;
+    const t = this.roundTime() - delay;
+    for (const r of this.remotes.values()) {
+      const buf = r.buf;
+      if (!buf.length || !r.alive) {
+        r.avatar.group.visible = false;
+        continue;
+      }
+      let a = buf[0];
+      let b = buf[0];
+      for (let i = buf.length - 1; i >= 0; i--) {
+        if (buf[i].t <= t) {
+          a = buf[i];
+          b = buf[Math.min(i + 1, buf.length - 1)];
+          break;
+        }
+      }
+      const span = b.t - a.t;
+      const k = span > 0 ? clamp((t - a.t) / span, 0, 1) : 1;
+      let dyaw = b.yaw - a.yaw;
+      if (dyaw > Math.PI) dyaw -= Math.PI * 2;
+      if (dyaw < -Math.PI) dyaw += Math.PI * 2;
+      r.avatar.group.visible = true;
+      r.avatar.setPose(
+        lerp(a.x, b.x, k),
+        lerp(a.y, b.y, k),
+        lerp(a.z, b.z, k),
+        a.yaw + dyaw * k,
+        lerp(a.pitch, b.pitch, k),
+        b.flags,
+        dt,
+        this.camera.position,
+      );
+    }
+  }
+
+  /* ---------- HUD ---------- */
+
+  private emitHud() {
+    const r = this.round;
+    const now = performance.now() / 1000;
+    const time = this.haveClock ? this.roundTime() : 0;
+    const p = tidePhase(Math.max(0, time));
+    const tide = this.tideNow();
+    const feet = this.body && this.alive ? this.body.y : this.camera.position.y;
+    if (this.notice && now > this.noticeUntil) this.notice = null;
+    this.feed = this.feed.filter((f) => now - f.at < 7);
+    const playing = this.playing();
+    const def = weaponDef(this.weapon?.kind ?? null);
+    this.audio.intensity(this.musicIntensity(feet, tide, p));
+
+    /* Weapons on the ground: on screen, or an arrow at the edge pointing at them. */
+    const markers: HudState["markers"] = [];
+    if (playing && this.world) {
+      const v = new THREE.Vector3();
+      for (const w of this.world.drops.list()) {
+        const d = this.distanceTo(w.x, w.z);
+        if (d > 170) continue;
+        v.set(w.x, w.y + 1.2, w.z).project(this.camera);
+        const behind = v.z > 1;
+        const off = behind || Math.abs(v.x) > 0.94 || Math.abs(v.y) > 0.9;
+        let ax = behind ? -v.x : v.x;
+        let ay = behind ? -v.y : v.y;
+        if (behind && Math.abs(ax) < 0.01 && Math.abs(ay) < 0.01) ay = -1;
+        const angle = Math.atan2(-ay, ax);
+        if (off) {
+          const k = 1 / Math.max(Math.abs(ax) / 0.94, Math.abs(ay) / 0.9, 1e-6);
+          ax *= k;
+          ay *= k;
+        }
+        markers.push({ id: w.id, x: (ax + 1) / 2, y: (1 - ay) / 2, d, off, angle });
+      }
+    }
+    /* Whoever's under the crosshair, close enough to hit. */
+    let target: HudState["target"] = null;
+    if (playing) {
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+      let best = 0.985;
+      for (const r of this.remotes.values()) {
+        if (!r.alive || !r.avatar.group.visible) continue;
+        const to = r.avatar.group.position.clone();
+        to.y += 1.2;
+        to.sub(this.camera.position);
+        const d = to.length();
+        if (d > 8) continue;
+        const dot = to.normalize().dot(fwd);
+        if (dot > best) {
+          best = dot;
+          target = { name: r.name, stagger: r.stagger };
+        }
+      }
+    }
+    let prompt: string | null = null;
+    if (playing && this.weapon && this.body && this.world) {
+      const near = this.world.drops.nearest(this.body.x, this.body.y, this.body.z, 2);
+      if (near) prompt = `R · swap for the ${WEAPONS[near.kind].name.toLowerCase()}`;
+    }
+
+    this.onHud({
+      mode: this.mode,
+      connecting: this.connecting,
+      notice: this.notice,
+      phase: r?.phase ?? "idle",
+      countdown: r?.phase === "countdown" ? Math.max(0, this.phaseEndsAt - now) : 0,
+      time,
+      tide,
+      surge: { ...p, hurry: r?.hurryFrom != null },
+      above: feet - tide,
+      height: feet,
+      alive: this.aliveCount,
+      total: r?.roster.length ?? 0,
+      humans: this.humans,
+      name: this.myName,
+      player: !!r?.you.player,
+      dead: !!r?.you.player && !this.alive,
+      breath: this.breath,
+      stamina: this.body ? this.body.stamina / STAMINA_MAX : 1,
+      stones: this.stones,
+      shove: clamp((this.attackReadyAt - now) / def.cooldown, 0, 1),
+      underwater: this.under > 0.5,
+      place: this.place,
+      feed: [...this.feed],
+      results: r?.results ?? [],
+      resultsIn: r?.phase === "results" ? Math.max(0, this.phaseEndsAt - now) : 0,
+      locked: this.touch || this.input.locked || this.forceActive,
+      me: this.myId,
+      weapon: this.weapon
+        ? {
+            kind: this.weapon.kind,
+            name: def.name,
+            uses: this.weapon.uses,
+            max: def.uses,
+            hint: def.hint,
+          }
+        : null,
+      stagger: this.stagger,
+      charge:
+        this.chargeStart !== null && def.charge
+          ? Math.min(1, (now - this.chargeStart) / def.charge.max)
+          : null,
+      blocking: this.blocking,
+      hitMarker: this.hitMarker,
+      hitText: this.hitText,
+      prompt,
+      markers,
+      target,
+      music: this.audio.musicOn,
+    });
+  }
+
+  /* How tense the score should be: the sea at your heels, the field thinning out. */
+  private musicIntensity(feet: number, tide: number, p: { warning: boolean; surging: boolean }) {
+    const r = this.round;
+    if (!r || this.mode === "attract") return 0.05;
+    if (r.phase === "countdown") return 0.15;
+    if (r.phase === "results") return 0.2;
+    if (!this.alive) return 0.35;
+    const close = clamp(1 - (feet - tide) / 25, 0, 1);
+    const thinned = clamp(1 - (this.aliveCount - 1) / (MAX_PLAYERS - 1), 0, 1);
+    const surge = p.warning || p.surging ? 0.12 : 0;
+    return clamp(0.15 + close * 0.45 + thinned * 0.35 + surge, 0, 1);
+  }
+}

@@ -1,0 +1,181 @@
+/* One-shot actions; "Up" ones fire on release, so held attacks can charge. */
+export type Action = "jump" | "attack" | "attackUp" | "alt" | "altUp" | "stone" | "pick" | "music";
+
+/*
+ * Keyboard and mouse while the pointer is locked, plus a small API the touch
+ * controls in the HUD call into. One-shot actions queue until the game reads them.
+ */
+export class Input {
+  yaw = 0;
+  pitch = 0;
+  sensitivity = 0.0022;
+  private keys = new Set<string>();
+  private queued = new Set<Action>();
+  private stick = { x: 0, y: 0 };
+  private touchSprint = false;
+  private holdJump = false;
+  private holdAttack = false;
+  private holdAlt = false;
+  private cleanup: (() => void)[] = [];
+
+  constructor(private target: HTMLElement) {
+    const on = <K extends keyof WindowEventMap>(
+      type: K,
+      fn: (e: WindowEventMap[K]) => void,
+      el: Window | Document = window,
+    ) => {
+      el.addEventListener(type, fn as EventListener);
+      this.cleanup.push(() => el.removeEventListener(type, fn as EventListener));
+    };
+
+    on("keydown", (e) => {
+      if (!this.locked) return;
+      this.keys.add(e.code);
+      if (e.repeat) return;
+      if (e.code === "KeyF") this.setAttack(true);
+      if (e.code === "KeyE" || e.code === "KeyQ") this.queued.add("stone");
+      if (e.code === "KeyR") this.queued.add("pick");
+      if (e.code === "KeyN") this.queued.add("music");
+      if (e.code === "Space") this.queued.add("jump");
+      if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
+    });
+    on("keyup", (e) => {
+      this.keys.delete(e.code);
+      if (e.code === "KeyF") this.setAttack(false);
+    });
+    on("blur", () => {
+      this.keys.clear();
+      this.setAttack(false);
+      this.setAlt(false);
+    });
+    on("mousemove", (e) => {
+      if (!this.locked) return;
+      this.look(e.movementX, e.movementY);
+    });
+    on("mousedown", (e) => {
+      if (!this.locked) return;
+      if (e.button === 0) this.setAttack(true);
+      if (e.button === 2) this.setAlt(true);
+    });
+    on("mouseup", (e) => {
+      if (e.button === 0) this.setAttack(false);
+      if (e.button === 2) this.setAlt(false);
+    });
+    on("contextmenu", (e) => {
+      if (this.locked) e.preventDefault();
+    });
+  }
+
+  get locked() {
+    return document.pointerLockElement === this.target;
+  }
+
+  lock() {
+    const el = this.target as HTMLElement & {
+      requestPointerLock: (opts?: { unadjustedMovement?: boolean }) => Promise<void> | void;
+    };
+    try {
+      const result = el.requestPointerLock({ unadjustedMovement: true });
+      if (result instanceof Promise) result.catch(() => el.requestPointerLock());
+    } catch {
+      el.requestPointerLock();
+    }
+  }
+
+  unlock() {
+    if (this.locked) document.exitPointerLock();
+  }
+
+  look(dx: number, dy: number, scale = 1) {
+    /* Browsers occasionally report a huge jump when the lock engages. */
+    if (Math.abs(dx) > 400 || Math.abs(dy) > 400) return;
+    this.yaw -= dx * this.sensitivity * scale;
+    this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - dy * this.sensitivity * scale));
+  }
+
+  /* Dev/test only: hold a key code as if pressed. */
+  hold(code: string, down: boolean) {
+    if (down) this.keys.add(code);
+    else this.keys.delete(code);
+  }
+
+  press(action: Action) {
+    this.queued.add(action);
+  }
+
+  /* Primary attack: press queues a swing (or starts a charge), release lets it go. */
+  setAttack(down: boolean) {
+    if (down === this.holdAttack) return;
+    this.holdAttack = down;
+    this.queued.add(down ? "attack" : "attackUp");
+  }
+
+  /* Secondary: block with a shield, otherwise raise a stone. */
+  setAlt(down: boolean) {
+    if (down === this.holdAlt) return;
+    this.holdAlt = down;
+    this.queued.add(down ? "alt" : "altUp");
+  }
+
+  get attackHeld() {
+    return this.holdAttack;
+  }
+
+  get altHeld() {
+    return this.holdAlt;
+  }
+
+  setStick(x: number, y: number, sprint: boolean) {
+    this.stick = { x, y };
+    this.touchSprint = sprint;
+  }
+
+  setJumpHeld(held: boolean) {
+    this.holdJump = held;
+  }
+
+  take(action: Action) {
+    const had = this.queued.has(action);
+    this.queued.delete(action);
+    return had;
+  }
+
+  clear() {
+    this.keys.clear();
+    this.queued.clear();
+    this.stick = { x: 0, y: 0 };
+    this.holdAttack = false;
+    this.holdAlt = false;
+  }
+
+  get forward() {
+    const k = (this.has("KeyW", "ArrowUp") ? 1 : 0) - (this.has("KeyS", "ArrowDown") ? 1 : 0);
+    return k || -this.stick.y;
+  }
+
+  get right() {
+    const k = (this.has("KeyD", "ArrowRight") ? 1 : 0) - (this.has("KeyA", "ArrowLeft") ? 1 : 0);
+    return k || this.stick.x;
+  }
+
+  get sprint() {
+    return this.has("ShiftLeft", "ShiftRight") || this.touchSprint;
+  }
+
+  get jumpHeld() {
+    return this.has("Space") || this.holdJump;
+  }
+
+  get down() {
+    return this.has("ControlLeft", "KeyC");
+  }
+
+  private has(...codes: string[]) {
+    return codes.some((c) => this.keys.has(c));
+  }
+
+  dispose() {
+    for (const fn of this.cleanup) fn();
+    this.unlock();
+  }
+}
