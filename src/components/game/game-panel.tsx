@@ -3,9 +3,13 @@ import {
   ArrowClockwiseIcon,
   ArrowUpIcon,
   EnvelopeSimpleIcon,
+  DeviceRotateIcon,
   HourglassMediumIcon,
+  MapTrifoldIcon,
   PlayIcon,
   SignOutIcon,
+  SpeakerHighIcon,
+  SpeakerSlashIcon,
   StorefrontIcon,
   UserCircleIcon,
   UserPlusIcon,
@@ -17,6 +21,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
+import { enterLandscape, exitLandscape, usePortrait } from "@/lib/landscape";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
@@ -74,6 +79,7 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [touch, setTouch] = useState(false);
   /* The grand map, over the game (N). */
   const [mapOpen, setMapOpen] = useState(false);
+  const portrait = usePortrait();
   /* The marketplace (K), from the title screen or out on the island. */
   const [marketOpen, setMarketOpen] = useState(false);
   /*
@@ -226,6 +232,8 @@ export function GamePanel(props: { onPress?: () => void }) {
     setAccountOpen(false);
     if (!game) return;
     startedAt.current = performance.now();
+    /* Phones play sideways: fullscreen and locked to landscape, where the browser lets us. */
+    if (touch) void enterLandscape();
     game.start(next);
     game.lock();
   };
@@ -319,6 +327,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     setReloadKey(null);
     game?.input.unlock();
     game?.start("attract");
+    if (touch) exitLandscape();
   };
 
   /* Back in the game (or off it): the reload question is settled. */
@@ -470,7 +479,16 @@ export function GamePanel(props: { onPress?: () => void }) {
         <NameDialog open={nameOpen && !playing} onOpenChange={setNameOpen} email={auth.email} />
       )}
 
-      {playing && touch && game && <TouchControls input={game.input} />}
+      {playing && touch && portrait && <TurnPhone />}
+
+      {playing && touch && game && hud?.player && !hud.down && !hud.panel && (
+        <TouchControls
+          input={game.input}
+          creative={hud.creative}
+          flying={hud.flying}
+          building={!!hud.build}
+        />
+      )}
 
       {menuOpen && (
         <IslandMenu
@@ -491,10 +509,24 @@ export function GamePanel(props: { onPress?: () => void }) {
         on M, which the card lists.
       */}
       {playing && (
-        <div className="absolute top-5 right-5 z-30 flex items-center gap-4 sm:top-6 sm:right-6 sm:gap-6">
+        <div
+          className={cn(
+            "absolute z-30 flex items-center",
+            touch ? "top-3 right-4 gap-4" : "top-5 right-5 gap-4 sm:top-6 sm:right-6 sm:gap-6",
+          )}
+        >
           {/* Online: how many are out here. */}
           {mode === "online" && hud?.name && (
-            <span className={cn(menuText, "text-white/45")}>{hud.humans} online</span>
+            <span
+              className={cn(
+                menuText,
+                "text-white/45",
+                /* Phones: only where it fits beside the belt. */
+                touch && !hud.settling && "hidden min-[760px]:inline",
+              )}
+            >
+              {hud.humans} online
+            </span>
           )}
           {hud?.settling ? (
             <Button variant="menu" size="inline" onClick={leave}>
@@ -503,9 +535,35 @@ export function GamePanel(props: { onPress?: () => void }) {
             </Button>
           ) : touch ? (
             <>
-              {hud?.player && <MarketLink touch onClick={openMarket} />}
-              <Button variant="menu" size="inline" onClick={leave}>
-                Leave
+              {mode === "online" && hud?.player && (
+                <Button
+                  variant="menu"
+                  size="inline"
+                  aria-label={mapOpen ? "Close map" : "Open map"}
+                  onClick={() => setMapOpen((open) => !open)}
+                >
+                  <MapTrifoldIcon size={18} weight={mapOpen ? "fill" : "regular"} />
+                </Button>
+              )}
+              <Button
+                variant="menu"
+                size="inline"
+                aria-label={muted ? "Sound on" : "Sound off"}
+                onClick={toggleMute}
+              >
+                {muted ? (
+                  <SpeakerSlashIcon size={18} weight="fill" />
+                ) : (
+                  <SpeakerHighIcon size={18} weight="fill" />
+                )}
+              </Button>
+              {hud?.player && (
+                <Button variant="menu" size="inline" aria-label="Marketplace" onClick={openMarket}>
+                  <StorefrontIcon size={18} weight="fill" />
+                </Button>
+              )}
+              <Button variant="menu" size="inline" aria-label="Leave" onClick={leave}>
+                <SignOutIcon size={18} weight="bold" />
               </Button>
             </>
           ) : (
@@ -583,6 +641,19 @@ function IslandMenu(props: {
             </Button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* Phones play sideways; held upright, the game waits behind this. */
+function TurnPhone() {
+  return (
+    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-5 bg-black px-8 text-center text-white select-none">
+      <DeviceRotateIcon size={56} weight="light" className="animate-pulse" />
+      <div className="text-lg font-bold">Turn your phone sideways</div>
+      <div className="max-w-64 text-[13px] leading-normal text-[#8a8a8a]">
+        farshore plays in landscape. Unlock rotation if it doesn't turn.
       </div>
     </div>
   );

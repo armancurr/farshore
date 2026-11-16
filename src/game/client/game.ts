@@ -148,6 +148,8 @@ export type HudState = {
   player: boolean;
   /* Creative mode: flying about, and nothing hurts you. */
   creative: boolean;
+  /* Up in the air in creative. */
+  flying: boolean;
   health: number;
   /* Fades from 1 when you get hurt. */
   hurt: number;
@@ -1274,6 +1276,8 @@ export class Game {
       this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
       const charging = this.chargeStart !== null;
       if (active && this.input.take("creative")) this.toggleCreative(b);
+      if (active && this.input.take("fly") && this.creative && !this.boat)
+        this.setFlying(b, !this.flying);
       const tapped = active && this.input.take("jump");
       /* In creative, a double tap of Space takes off or comes down, as in the usual sandbox games. */
       if (tapped && this.creative && !this.boat) {
@@ -1287,7 +1291,7 @@ export class Game {
         forward: active ? this.input.forward : 0,
         right: active ? this.input.right : 0,
         up: active && this.input.jumpHeld,
-        down: active && this.input.sprint,
+        down: active && this.input.descend,
         boost: active && this.input.boost,
       };
       const intent = active
@@ -1446,6 +1450,7 @@ export class Game {
       "rotate",
       "jump",
       "creative",
+      "fly",
     ] as const)
       this.input.take(a);
     this.input.takeDigit();
@@ -2024,6 +2029,7 @@ export class Game {
       name: this.myName,
       player: playing,
       creative: this.creative,
+      flying: this.flying,
       health: this.health,
       hurt: this.hurtFlash,
       down: this.down,

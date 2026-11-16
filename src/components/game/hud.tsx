@@ -208,7 +208,15 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
         Top left, in one column: coins, what the controls do right now (one
         per line), then the feed of what just happened (mode changes, pickups).
       */}
-      <div className="absolute top-5 left-5 flex max-w-[min(18rem,calc(100%-2.5rem))] flex-col items-start gap-4 font-sans text-xs font-bold [text-shadow:0_1px_3px_rgba(0,0,0,0.8)] sm:top-6 sm:left-6">
+      <div
+        className={cn(
+          "absolute flex flex-col items-start gap-4 font-sans text-xs font-bold [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]",
+          /* Phones: a narrow column, clear of the belt in the middle of the top edge. */
+          props.touch
+            ? "top-3 left-4 max-w-[calc(50%-13rem)] gap-2 text-[11px]"
+            : "top-5 left-5 max-w-[min(18rem,calc(100%-2.5rem))] sm:top-6 sm:left-6",
+        )}
+      >
         {h.player && h.economy && (
           <div className="font-mono text-[13px] font-normal tracking-[0.12em] tabular-nums">
             <span className="mr-1.5 text-white/45">◎</span>
@@ -225,7 +233,7 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
         )}
       </div>
       {h.player && h.economy && (
-        <div className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-24" : "top-5")}>
+        <div className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-28" : "top-5")}>
           <ActiveBounty hud={h} />
         </div>
       )}
@@ -249,7 +257,7 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           <div
             className={cn(
               "absolute left-1/2 -translate-x-1/2",
-              props.touch ? "top-5 bottom-auto" : "bottom-6",
+              props.touch ? "top-3 bottom-auto" : "bottom-6",
             )}
           >
             <Belt hud={h} touch={props.touch} onSelect={props.onSelect} />

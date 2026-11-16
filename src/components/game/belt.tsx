@@ -125,7 +125,7 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
       {status && <div className="font-sans text-xs font-bold text-white/70">{status}</div>}
       <div className="pointer-events-auto rounded-[14px] border border-[#242424] bg-[#121212]/90 px-2 pt-[9px] pb-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_24px_48px_-16px_rgba(0,0,0,0.7),0_2px_6px_rgba(0,0,0,0.4)]">
         <Vitals hud={hud} />
-        <div className="flex gap-1 sm:gap-1.5">
+        <div className={cn("flex gap-1", !touch && "sm:gap-1.5")}>
           {build
             ? build.kits.map((kit, i) => {
                 const KitIcon = KIT_ICONS[kit.id];
@@ -134,7 +134,11 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                     key={kit.id}
                     title={kit.name}
                     data-selected={build.index === i}
-                    className={buttonVariants({ variant: "slot", size: "slot" })}
+                    className={cn(
+                      buttonVariants({ variant: "slot", size: "slot" }),
+                      /* Phones: small slots, so the belt fits between the corners. */
+                      touch && "sm:size-[34px]",
+                    )}
                   >
                     <SlotKey n={i + 1} />
                     <KitIcon size={18} weight="fill" />
@@ -152,6 +156,7 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                     key={i}
                     variant="slot"
                     size="slot"
+                    className={cn(touch && "sm:size-[34px]")}
                     aria-label={i === 0 ? "Fists" : (tool?.name ?? `Empty slot ${i + 1}`)}
                     title={i === 0 ? "Fists" : tool?.name}
                     aria-pressed={selected}

@@ -1,14 +1,22 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import type { Input } from "../../game/client/input";
+import type { Action, Input } from "../../game/client/input";
 
 const RADIUS = 52;
 
 /*
- * Phones get a stick on the left, look-by-dragging on the right, and three
- * buttons. All of it feeds the same Input the keyboard does.
+ * Phones get a stick on the left (push it past its edge to run, or rush when
+ * flying), look-by-dragging on the right, and thumb buttons for everything the
+ * keyboard does. The buttons follow what you're about: building swaps Block
+ * and Attack for Take and Place, flying swaps Block for Down. All of it feeds
+ * the same Input the keyboard does.
  */
-export function TouchControls(props: { input: Input }) {
+export function TouchControls(props: {
+  input: Input;
+  creative: boolean;
+  flying: boolean;
+  building: boolean;
+}) {
   const [knob, setKnob] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const stickId = useRef<number | null>(null);
   const lookId = useRef<number | null>(null);
@@ -65,6 +73,72 @@ export function TouchControls(props: { input: Input }) {
     onPointerCancel: () => set(false),
     onPointerLeave: () => set(false),
   });
+  /* A one-off press, as a key would queue it. */
+  const tap = (action: Action) => ({ onPointerDown: () => input.press(action) });
+
+  const { creative, flying, building } = props;
+
+  /*
+   * A button that goes away under a thumb (Block turning into Down, or the
+   * whole set hiding when you go down) never hears it lift: let go for it.
+   */
+  useEffect(
+    () => () => {
+      input.setAttack(false);
+      input.setAlt(false);
+      input.setDownHeld(false);
+      input.setJumpHeld(false);
+    },
+    [input, building, flying],
+  );
+  useEffect(() => () => input.setStick(0, 0, false), [input]);
+  const big = "pointer-events-auto";
+  const small = "pointer-events-auto h-10 w-full";
+  const side = "pointer-events-auto h-10 w-[4.5rem] text-[9px] tracking-[0.12em]";
+
+  /* What the two big thumb buttons do depends on what you're about. */
+  const thumbs = building ? (
+    <>
+      <Button variant="touch" size="touch" className={big} {...hold((on) => input.setAlt(on))}>
+        Take
+      </Button>
+      <Button variant="touch" size="touch" className={big} {...hold((on) => input.setAttack(on))}>
+        Place
+      </Button>
+      <Button variant="touch" size="touch" className={small} {...tap("rotate")}>
+        Turn
+      </Button>
+      <Button variant="touch" size="touch" className={small} {...tap("build")}>
+        Done
+      </Button>
+    </>
+  ) : (
+    <>
+      {flying ? (
+        <Button
+          variant="touch"
+          size="touch"
+          className={big}
+          {...hold((on) => input.setDownHeld(on))}
+        >
+          Down
+        </Button>
+      ) : (
+        <Button variant="touch" size="touch" className={big} {...hold((on) => input.setAlt(on))}>
+          Block
+        </Button>
+      )}
+      <Button variant="touch" size="touch" className={big} {...hold((on) => input.setAttack(on))}>
+        Attack
+      </Button>
+      <Button variant="touch" size="touch" className={small} {...tap("interact")}>
+        Use
+      </Button>
+      <Button variant="touch" size="touch" className={small} {...tap("inventory")}>
+        Pack
+      </Button>
+    </>
+  );
 
   return (
     <div className="absolute inset-0 touch-none select-none">
@@ -88,7 +162,7 @@ export function TouchControls(props: { input: Input }) {
             />
           </div>
         ) : (
-          <div className="pointer-events-none absolute bottom-10 left-10 size-28 rounded-full border border-white/20" />
+          <div className="pointer-events-none absolute bottom-8 left-10 size-28 rounded-full border border-white/20" />
         )}
       </div>
       <div
@@ -98,46 +172,41 @@ export function TouchControls(props: { input: Input }) {
         onPointerUp={lookUp}
         onPointerCancel={lookUp}
       />
-      <div className="pointer-events-none absolute right-5 bottom-8 grid grid-cols-2 gap-3">
+      {/* Modes, beside the thumb buttons: build, creative, and taking off in it. */}
+      <div className="pointer-events-none absolute right-[10.5rem] bottom-4 flex flex-col gap-2">
+        {creative && !building && (
+          <Button variant="touch" size="touch" className={side} {...tap("fly")}>
+            {flying ? "Land" : "Fly"}
+          </Button>
+        )}
         <Button
           variant="touch"
           size="touch"
-          className="pointer-events-auto"
-          {...hold((on) => input.setAlt(on))}
+          className={side}
+          data-on={creative}
+          {...tap("creative")}
         >
-          Block
+          {creative ? "Survival" : "Creative"}
         </Button>
-        <Button
-          variant="touch"
-          size="touch"
-          className="pointer-events-auto"
-          {...hold((on) => input.setAttack(on))}
-        >
-          Attack
-        </Button>
-        <Button
-          variant="touch"
-          size="touch"
-          className="pointer-events-auto h-10 w-full"
-          onPointerDown={() => input.press("interact")}
-        >
-          Use
-        </Button>
-        <Button
-          variant="touch"
-          size="touch"
-          className="pointer-events-auto h-10 w-full"
-          onPointerDown={() => input.press("inventory")}
-        >
-          Pack
-        </Button>
+        {!building && (
+          <Button variant="touch" size="touch" className={side} {...tap("build")}>
+            Build
+          </Button>
+        )}
+      </div>
+      <div className="pointer-events-none absolute right-5 bottom-4 grid grid-cols-2 gap-2.5">
+        {thumbs}
         <Button
           variant="touch"
           size="touch"
           className="pointer-events-auto col-span-2 w-full"
-          {...hold((on) => input.setJumpHeld(on))}
+          {...hold((on) => {
+            input.setJumpHeld(on);
+            /* A tap counts as well, so a quick double tap takes off in creative too. */
+            if (on) input.press("jump");
+          })}
         >
-          Jump
+          {flying ? "Up" : "Jump"}
         </Button>
       </div>
     </div>

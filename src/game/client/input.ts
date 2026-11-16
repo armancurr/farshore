@@ -9,7 +9,9 @@ export type Action =
   | "inventory"
   | "build"
   | "rotate"
-  | "creative";
+  | "creative"
+  /* Creative: take off or come down (the touch button for a double tap of Space). */
+  | "fly";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -24,6 +26,8 @@ export class Input {
   private stick = { x: 0, y: 0 };
   private touchSprint = false;
   private holdJump = false;
+  /* Touch: the Down button while flying. */
+  private holdDown = false;
   private holdAttack = false;
   private holdAlt = false;
   /* The last number key pressed (0-based), and mouse-wheel steps, until read. */
@@ -165,6 +169,10 @@ export class Input {
     this.holdJump = held;
   }
 
+  setDownHeld(held: boolean) {
+    this.holdDown = held;
+  }
+
   /* A number key pressed since the last read, 0-based. */
   takeDigit() {
     const d = this.digit;
@@ -191,6 +199,9 @@ export class Input {
     this.digit = null;
     this.wheel = 0;
     this.stick = { x: 0, y: 0 };
+    this.touchSprint = false;
+    this.holdJump = false;
+    this.holdDown = false;
     this.holdAttack = false;
     this.holdAlt = false;
   }
@@ -209,9 +220,14 @@ export class Input {
     return this.has("ShiftLeft", "ShiftRight") || this.touchSprint;
   }
 
-  /* Double-tap W (and hold it) to go flat out. */
+  /* Double-tap W (and hold it) to go flat out; on a phone, push the stick past its edge. */
   get boost() {
-    return this.boostHeld && this.has("KeyW", "ArrowUp");
+    return (this.boostHeld && this.has("KeyW", "ArrowUp")) || this.touchSprint;
+  }
+
+  /* Flying down: Shift on a keyboard, the Down button on a phone. */
+  get descend() {
+    return this.has("ShiftLeft", "ShiftRight") || this.holdDown;
   }
 
   get jumpHeld() {
