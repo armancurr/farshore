@@ -25,7 +25,6 @@ import {
   type ClientMsg,
   FLAG,
   type GroundWeapon,
-  type Held,
   type HurtCause,
   type PlayerSnap,
   round2,
@@ -33,6 +32,16 @@ import {
   type Spawn,
   type WorldInfo,
 } from "../shared/protocol";
+import {
+  emptyInventory,
+  HOTBAR,
+  heldTool,
+  type Inventory,
+  MAX_TOOLS,
+  type Tool,
+  type ToolKind,
+  TOOLS,
+} from "../shared/items";
 import { Terrain } from "../shared/terrain";
 import {
   COMBO_WINDOW,
@@ -68,7 +77,9 @@ type Member = {
   respawnAt: number | null;
   attackReadyAt: number;
   shoveFlagUntil: number;
-  weapon: Held | null;
+  inv: Inventory;
+  /* Something in the inventory changed; send it at the end of the step. */
+  invDirty: boolean;
   stagger: number;
   lastHitAt: number;
   combo: number;
@@ -116,6 +127,7 @@ export class Room {
   private lastTick: number | null = null;
   private weapons: GroundWeapon[] = [];
   private weaponId = 1;
+  private toolId = 1;
   private nextWeaponAt = 0;
   private pending: PendingHit[] = [];
   private rng: Rng;
@@ -158,7 +170,8 @@ export class Room {
       respawnAt: null,
       attackReadyAt: 0,
       shoveFlagUntil: 0,
-      weapon: null,
+      inv: emptyInventory(),
+      invDirty: true,
       stagger: 0,
       lastHitAt: 0,
       combo: 0,
@@ -167,6 +180,7 @@ export class Room {
       blockSince: 0,
       charging: false,
     };
+    if (!spectator) this.giveTool(member, "rod", 2);
     this.members.set(id, member);
     peer.send({ t: "welcome", id, name: member.name, online: this.opts.online });
     peer.send({ t: "world", ...this.worldInfo(member) });
@@ -174,6 +188,7 @@ export class Room {
       this.broadcastRoster();
       if (this.opts.online) this.feed(`${member.name} washed ashore`);
     }
+    this.flush(member);
     return id;
   }
 
@@ -190,6 +205,11 @@ export class Room {
   handle(id: number, msg: ClientMsg) {
     const m = this.members.get(id);
     if (!m || m.spectator || m.respawnAt !== null) return;
+    this.apply(m, msg);
+    this.flush(m);
+  }
+
+  private apply(m: Member, msg: ClientMsg) {
     switch (msg.t) {
       case "move": {
         this.landing(m, msg.vy, msg.flags);
@@ -208,18 +228,107 @@ export class Room {
         this.attack(m, msg.charge, msg.climb);
         return;
       case "stance": {
-        const block = msg.block && m.weapon?.kind === "shield";
+        const weapon = this.weaponOf(m);
+        const block = msg.block && weapon === "shield";
         if (block && !m.blocking) m.blockSince = this.now();
         m.blocking = block;
-        m.charging = msg.charge && !!m.weapon && !!weaponDef(m.weapon.kind).charge;
+        m.charging = msg.charge && !!weapon && !!weaponDef(weapon).charge;
         return;
       }
-      case "pick":
-        this.pickNearest(m);
+      case "slot":
+        if (m.inv.slot !== msg.i) {
+          m.inv.slot = msg.i;
+          m.blocking = false;
+          m.charging = false;
+          m.invDirty = true;
+        }
+        return;
+      case "equip":
+        this.equip(m, msg.tool, msg.slot);
+        return;
+      case "drop":
+        this.drop(m, msg.tool);
+        return;
+      case "interact":
+        if (msg.kind === "weapon") this.pickUp(m, msg.id);
         return;
       default:
         return;
     }
+  }
+
+  /* ---------- inventory ---------- */
+
+  private weaponOf(m: Member) {
+    const tool = heldTool(m.inv);
+    return tool ? TOOLS[tool.kind].weapon : null;
+  }
+
+  /*
+   * Add a tool to your pack: into the preferred hotbar slot if it's free,
+   * otherwise the first free one, otherwise the pack. Null when you're full.
+   */
+  private giveTool(m: Member, kind: ToolKind, prefer: number, uses?: number): Tool | null {
+    if (m.inv.tools.length >= MAX_TOOLS) return null;
+    const def = TOOLS[kind];
+    const max = def.weapon && !def.fine ? weaponDef(def.weapon).uses : -1;
+    const tool: Tool = { id: this.toolId++, kind, uses: uses ?? max };
+    m.inv.tools.push(tool);
+    const bar = m.inv.hotbar;
+    let slot = bar[prefer] == null ? prefer : -1;
+    for (let i = 1; i < HOTBAR && slot < 0; i++) if (bar[i] == null) slot = i;
+    if (slot > 0) bar[slot] = tool.id;
+    m.invDirty = true;
+    return tool;
+  }
+
+  private removeTool(m: Member, id: number) {
+    m.inv.tools = m.inv.tools.filter((t) => t.id !== id);
+    m.inv.hotbar = m.inv.hotbar.map((t) => (t === id ? null : t));
+    m.blocking = false;
+    m.charging = false;
+    m.invDirty = true;
+  }
+
+  private equip(m: Member, toolId: number, slot: number) {
+    const inv = m.inv;
+    if (!inv.tools.some((t) => t.id === toolId) || slot === 0) return;
+    const from = inv.hotbar.indexOf(toolId);
+    if (slot < 0) {
+      if (from > 0) inv.hotbar[from] = null;
+    } else {
+      /* Swap with whatever's there (into our old slot, or back to the pack). */
+      const there = inv.hotbar[slot];
+      if (from > 0) inv.hotbar[from] = there;
+      inv.hotbar[slot] = toolId;
+    }
+    m.blocking = false;
+    m.charging = false;
+    m.invDirty = true;
+  }
+
+  /* Put a found weapon back on the ground. Bought gear and rods stay with you. */
+  private drop(m: Member, toolId: number) {
+    const tool = m.inv.tools.find((t) => t.id === toolId);
+    const weapon = tool && TOOLS[tool.kind].droppable ? TOOLS[tool.kind].weapon : null;
+    if (!tool || !weapon) return;
+    this.removeTool(m, tool.id);
+    const dropped: GroundWeapon = {
+      id: this.weaponId++,
+      kind: weapon,
+      x: round2(m.body.x - Math.sin(m.body.yaw) * 0.8),
+      y: round2(m.body.y),
+      z: round2(m.body.z - Math.cos(m.body.yaw) * 0.8),
+      uses: tool.uses,
+    };
+    this.weapons.push(dropped);
+    this.broadcast({ t: "wspawn", weapon: dropped });
+  }
+
+  private flush(m: Member) {
+    if (!m.invDirty) return;
+    m.invDirty = false;
+    m.peer.send({ t: "inv", inv: structuredClone(m.inv) });
   }
 
   /* Drive the room; hosts call this TICK_HZ times a second. */
@@ -229,6 +338,7 @@ export class Room {
     this.lastTick = now;
     this.time += dt;
     this.simulate(now, dt);
+    for (const m of this.members.values()) this.flush(m);
     this.broadcastSnap(now);
   }
 
@@ -260,13 +370,6 @@ export class Room {
       /* Stagger wears off a few seconds after the last hit. */
       if (now - m.lastHitAt > STAGGER_GRACE)
         m.stagger = Math.max(0, m.stagger - STAGGER_RECOVER * dt);
-
-      if (!m.weapon) {
-        const w = this.weapons.find(
-          (w) => Math.hypot(w.x - m.body.x, w.z - m.body.z) < 1.4 && Math.abs(w.y - m.body.y) < 1.9,
-        );
-        if (w) this.take(m, w);
-      }
 
       if (m.body.y < SEA_FLOOR - 8) this.hurt(m, HEALTH_MAX, "drowned");
     }
@@ -372,55 +475,43 @@ export class Room {
     if (announce) this.broadcast({ t: "wspawn", weapon });
   }
 
-  /* Pick a weapon up; whatever you held drops at your feet. */
-  private take(m: Member, w: GroundWeapon) {
+  /* Pick a weapon up off the ground, into your hotbar if there's room. */
+  private pickUp(m: Member, id: number) {
+    const w = this.weapons.find((o) => o.id === id);
+    if (!w) return;
+    if (Math.hypot(w.x - m.body.x, w.z - m.body.z) > 3 || Math.abs(w.y - m.body.y) > 2.5) return;
+    const tool = this.giveTool(m, w.kind, 1, w.uses);
+    if (!tool) {
+      m.peer.send({ t: "feed", text: "Your pack is full" });
+      return;
+    }
     this.weapons = this.weapons.filter((o) => o !== w);
-    if (m.weapon) {
-      const dropped: GroundWeapon = {
-        id: this.weaponId++,
-        kind: m.weapon.kind,
-        x: round2(m.body.x),
-        y: round2(m.body.y),
-        z: round2(m.body.z),
-        uses: m.weapon.uses,
-      };
-      this.weapons.push(dropped);
-      this.broadcast({ t: "wspawn", weapon: dropped });
-    }
-    m.weapon = { kind: w.kind, uses: w.uses };
+    /* Picking something up puts it in your hand. */
+    const slot = m.inv.hotbar.indexOf(tool.id);
+    if (slot > 0) m.inv.slot = slot;
     m.blocking = false;
     m.charging = false;
-    this.broadcast({ t: "wtake", id: w.id, by: m.id });
+    this.broadcast({ t: "wtake", id: w.id, by: m.id, kind: w.kind });
   }
 
-  private pickNearest(m: Member) {
-    let best: GroundWeapon | null = null;
-    let bestD = 2;
-    for (const w of this.weapons) {
-      const d = Math.hypot(w.x - m.body.x, w.z - m.body.z);
-      if (d < bestD && Math.abs(w.y - m.body.y) < 2) {
-        best = w;
-        bestD = d;
-      }
-    }
-    if (best) this.take(m, best);
-  }
-
-  /* One use off the weapon; when it's spent it breaks. */
+  /* One use off the held weapon; when it's spent it breaks. Bought gear never does. */
   private wear(m: Member) {
-    if (!m.weapon) return;
-    m.weapon.uses--;
-    if (m.weapon.uses > 0) return;
-    this.broadcast({ t: "wbreak", by: m.id, kind: m.weapon.kind });
-    m.weapon = null;
-    m.blocking = false;
-    m.charging = false;
+    const tool = heldTool(m.inv);
+    const weapon = tool && TOOLS[tool.kind].weapon;
+    if (!tool || !weapon || tool.uses < 0) return;
+    tool.uses--;
+    m.invDirty = true;
+    if (tool.uses > 0) return;
+    this.removeTool(m, tool.id);
+    this.broadcast({ t: "wbreak", by: m.id, kind: weapon });
   }
 
   private attack(m: Member, charge: number, climb: boolean) {
     const now = this.now();
     if (now < m.attackReadyAt || m.blocking) return;
-    const kind = m.weapon?.kind ?? null;
+    const tool = heldTool(m.inv);
+    if (tool && TOOLS[tool.kind].rod) return;
+    const kind = this.weaponOf(m);
     const def = weaponDef(kind);
     m.attackReadyAt = now + def.cooldown;
     m.shoveFlagUntil = now + 0.35;
@@ -493,7 +584,7 @@ export class Room {
 
         let blocked = false;
         let parry = false;
-        if (o.blocking && o.weapon?.kind === "shield" && -facingAway > 0.2) {
+        if (o.blocking && this.weaponOf(o) === "shield" && -facingAway > 0.2) {
           blocked = true;
           parry = now - o.blockSince < PARRY_WINDOW;
           if (p.kind === "axe") {
@@ -598,7 +689,7 @@ export class Room {
           (m.blocking ? FLAG.block : 0) |
           (m.charging ? FLAG.charge : 0),
         Math.round(m.breath),
-        weaponIndex(m.weapon?.kind ?? null),
+        weaponIndex(this.weaponOf(m)),
         Math.round(m.stagger),
       ]);
     }
@@ -613,7 +704,6 @@ export class Room {
           : {
               health: Math.ceil(m.health),
               breath: Math.round(m.breath),
-              weapon: m.weapon ? { ...m.weapon } : null,
               stagger: Math.round(m.stagger),
               dead: m.respawnAt !== null,
             },

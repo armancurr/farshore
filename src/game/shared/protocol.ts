@@ -1,3 +1,4 @@
+import { HOTBAR, type Inventory } from "./items";
 import { WEAPON_KINDS, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string };
@@ -11,8 +12,6 @@ export type GroundWeapon = {
   z: number;
   uses: number;
 };
-
-export type Held = { kind: WeaponKind; uses: number };
 
 /* Compact per-player state: [id, x, y, z, yaw, pitch, flags, breath, weapon, stagger]. */
 export type PlayerSnap = [
@@ -63,11 +62,11 @@ export type ServerMsg =
       me: {
         health: number;
         breath: number;
-        weapon: Held | null;
         stagger: number;
         dead: boolean;
       } | null;
     }
+  | { t: "inv"; inv: Inventory }
   | { t: "hurt"; amount: number; cause: HurtCause }
   | { t: "died"; cause: HurtCause }
   | { t: "impulse"; vx: number; vy: number; vz: number }
@@ -86,7 +85,7 @@ export type ServerMsg =
       heavy: boolean;
     }
   | { t: "wspawn"; weapon: GroundWeapon }
-  | { t: "wtake"; id: number; by: number }
+  | { t: "wtake"; id: number; by: number; kind: WeaponKind }
   | { t: "wbreak"; by: number; kind: WeaponKind }
   | { t: "feed"; text: string }
   | { t: "full" };
@@ -107,12 +106,23 @@ export type ClientMsg =
     }
   | { t: "attack"; charge: number; climb: boolean }
   | { t: "stance"; block: boolean; charge: boolean }
-  | { t: "pick" };
+  | { t: "interact"; kind: InteractKind; id: number }
+  | { t: "slot"; i: number }
+  /* Move a tool into a hotbar slot (1-4), or back to the pack with -1. */
+  | { t: "equip"; tool: number; slot: number }
+  | { t: "drop"; tool: number };
+
+export type InteractKind = "weapon" | "prefab";
+const INTERACT_KINDS: readonly InteractKind[] = ["weapon", "prefab"];
 
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 
 const finite = (v: unknown, limit: number): v is number =>
   typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= limit;
+
+const isInt = (v: unknown, min: number, max: number): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
+const isId = (v: unknown): v is number => isInt(v, 0, 2 ** 31);
 
 /* Servers never trust a frame: anything malformed is dropped. */
 export function parseClientMsg(raw: unknown): ClientMsg | null {
@@ -135,8 +145,18 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       };
     case "stance":
       return { t: "stance", block: m.block === true, charge: m.charge === true };
-    case "pick":
-      return { t: "pick" };
+    case "interact":
+      if (!INTERACT_KINDS.includes(m.kind as InteractKind) || !isId(m.id)) return null;
+      return { t: "interact", kind: m.kind as InteractKind, id: m.id };
+    case "slot":
+      if (!isInt(m.i, 0, HOTBAR - 1)) return null;
+      return { t: "slot", i: m.i };
+    case "equip":
+      if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
+      return { t: "equip", tool: m.tool, slot: m.slot };
+    case "drop":
+      if (!isId(m.tool)) return null;
+      return { t: "drop", tool: m.tool };
     case "move": {
       const nums = ["x", "y", "z", "yaw", "pitch", "vx", "vy", "vz"] as const;
       for (const k of nums) if (!finite(m[k], 1000)) return null;

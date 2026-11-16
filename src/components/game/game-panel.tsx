@@ -1,6 +1,7 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
+import { InventoryPanel } from "./panels";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
@@ -15,7 +16,9 @@ const CONTROLS = [
   ["Shift", "Sprint"],
   ["Click / F", "Attack · hold to charge"],
   ["Right-click", "Block (shield)"],
-  ["R", "Swap weapon"],
+  ["E", "Interact"],
+  ["1–5 / Wheel", "Hotbar"],
+  ["Tab / I", "Pack"],
   ["N", "Music"],
   ["M", "Mute"],
   ["Esc", "Pause"],
@@ -78,6 +81,12 @@ export function GamePanel(props: { onPress?: () => void }) {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "KeyM" && playing()) toggleMute();
       if (e.code === "Escape") setControlsOpen(false);
+      /* Panels have the mouse; these keys put it away again. */
+      const panel = hud()?.panel;
+      if (panel && ["Escape", "Tab", "KeyI", "KeyE"].includes(e.code)) {
+        e.preventDefault();
+        game?.closePanel();
+      }
     };
     const onPointerDown = (e: PointerEvent) => {
       if (controlsRoot && !controlsRoot.contains(e.target as Node)) setControlsOpen(false);
@@ -117,7 +126,9 @@ export function GamePanel(props: { onPress?: () => void }) {
   const paused = () => {
     const h = hud();
     /* Give the pointer lock a moment to engage before calling it a pause. */
-    return !!h && playing() && !touch() && !h.locked && performance.now() - startedAt > 500;
+    return (
+      !!h && playing() && !touch() && !h.locked && !h.panel && performance.now() - startedAt > 500
+    );
   };
 
   return (
@@ -146,7 +157,13 @@ export function GamePanel(props: { onPress?: () => void }) {
         </div>
       </Show>
 
-      <Show when={playing() && hud()}>{(h) => <Hud hud={h()} touch={touch()} />}</Show>
+      <Show when={playing() && hud()}>
+        {(h) => <Hud hud={h()} touch={touch()} onSelect={(i) => game?.selectSlot(i)} />}
+      </Show>
+
+      <Show when={playing() && hud()?.panel === "inventory" && game}>
+        <InventoryPanel hud={hud()!} game={game!} />
+      </Show>
 
       <Show when={status() === "ready" && !playing()}>
         <div class="absolute bottom-6 left-6 flex items-center gap-2 sm:bottom-8 sm:left-8">
@@ -256,7 +273,7 @@ export function GamePanel(props: { onPress?: () => void }) {
               WASD move · Space jump · Shift sprint
               <br />
               Click / F attack, hold to charge · right-click block
-              <br />R swap weapon · N music · M mute
+              <br />E interact · 1–5 hotbar · Tab pack · N music · M mute
             </div>
           </div>
         </div>

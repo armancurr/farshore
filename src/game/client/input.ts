@@ -1,5 +1,15 @@
 /* One-shot actions; "Up" ones fire on release, so held attacks can charge. */
-export type Action = "jump" | "attack" | "attackUp" | "alt" | "altUp" | "pick" | "music";
+export type Action =
+  | "jump"
+  | "attack"
+  | "attackUp"
+  | "alt"
+  | "altUp"
+  | "interact"
+  | "inventory"
+  | "build"
+  | "rotate"
+  | "music";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -16,6 +26,9 @@ export class Input {
   private holdJump = false;
   private holdAttack = false;
   private holdAlt = false;
+  /* The last number key pressed (0-based), and mouse-wheel steps, until read. */
+  private digit: number | null = null;
+  private wheel = 0;
   private cleanup: (() => void)[] = [];
 
   constructor(private target: HTMLElement) {
@@ -33,8 +46,13 @@ export class Input {
       this.keys.add(e.code);
       if (e.repeat) return;
       if (e.code === "KeyF") this.setAttack(true);
-      if (e.code === "KeyR") this.queued.add("pick");
+      if (e.code === "KeyE") this.queued.add("interact");
+      if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
+      if (e.code === "KeyB") this.queued.add("build");
+      if (e.code === "KeyR") this.queued.add("rotate");
       if (e.code === "KeyN") this.queued.add("music");
+      if (/^Digit[1-9]$/.test(e.code)) this.digit = Number(e.code.slice(5)) - 1;
+      if (e.code === "Tab") e.preventDefault();
       if (e.code === "Space") this.queued.add("jump");
       if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
     });
@@ -59,6 +77,9 @@ export class Input {
     on("mouseup", (e) => {
       if (e.button === 0) this.setAttack(false);
       if (e.button === 2) this.setAlt(false);
+    });
+    on("wheel", (e) => {
+      if (this.locked && Math.abs(e.deltaY) > 0) this.wheel += Math.sign(e.deltaY);
     });
     on("contextmenu", (e) => {
       if (this.locked) e.preventDefault();
@@ -133,6 +154,19 @@ export class Input {
     this.holdJump = held;
   }
 
+  /* A number key pressed since the last read, 0-based. */
+  takeDigit() {
+    const d = this.digit;
+    this.digit = null;
+    return d;
+  }
+
+  takeWheel() {
+    const w = this.wheel;
+    this.wheel = 0;
+    return w;
+  }
+
   take(action: Action) {
     const had = this.queued.has(action);
     this.queued.delete(action);
@@ -142,6 +176,8 @@ export class Input {
   clear() {
     this.keys.clear();
     this.queued.clear();
+    this.digit = null;
+    this.wheel = 0;
     this.stick = { x: 0, y: 0 };
     this.holdAttack = false;
     this.holdAlt = false;

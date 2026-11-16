@@ -114,10 +114,17 @@ export function TouchControls(props: { input: Input }) {
         </button>
         <button
           type="button"
-          class={`${button} col-span-2 h-10 w-full`}
-          onPointerDown={() => props.input.press("pick")}
+          class={`${button} h-10 w-full`}
+          onPointerDown={() => props.input.press("interact")}
         >
-          Swap weapon
+          Use
+        </button>
+        <button
+          type="button"
+          class={`${button} h-10 w-full`}
+          onPointerDown={() => props.input.press("inventory")}
+        >
+          Pack
         </button>
         <button
           type="button"

@@ -159,41 +159,48 @@ function Markers(props: { hud: HudState }) {
   );
 }
 
-function Weapon(props: { hud: HudState; touch: boolean }) {
+function Hotbar(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   return (
-    <Show
-      when={props.hud.weapon}
-      fallback={
-        <div class="font-mono text-[10px] tracking-[0.2em] text-white/45 uppercase">
-          Fists · find a weapon ◇
-        </div>
-      }
-    >
-      {(w) => (
-        <div class="flex flex-col items-end gap-1.5">
-          <div class="font-mono text-[12px] tracking-[0.25em] uppercase">{w().name}</div>
-          <div class="flex max-w-40 flex-wrap justify-end gap-[3px]">
-            <Index each={Array.from({ length: w().max })}>
-              {(_, i) => (
-                <span
-                  class="h-1.5 w-1"
-                  classList={{ "bg-white": i < w().uses, "bg-white/20": i >= w().uses }}
-                />
-              )}
-            </Index>
-          </div>
-          <Show when={!props.touch}>
-            <div class="max-w-56 text-right font-mono text-[10px] leading-relaxed tracking-[0.1em] text-white/50">
-              {w().hint}
-            </div>
-          </Show>
-        </div>
-      )}
-    </Show>
+    <div class="flex flex-col items-center gap-2">
+      <Show when={props.hud.hint && !props.touch}>
+        <div class="font-mono text-[10px] tracking-[0.12em] text-white/50">{props.hud.hint}</div>
+      </Show>
+      <div class="pointer-events-auto flex gap-1.5">
+        <Index each={props.hud.inv.hotbar}>
+          {(tool, i) => (
+            <button
+              type="button"
+              class="relative flex h-14 w-16 flex-col justify-between border p-1.5 text-left font-mono"
+              classList={{
+                "border-white bg-white/10": props.hud.inv.slot === i,
+                "border-white/25 bg-black/40": props.hud.inv.slot !== i,
+              }}
+              onClick={() => props.onSelect(i)}
+            >
+              <span class="text-[9px] text-white/45">{i + 1}</span>
+              <span
+                class="truncate text-[9px] leading-tight tracking-[0.08em] uppercase"
+                classList={{ "text-white/40": !tool() && i !== 0 }}
+              >
+                {i === 0 ? "Fists" : (tool()?.name ?? "—")}
+              </span>
+              <Show when={tool()?.wear != null}>
+                <span class="absolute right-1.5 bottom-1 left-1.5 h-px bg-white/20">
+                  <span
+                    class="block h-px bg-white"
+                    style={{ width: `${(tool()?.wear ?? 0) * 100}%` }}
+                  />
+                </span>
+              </Show>
+            </button>
+          )}
+        </Index>
+      </div>
+    </div>
   );
 }
 
-export function Hud(props: { hud: HudState; touch: boolean }) {
+export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   const h = () => props.hud;
   return (
     <div class="pointer-events-none absolute inset-0 select-none text-white">
@@ -211,8 +218,8 @@ export function Hud(props: { hud: HudState; touch: boolean }) {
         <Markers hud={h()} />
         <Crosshair hud={h()} />
         <Show when={h().prompt}>
-          <div class="absolute bottom-28 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-            {props.touch ? h().prompt?.replace("R · ", "Swap · ") : h().prompt}
+          <div class="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+            {props.touch ? h().prompt?.replace("E · ", "") : h().prompt}
           </div>
         </Show>
         <div class={props.touch ? "absolute top-24 left-5" : "absolute bottom-6 left-6"}>
@@ -225,15 +232,15 @@ export function Hud(props: { hud: HudState; touch: boolean }) {
           />
         </Show>
         <Show when={h().stamina < 0.99}>
-          <div class="absolute bottom-6 left-1/2 h-px w-40 -translate-x-1/2 bg-white/15">
+          <div class="absolute bottom-[6.5rem] left-1/2 h-px w-40 -translate-x-1/2 bg-white/15">
             <div class="h-px bg-white/80" style={{ width: `${h().stamina * 100}%` }} />
           </div>
         </Show>
         <div
-          class="absolute right-6 bottom-6 flex flex-col items-end gap-5"
-          classList={{ "bottom-auto top-56": props.touch }}
+          class="absolute bottom-6 left-1/2 -translate-x-1/2"
+          classList={{ "bottom-auto top-5": props.touch }}
         >
-          <Weapon hud={h()} touch={props.touch} />
+          <Hotbar hud={h()} touch={props.touch} onSelect={props.onSelect} />
         </div>
       </Show>
 

@@ -5,8 +5,8 @@ import { clamp, lerp } from "../shared/math";
 import { type Body, createBody, FLOAT_DEPTH, stepBody } from "../shared/physics";
 import {
   FLAG,
-  type Held,
   type HurtCause,
+  type InteractKind,
   type PlayerSnap,
   type RosterEntry,
   type ServerMsg,
@@ -15,12 +15,17 @@ import {
 } from "../shared/protocol";
 import { overSolid, Terrain } from "../shared/terrain";
 import {
-  COMBO_WINDOW,
-  type WeaponKind,
-  WEAPONS,
-  weaponDef,
-  weaponFromIndex,
-} from "../shared/weapons";
+  emptyInventory,
+  HOTBAR,
+  heldTool,
+  type Inventory,
+  ITEMS,
+  type ItemId,
+  type Rarity,
+  TOOLS,
+  type ToolKind,
+} from "../shared/items";
+import { COMBO_WINDOW, WEAPONS, weaponDef, weaponFromIndex } from "../shared/weapons";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
@@ -35,6 +40,28 @@ import { ViewModel, WeaponDrops } from "./scene/weapons";
 export type Mode = "attract" | "solo" | "online";
 
 export type FeedItem = { id: number; text: string; at: number };
+
+export type PanelKind = "inventory";
+
+export type ToolView = {
+  id: number;
+  kind: ToolKind;
+  name: string;
+  /* Wear left as 0..1, or null when it never wears out. */
+  wear: number | null;
+  droppable: boolean;
+};
+
+export type InventoryView = {
+  coins: number;
+  slot: number;
+  hotbar: (ToolView | null)[];
+  pack: ToolView[];
+  items: { id: ItemId; name: string; count: number; kind: string; rarity?: Rarity }[];
+};
+
+/* Something you could press E on. */
+type Focus = { kind: InteractKind; id: number; label: string };
 
 export type HudState = {
   mode: Mode;
@@ -55,7 +82,10 @@ export type HudState = {
   underwater: boolean;
   feed: FeedItem[];
   locked: boolean;
-  weapon: { kind: WeaponKind; name: string; uses: number; max: number; hint: string } | null;
+  inv: InventoryView;
+  panel: PanelKind | null;
+  /* What the held tool does. */
+  hint: string | null;
   /* 0..1 while winding up a hammer or flail. */
   charge: number | null;
   blocking: boolean;
@@ -128,7 +158,9 @@ export class Game {
   private hurtFlash = 0;
   private down: HurtCause | null = null;
   private downAt = 0;
-  private weapon: Held | null = null;
+  private inv: Inventory = emptyInventory();
+  private panel: PanelKind | null = null;
+  private focus: Focus | null = null;
   private chargeStart: number | null = null;
   private blocking = false;
   private sentStance = { block: false, charge: false };
@@ -217,6 +249,12 @@ export class Game {
     this.conn?.setPaused(this.shouldPause());
   }
 
+  /* The weapon in hand (null for fists or a rod). */
+  private get weapon() {
+    const tool = heldTool(this.inv);
+    return tool ? TOOLS[tool.kind].weapon : null;
+  }
+
   get canvas() {
     return this.renderer.domElement;
   }
@@ -266,7 +304,9 @@ export class Game {
     this.body = null;
     this.down = null;
     this.health = HEALTH_MAX;
-    this.weapon = null;
+    this.inv = emptyInventory();
+    this.panel = null;
+    this.focus = null;
     this.chargeStart = null;
     this.blocking = false;
     this.feed = [];
@@ -450,20 +490,19 @@ export class Game {
       case "wspawn":
         this.world?.drops.add(msg.weapon);
         break;
-      case "wtake": {
-        const w = this.world?.drops.list().find((d) => d.id === msg.id);
+      case "wtake":
         this.world?.drops.remove(msg.id);
-        if (msg.by === this.myId && w) {
-          this.weapon = { kind: w.kind, uses: w.uses };
+        if (msg.by === this.myId) {
           this.chargeStart = null;
           this.audio.pickup();
-          this.pushFeed(`You picked up the ${WEAPONS[w.kind].name.toLowerCase()}`);
+          this.pushFeed(`You picked up the ${WEAPONS[msg.kind].name.toLowerCase()}`);
         }
         break;
-      }
+      case "inv":
+        this.inv = msg.inv;
+        break;
       case "wbreak":
         if (msg.by === this.myId) {
-          this.weapon = null;
           this.chargeStart = null;
           this.audio.broke();
           this.pushFeed(`Your ${WEAPONS[msg.kind].name.toLowerCase()} broke`);
@@ -535,7 +574,6 @@ export class Game {
     if (msg.me) {
       this.breath = msg.me.breath;
       this.health = msg.me.health;
-      this.weapon = msg.me.weapon;
     }
   }
 
@@ -596,7 +634,7 @@ export class Game {
   private tryAttack(b: Body, charge: number) {
     const now = performance.now() / 1000;
     if (now < this.attackReadyAt) return;
-    const kind = this.weapon?.kind ?? null;
+    const kind = this.weapon;
     const def = weaponDef(kind);
     this.attackReadyAt = now + def.cooldown;
     let heavy = false;
@@ -650,7 +688,7 @@ export class Game {
       this.world.drops.update(t);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
-    const holding = this.body && !this.down ? (this.weapon?.kind ?? null) : null;
+    const holding = this.body && !this.down ? this.weapon : null;
     this.viewmodel.set(holding);
     const def = weaponDef(holding);
     this.viewmodel.update(dt, {
@@ -703,8 +741,8 @@ export class Game {
     } else if (world && this.body) {
       const b = this.body;
       b.yaw = this.input.yaw;
-      const def = weaponDef(this.weapon?.kind ?? null);
-      this.blocking = this.weapon?.kind === "shield" && active && this.input.altHeld;
+      const def = weaponDef(this.weapon);
+      this.blocking = this.weapon === "shield" && active && this.input.altHeld;
       const charging = this.chargeStart !== null;
       const intent = active
         ? {
@@ -755,7 +793,12 @@ export class Game {
       if (!def.charge) this.chargeStart = null;
       this.input.take("alt");
       this.input.take("altUp");
-      if (this.input.take("pick")) this.conn?.send({ t: "pick" });
+      this.hotbarInput();
+      this.focus = this.findFocus(b);
+      if (this.input.take("interact") && this.focus) {
+        this.conn?.send({ t: "interact", kind: this.focus.kind, id: this.focus.id });
+      }
+      if (this.input.take("inventory")) this.openPanel("inventory");
       const stance = { block: this.blocking, charge: this.chargeStart !== null };
       if (stance.block !== this.sentStance.block || stance.charge !== this.sentStance.charge) {
         this.sentStance = stance;
@@ -800,9 +843,127 @@ export class Game {
   }
 
   private dropInputs() {
-    for (const a of ["attack", "attackUp", "alt", "altUp", "pick", "jump"] as const)
+    for (const a of [
+      "attack",
+      "attackUp",
+      "alt",
+      "altUp",
+      "interact",
+      "inventory",
+      "build",
+      "rotate",
+      "jump",
+    ] as const)
       this.input.take(a);
+    this.input.takeDigit();
+    this.input.takeWheel();
     this.chargeStart = null;
+  }
+
+  /* Number keys pick a slot, the wheel steps through them. Shown at once, confirmed by the room. */
+  private hotbarInput() {
+    let slot = this.input.takeDigit();
+    const wheel = this.input.takeWheel();
+    if (slot === null && wheel) slot = (((this.inv.slot + wheel) % HOTBAR) + HOTBAR) % HOTBAR;
+    if (slot === null || slot >= HOTBAR || slot === this.inv.slot) return;
+    this.selectSlot(slot);
+  }
+
+  /* The nearest thing in front of you worth pressing E on. */
+  private findFocus(b: Body): Focus | null {
+    const world = this.world;
+    if (!world) return null;
+    const fx = -Math.sin(b.yaw);
+    const fz = -Math.cos(b.yaw);
+    let best: Focus | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    const consider = (x: number, y: number, z: number, reach: number, f: () => Focus) => {
+      const dx = x - b.x;
+      const dz = z - b.z;
+      const d = Math.hypot(dx, dz);
+      if (d > reach || Math.abs(y - b.y) > 2.5) return;
+      const facing = d < 0.8 ? 1 : (dx * fx + dz * fz) / d;
+      if (facing < 0.25) return;
+      const score = d * (2 - facing);
+      if (score < bestScore) {
+        bestScore = score;
+        best = f();
+      }
+    };
+    for (const w of world.drops.list()) {
+      consider(w.x, w.y, w.z, 2.6, () => ({
+        kind: "weapon",
+        id: w.id,
+        label: `E · Pick up the ${WEAPONS[w.kind].name.toLowerCase()}`,
+      }));
+    }
+    return best;
+  }
+
+  /* ---------- panels ---------- */
+
+  openPanel(kind: PanelKind) {
+    this.panel = kind;
+    this.input.clear();
+    this.input.unlock();
+    this.emitHud();
+  }
+
+  closePanel() {
+    if (!this.panel) return;
+    this.panel = null;
+    this.emitHud();
+    this.lock();
+  }
+
+  equip(tool: number, slot: number) {
+    this.conn?.send({ t: "equip", tool, slot });
+  }
+
+  drop(tool: number) {
+    this.conn?.send({ t: "drop", tool });
+  }
+
+  selectSlot(slot: number) {
+    if (slot < 0 || slot >= HOTBAR) return;
+    this.inv.slot = slot;
+    this.chargeStart = null;
+    this.conn?.send({ t: "slot", i: slot });
+    this.emitHud();
+  }
+
+  private toolView(id: number | null): ToolView | null {
+    const tool = id == null ? null : this.inv.tools.find((t) => t.id === id);
+    if (!tool) return null;
+    const def = TOOLS[tool.kind];
+    const max = def.weapon ? weaponDef(def.weapon).uses : 0;
+    return {
+      id: tool.id,
+      kind: tool.kind,
+      name: def.name,
+      wear: tool.uses < 0 || !max ? null : tool.uses / max,
+      droppable: def.droppable,
+    };
+  }
+
+  private inventoryView(): InventoryView {
+    const inv = this.inv;
+    const items: InventoryView["items"] = [];
+    for (const [id, n] of Object.entries(inv.items) as [ItemId, number][]) {
+      if (!n) continue;
+      const def = ITEMS[id];
+      items.push({ id, name: def.name, count: n, kind: def.kind, rarity: def.rarity });
+    }
+    return {
+      coins: inv.coins,
+      slot: inv.slot,
+      hotbar: inv.hotbar.map((id) => this.toolView(id)),
+      pack: inv.tools
+        .filter((t) => !inv.hotbar.includes(t.id))
+        .map((t) => this.toolView(t.id))
+        .filter((t): t is ToolView => !!t),
+      items,
+    };
   }
 
   private firstPerson(dt: number, b: Body) {
@@ -914,7 +1075,7 @@ export class Game {
     if (this.notice && now > this.noticeUntil) this.notice = null;
     this.feed = this.feed.filter((f) => now - f.at < 7);
     const playing = !!this.body && !this.down;
-    const def = weaponDef(this.weapon?.kind ?? null);
+    const def = weaponDef(this.weapon);
     this.audio.intensity(this.musicIntensity());
 
     /* Weapons on the ground: on screen, or an arrow at the edge pointing at them. */
@@ -923,7 +1084,7 @@ export class Game {
       const v = this.tmpV;
       for (const w of this.world.drops.list()) {
         const d = this.distanceTo(w.x, w.z);
-        if (d > 170) continue;
+        if (d > 45) continue;
         v.set(w.x, w.y + 1.2, w.z).project(this.camera);
         const behind = v.z > 1;
         const off = behind || Math.abs(v.x) > 0.94 || Math.abs(v.y) > 0.9;
@@ -958,11 +1119,8 @@ export class Game {
         }
       }
     }
-    let prompt: string | null = null;
-    if (playing && this.weapon && this.body && this.world) {
-      const near = this.world.drops.nearest(this.body.x, this.body.y, this.body.z, 2);
-      if (near) prompt = `R · swap for the ${WEAPONS[near.kind].name.toLowerCase()}`;
-    }
+    const prompt = playing && this.focus ? this.focus.label : null;
+    const held = heldTool(this.inv);
 
     this.onHud({
       mode: this.mode,
@@ -981,15 +1139,9 @@ export class Game {
       underwater: this.under > 0.5,
       feed: [...this.feed],
       locked: this.touch || this.input.locked || this.forceActive,
-      weapon: this.weapon
-        ? {
-            kind: this.weapon.kind,
-            name: def.name,
-            uses: this.weapon.uses,
-            max: def.uses,
-            hint: def.hint,
-          }
-        : null,
+      inv: this.inventoryView(),
+      panel: this.panel,
+      hint: held && TOOLS[held.kind].rod ? "Click to cast" : held ? def.hint : null,
       charge:
         this.chargeStart !== null && def.charge
           ? Math.min(1, (now - this.chargeStart) / def.charge.max)
