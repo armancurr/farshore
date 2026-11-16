@@ -18,6 +18,16 @@ import {
   SEA_LEVEL,
   TICK_HZ,
 } from "../shared/constants";
+import { isNight } from "../shared/daylight";
+import {
+  BITE_WINDOW,
+  depthAt,
+  MIN_CAST_DEPTH,
+  pickFish,
+  type Strike,
+  strikeFor,
+  struck,
+} from "../shared/fishing";
 import { clamp, mulberry32, type Rng } from "../shared/math";
 import { randomName } from "../shared/names";
 import { type Body, createBody } from "../shared/physics";
@@ -34,9 +44,11 @@ import {
 } from "../shared/protocol";
 import {
   emptyInventory,
+  type FishId,
   HOTBAR,
   heldTool,
   type Inventory,
+  type ItemId,
   MAX_TOOLS,
   type Tool,
   type ToolKind,
@@ -78,6 +90,7 @@ type Member = {
   attackReadyAt: number;
   shoveFlagUntil: number;
   inv: Inventory;
+  line: Line | null;
   /* Something in the inventory changed; send it at the end of the step. */
   invDirty: boolean;
   stagger: number;
@@ -87,6 +100,16 @@ type Member = {
   blocking: boolean;
   blockSince: number;
   charging: boolean;
+};
+
+/* A line in the water: waiting for a bite, then a fish on, waiting for the strike. */
+type Line = {
+  x: number;
+  z: number;
+  depth: number;
+  biteAt: number;
+  fish: FishId | null;
+  strike: Strike | null;
 };
 
 /* A swing in flight: it lands after the weapon's wind-up. */
@@ -171,6 +194,7 @@ export class Room {
       attackReadyAt: 0,
       shoveFlagUntil: 0,
       inv: emptyInventory(),
+      line: null,
       invDirty: true,
       stagger: 0,
       lastHitAt: 0,
@@ -235,8 +259,15 @@ export class Room {
         m.charging = msg.charge && !!weapon && !!weaponDef(weapon).charge;
         return;
       }
+      case "cast":
+        this.cast(m, msg.x, msg.z);
+        return;
+      case "reel":
+        this.reel(m, msg.at);
+        return;
       case "slot":
         if (m.inv.slot !== msg.i) {
+          this.reelIn(m);
           m.inv.slot = msg.i;
           m.blocking = false;
           m.charging = false;
@@ -283,6 +314,7 @@ export class Room {
   }
 
   private removeTool(m: Member, id: number) {
+    if (heldTool(m.inv)?.id === id) this.reelIn(m);
     m.inv.tools = m.inv.tools.filter((t) => t.id !== id);
     m.inv.hotbar = m.inv.hotbar.map((t) => (t === id ? null : t));
     m.blocking = false;
@@ -293,6 +325,7 @@ export class Room {
   private equip(m: Member, toolId: number, slot: number) {
     const inv = m.inv;
     if (!inv.tools.some((t) => t.id === toolId) || slot === 0) return;
+    const held = heldTool(inv)?.id;
     const from = inv.hotbar.indexOf(toolId);
     if (slot < 0) {
       if (from > 0) inv.hotbar[from] = null;
@@ -302,6 +335,7 @@ export class Room {
       if (from > 0) inv.hotbar[from] = there;
       inv.hotbar[slot] = toolId;
     }
+    if (heldTool(inv)?.id !== held) this.reelIn(m);
     m.blocking = false;
     m.charging = false;
     m.invDirty = true;
@@ -323,6 +357,94 @@ export class Room {
     };
     this.weapons.push(dropped);
     this.broadcast({ t: "wspawn", weapon: dropped });
+  }
+
+  addItem(m: Member, id: ItemId, n = 1) {
+    m.inv.items[id] = Math.max(0, (m.inv.items[id] ?? 0) + n);
+    if (!m.inv.items[id]) delete m.inv.items[id];
+    m.invDirty = true;
+  }
+
+  /* ---------- fishing ---------- */
+
+  private rodOf(m: Member) {
+    const tool = heldTool(m.inv);
+    return tool ? (TOOLS[tool.kind].rod ?? null) : null;
+  }
+
+  private cast(m: Member, x: number, z: number) {
+    const rod = this.rodOf(m);
+    if (!rod || m.line) return;
+    const reach = Math.hypot(x - m.body.x, z - m.body.z);
+    const depth = depthAt(this.terrain.heightAt(x, z));
+    /* Standing (or sitting) above the water, casting a fair distance into enough of it. */
+    if (reach > rod.cast + 1.5 || reach < 1.5 || depth < MIN_CAST_DEPTH) return;
+    if (SEA_LEVEL - m.body.y > 1.2) return;
+    const [lo, hi] = rod.bite;
+    m.line = {
+      x,
+      z,
+      depth,
+      biteAt: this.now() + lo + this.rng() * (hi - lo),
+      fish: null,
+      strike: null,
+    };
+    this.broadcast({ t: "line", by: m.id, x: round2(x), z: round2(z), state: "cast" });
+  }
+
+  /* Pull the line out without a fish. */
+  private reelIn(m: Member) {
+    if (!m.line) return;
+    const { x, z } = m.line;
+    m.line = null;
+    this.broadcast({ t: "line", by: m.id, x: round2(x), z: round2(z), state: "none" });
+  }
+
+  /* Strike. A miss, or striking before anything bites, loses the fish. */
+  private reel(m: Member, at: number) {
+    const line = m.line;
+    if (!line) return;
+    if (!line.fish || !line.strike) {
+      this.reelIn(m);
+      return;
+    }
+    /*
+     * Trust the angler's own timing, within reason: not earlier than we've
+     * seen, and inside the window. (A throttled tab can leave our clock behind.)
+     */
+    const elapsed = this.now() - line.biteAt;
+    const t = at >= elapsed - 0.5 && at <= BITE_WINDOW ? at : elapsed;
+    const fish = struck(line.strike, t) ? line.fish : null;
+    this.land(m, fish);
+  }
+
+  private land(m: Member, fish: FishId | null) {
+    const line = m.line;
+    if (!line) return;
+    m.line = null;
+    if (fish) this.addItem(m, fish);
+    this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "none" });
+    this.broadcast({ t: "catch", by: m.id, fish });
+  }
+
+  private tickLine(m: Member, now: number) {
+    const line = m.line;
+    if (!line) return;
+    const rod = this.rodOf(m);
+    const far = Math.hypot(line.x - m.body.x, line.z - m.body.z) > (rod?.cast ?? 0) + 5;
+    if (!rod || far) {
+      this.reelIn(m);
+      return;
+    }
+    if (!line.fish && now >= line.biteAt) {
+      line.fish = pickFish(this.rng, line.depth, rod, isNight(this.time));
+      line.strike = strikeFor(this.rng, line.fish, rod);
+      line.biteAt = now;
+      m.peer.send({ t: "bite", ...line.strike });
+      this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "bite" });
+    } else if (line.fish && now - line.biteAt > BITE_WINDOW) {
+      this.land(m, null);
+    }
   }
 
   private flush(m: Member) {
@@ -367,6 +489,8 @@ export class Room {
       else if (now - m.lastHurtAt > REGEN_DELAY && m.health < HEALTH_MAX)
         m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * dt);
 
+      this.tickLine(m, now);
+
       /* Stagger wears off a few seconds after the last hit. */
       if (now - m.lastHitAt > STAGGER_GRACE)
         m.stagger = Math.max(0, m.stagger - STAGGER_RECOVER * dt);
@@ -394,6 +518,7 @@ export class Room {
     if (cause !== "drowned") m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
     if (m.health > 0) return;
     m.respawnAt = this.now() + RESPAWN_DELAY;
+    this.reelIn(m);
     m.blocking = false;
     m.charging = false;
     m.peer.send({ t: "died", cause });

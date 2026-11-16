@@ -1,12 +1,21 @@
 import * as THREE from "three";
 import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
 import { clockLabel, daylight } from "../shared/daylight";
+import {
+  BITE_TEXT,
+  depthAt,
+  MIN_CAST_DEPTH,
+  type Strike,
+  WATERS_LABEL,
+  watersFor,
+} from "../shared/fishing";
 import { clamp, lerp } from "../shared/math";
 import { type Body, createBody, FLOAT_DEPTH, stepBody } from "../shared/physics";
 import {
   FLAG,
   type HurtCause,
   type InteractKind,
+  type LineState,
   type PlayerSnap,
   type RosterEntry,
   type ServerMsg,
@@ -30,12 +39,13 @@ import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
 import { Avatar } from "./scene/avatars";
+import { FishingLines } from "./scene/fishing";
 import { createTerrainMesh, createWater } from "./scene/land";
 import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
 import { Sky } from "./scene/sky";
-import { ViewModel, WeaponDrops } from "./scene/weapons";
+import { type RodPose, ViewModel, WeaponDrops } from "./scene/weapons";
 
 export type Mode = "attract" | "solo" | "online";
 
@@ -86,6 +96,10 @@ export type HudState = {
   panel: PanelKind | null;
   /* What the held tool does. */
   hint: string | null;
+  /* Your line in the water; with a strike once something bites (`at` in performance seconds). */
+  fishing: { state: LineState; text: string; strike: Strike | null; at: number } | null;
+  /* Fades from 1 after a catch (or a fish getting away). */
+  caught: { name: string | null; rarity: Rarity | null; at: number } | null;
   /* 0..1 while winding up a hammer or flail. */
   charge: number | null;
   blocking: boolean;
@@ -161,6 +175,10 @@ export class Game {
   private inv: Inventory = emptyInventory();
   private panel: PanelKind | null = null;
   private focus: Focus | null = null;
+  private lines = new FishingLines();
+  private myLine: { state: LineState; depth: number } | null = null;
+  private bite: { strike: Strike; at: number } | null = null;
+  private caught: HudState["caught"] = null;
   private chargeStart: number | null = null;
   private blocking = false;
   private sentStance = { block: false, charge: false };
@@ -224,6 +242,7 @@ export class Game {
     this.touch = matchMedia("(pointer: coarse)").matches;
     this.input = new Input(canvas);
     this.scene.add(this.sky.group);
+    this.scene.add(this.lines.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -307,6 +326,10 @@ export class Game {
     this.inv = emptyInventory();
     this.panel = null;
     this.focus = null;
+    this.lines.clear();
+    this.myLine = null;
+    this.bite = null;
+    this.caught = null;
     this.chargeStart = null;
     this.blocking = false;
     this.feed = [];
@@ -501,6 +524,30 @@ export class Game {
       case "inv":
         this.inv = msg.inv;
         break;
+      case "line":
+        this.onLine(msg);
+        break;
+      case "bite":
+        this.bite = { strike: msg, at: performance.now() / 1000 };
+        this.audio.bite();
+        navigator.vibrate?.(40);
+        break;
+      case "catch":
+        if (msg.by !== this.myId) break;
+        this.bite = null;
+        this.caught = {
+          name: msg.fish ? ITEMS[msg.fish].name : null,
+          rarity: msg.fish ? (ITEMS[msg.fish].rarity ?? null) : null,
+          at: performance.now() / 1000,
+        };
+        if (msg.fish) {
+          this.audio.chime();
+          this.pushFeed(`You caught a ${ITEMS[msg.fish].name.toLowerCase()}`);
+        } else {
+          this.audio.slip();
+          this.pushFeed("It got away");
+        }
+        break;
       case "wbreak":
         if (msg.by === this.myId) {
           this.chargeStart = null;
@@ -512,6 +559,77 @@ export class Game {
         this.pushFeed(msg.text);
         break;
     }
+  }
+
+  private onLine(msg: Extract<ServerMsg, { t: "line" }>) {
+    const from = this.tmpV;
+    if (msg.by === this.myId) {
+      if (msg.state === "none") {
+        this.myLine = null;
+        this.bite = null;
+      } else {
+        const depth = this.world ? depthAt(this.world.terrain.heightAt(msg.x, msg.z)) : 0;
+        if (msg.state === "cast") this.audio.splash(0.25);
+        this.myLine = { state: msg.state, depth };
+      }
+      this.rodTipWorld(from);
+    } else {
+      const r = this.remotes.get(msg.by);
+      if (r) from.copy(r.avatar.group.position).setY(r.avatar.group.position.y + 2);
+    }
+    this.lines.set(msg.by, msg.x, msg.z, msg.state, from);
+  }
+
+  /* The held rod's tip, placed in the world where it shows on screen. */
+  private rodTipWorld(out: THREE.Vector3) {
+    if (!this.viewmodel.rodTip(out)) {
+      out.copy(this.camera.position);
+      return false;
+    }
+    out.z = 0.5;
+    out.unproject(this.camera).sub(this.camera.position).normalize();
+    out.multiplyScalar(1.4).add(this.camera.position);
+    return true;
+  }
+
+  private tipOf = (by: number, out: THREE.Vector3) => {
+    if (by === this.myId) return !this.down && this.rodTipWorld(out);
+    const r = this.remotes.get(by);
+    if (!r?.avatar.group.visible) return false;
+    out.copy(r.avatar.group.position);
+    out.y += 2.1;
+    return true;
+  };
+
+  /* Cast where you're looking: onto the water, as far as the rod reaches. */
+  private castOrStrike() {
+    const tool = heldTool(this.inv);
+    const rod = tool && TOOLS[tool.kind].rod;
+    const b = this.body;
+    const world = this.world;
+    if (!rod || !b || !world) return;
+    const now = performance.now() / 1000;
+    if (this.myLine) {
+      this.conn?.send({ t: "reel", at: this.bite ? now - this.bite.at : -1 });
+      this.viewmodel.swing(false);
+      return;
+    }
+    if (now < this.attackReadyAt) return;
+    this.attackReadyAt = now + 0.6;
+    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const flat = Math.hypot(dir.x, dir.z) || 1;
+    let reach = rod.cast;
+    if (dir.y < -0.02) reach = Math.min(rod.cast, ((this.camera.position.y - 0) / -dir.y) * flat);
+    reach = Math.max(3, reach);
+    const x = b.x + (dir.x / flat) * reach;
+    const z = b.z + (dir.z / flat) * reach;
+    this.viewmodel.swing(false);
+    this.audio.swing(null, false);
+    if (depthAt(world.terrain.heightAt(x, z)) < MIN_CAST_DEPTH) {
+      this.say("Cast out over the water", 2);
+      return;
+    }
+    this.conn?.send({ t: "cast", x, z });
   }
 
   private place(s: Spawn) {
@@ -688,9 +806,10 @@ export class Game {
       this.world.drops.update(t);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
-    const holding = this.body && !this.down ? this.weapon : null;
+    const held = this.body && !this.down ? heldTool(this.inv) : null;
+    const holding = held && TOOLS[held.kind].rod ? "rod" : held ? TOOLS[held.kind].weapon : null;
     this.viewmodel.set(holding);
-    const def = weaponDef(holding);
+    const def = weaponDef(holding === "rod" ? null : holding);
     this.viewmodel.update(dt, {
       aspect: this.camera.aspect,
       bob: this.bob,
@@ -701,9 +820,11 @@ export class Game {
           : null,
       blocking: this.blocking,
       kick: this.kick,
+      rod: this.rodPose(),
     });
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
+    this.lines.update(t, this.tipOf);
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
@@ -781,7 +902,9 @@ export class Game {
 
       /* Attack: instant swings on press; hammers and flails charge until release. */
       const now = performance.now() / 1000;
-      if (this.input.take("attack") && !this.blocking) {
+      const fishing = !!(heldTool(this.inv) && TOOLS[heldTool(this.inv)!.kind].rod);
+      if (fishing && this.input.take("attack")) this.castOrStrike();
+      else if (this.input.take("attack") && !this.blocking) {
         if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
         } else this.tryAttack(b, 0);
@@ -900,6 +1023,11 @@ export class Game {
     return best;
   }
 
+  private rodHint() {
+    if (this.myLine) return "Click to reel in";
+    return "Click to cast · deeper water, rarer fish";
+  }
+
   /* ---------- panels ---------- */
 
   openPanel(kind: PanelKind) {
@@ -989,6 +1117,11 @@ export class Game {
     const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + Math.abs(this.kick) * 4;
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
     this.setFov(this.fov);
+  }
+
+  private rodPose(): RodPose {
+    if (this.bite) return "bite";
+    return this.myLine ? "out" : "idle";
   }
 
   /* Down: the view slumps to the ground and tips over. */
@@ -1141,7 +1274,18 @@ export class Game {
       locked: this.touch || this.input.locked || this.forceActive,
       inv: this.inventoryView(),
       panel: this.panel,
-      hint: held && TOOLS[held.kind].rod ? "Click to cast" : held ? def.hint : null,
+      hint: held && TOOLS[held.kind].rod ? this.rodHint() : held ? def.hint : null,
+      fishing: this.myLine
+        ? {
+            state: this.myLine.state,
+            text: this.bite
+              ? `${BITE_TEXT[this.bite.strike.rarity]} · click when the needle's in the mark`
+              : `${WATERS_LABEL[watersFor(this.myLine.depth)]} · ${this.myLine.depth.toFixed(1)} m · waiting for a bite`,
+            strike: this.bite?.strike ?? null,
+            at: this.bite?.at ?? 0,
+          }
+        : null,
+      caught: this.caught && now - this.caught.at < 2.6 ? this.caught : null,
       charge:
         this.chargeStart !== null && def.charge
           ? Math.min(1, (now - this.chargeStart) / def.charge.max)

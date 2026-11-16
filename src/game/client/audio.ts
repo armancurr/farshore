@@ -280,6 +280,19 @@ export class TideAudio {
     this.tone(990, 985, 0.07, 0.005, 1.3);
   }
 
+  /* Something takes the bait: two quick ticks on the line and a plop. */
+  bite() {
+    this.tone(880, 700, 0.07, 0.002, 0.06, "triangle");
+    setTimeout(() => this.tone(880, 700, 0.07, 0.002, 0.06, "triangle"), 110);
+    this.splash(0.35);
+  }
+
+  /* A fish slipping the hook. */
+  slip() {
+    this.tone(330, 160, 0.1, 0.005, 0.35, "triangle");
+    this.splash(0.4);
+  }
+
   heartbeat(rate: number) {
     const ctx = this.ctx;
     if (!ctx || ctx.currentTime - this.lastHeart < rate) return;

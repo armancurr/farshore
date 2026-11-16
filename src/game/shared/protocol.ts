@@ -1,4 +1,5 @@
-import { HOTBAR, type Inventory } from "./items";
+import type { Strike } from "./fishing";
+import { type FishId, HOTBAR, type Inventory } from "./items";
 import { WEAPON_KINDS, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string };
@@ -39,6 +40,8 @@ export const FLAG = {
 
 export type Spawn = { x: number; y: number; z: number; yaw: number };
 
+export type LineState = "cast" | "bite" | "none";
+
 export type HurtCause = "drowned" | "fall" | "boar" | "hit";
 
 export type WorldInfo = {
@@ -67,6 +70,11 @@ export type ServerMsg =
       } | null;
     }
   | { t: "inv"; inv: Inventory }
+  /* Someone's fishing line: where the float sits, and whether something's biting. */
+  | { t: "line"; by: number; x: number; z: number; state: LineState }
+  /* To the angler alone: strike while the needle is in the window. */
+  | ({ t: "bite" } & Strike)
+  | { t: "catch"; by: number; fish: FishId | null }
   | { t: "hurt"; amount: number; cause: HurtCause }
   | { t: "died"; cause: HurtCause }
   | { t: "impulse"; vx: number; vy: number; vz: number }
@@ -110,7 +118,10 @@ export type ClientMsg =
   | { t: "slot"; i: number }
   /* Move a tool into a hotbar slot (1-4), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
-  | { t: "drop"; tool: number };
+  | { t: "drop"; tool: number }
+  | { t: "cast"; x: number; z: number }
+  /* Strike, `at` seconds after the bite as the angler saw it. */
+  | { t: "reel"; at: number };
 
 export type InteractKind = "weapon" | "prefab";
 const INTERACT_KINDS: readonly InteractKind[] = ["weapon", "prefab"];
@@ -154,6 +165,11 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "equip":
       if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
       return { t: "equip", tool: m.tool, slot: m.slot };
+    case "cast":
+      if (!finite(m.x, 1000) || !finite(m.z, 1000)) return null;
+      return { t: "cast", x: m.x, z: m.z };
+    case "reel":
+      return { t: "reel", at: finite(m.at, 60) ? m.at : -1 };
     case "drop":
       if (!isId(m.tool)) return null;
       return { t: "drop", tool: m.tool };

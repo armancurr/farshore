@@ -1,5 +1,6 @@
-import { For, Index, Show } from "solid-js";
+import { For, Index, onCleanup, onMount, Show } from "solid-js";
 import type { HudState } from "../../game/client/game";
+import { needleAt, type Strike } from "../../game/shared/fishing";
 
 const DOWN_TEXT: Record<string, string> = {
   drowned: "The sea took your breath",
@@ -159,6 +160,65 @@ function Markers(props: { hud: HudState }) {
   );
 }
 
+/* The strike: a needle sweeps the bar; click while it's inside the mark. */
+function StrikeBar(props: { strike: Strike; at: number }) {
+  let needle!: HTMLDivElement;
+  onMount(() => {
+    let raf = 0;
+    const frame = () => {
+      const t = performance.now() / 1000 - props.at;
+      needle.style.left = `${needleAt(t, props.strike.speed) * 100}%`;
+      raf = requestAnimationFrame(frame);
+    };
+    frame();
+    onCleanup(() => cancelAnimationFrame(raf));
+  });
+  return (
+    <div class="relative h-5 w-64 border border-white/50 bg-black/50">
+      <div
+        class="absolute inset-y-0 bg-white/30"
+        style={{
+          left: `${(props.strike.c - props.strike.w / 2) * 100}%`,
+          width: `${props.strike.w * 100}%`,
+        }}
+      />
+      <div ref={needle} class="absolute -inset-y-1 w-0.5 -translate-x-1/2 bg-white" />
+    </div>
+  );
+}
+
+function Fishing(props: { hud: HudState }) {
+  return (
+    <>
+      <Show when={props.hud.fishing}>
+        {(f) => (
+          <div class="absolute top-[58%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-2.5">
+            <Show when={f().strike}>{(strike) => <StrikeBar strike={strike()} at={f().at} />}</Show>
+            <div
+              class="font-mono text-[10px] tracking-[0.2em] whitespace-nowrap uppercase"
+              classList={{ "text-white/55": !f().strike, "text-white": !!f().strike }}
+            >
+              {f().text}
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={props.hud.caught}>
+        {(c) => (
+          <div class="absolute top-[30%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-1 text-center">
+            <div class="text-2xl font-semibold tracking-tight">{c().name ?? "It got away."}</div>
+            <Show when={c().rarity}>
+              <div class="font-mono text-[10px] tracking-[0.3em] text-white/55 uppercase">
+                {c().rarity}
+              </div>
+            </Show>
+          </div>
+        )}
+      </Show>
+    </>
+  );
+}
+
 function Hotbar(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   return (
     <div class="flex flex-col items-center gap-2">
@@ -217,6 +277,7 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
       <Show when={h().player}>
         <Markers hud={h()} />
         <Crosshair hud={h()} />
+        <Fishing hud={h()} />
         <Show when={h().prompt}>
           <div class="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
             {props.touch ? h().prompt?.replace("E · ", "") : h().prompt}
