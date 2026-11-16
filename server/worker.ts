@@ -6,6 +6,8 @@ import { parseWorldSave } from "../src/game/shared/save";
 
 type Env = {
   ROOMS: DurableObjectNamespace<TideRoom>;
+  /* The built site (dist/). Requests that aren't for the room fall through to it. */
+  ASSETS: Fetcher;
   /* Comma-separated origins allowed to connect, e.g. "https://armancurr.com". Empty allows all. */
   ALLOWED_ORIGINS?: string;
 };
@@ -125,6 +127,7 @@ export default {
         return new Response("Forbidden", { status: 403 });
       return stub.fetch(request);
     }
-    return new Response("Rising Tide", { headers: cors });
+    /* run_worker_first only sends room paths here, but serve the site for anything else. */
+    return env.ASSETS.fetch(request);
   },
 };
