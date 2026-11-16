@@ -4,7 +4,7 @@
    * One Worker for everything: it serves the built site from dist/ and hosts
    * the grand map, a Durable Object, on /party/*. Deploy with `bun run deploy`.
    */
-  "name": "rising-tide",
+  "name": "farshore",
   "main": "server/worker.ts",
   "compatibility_date": "2026-10-01",
   "assets": {
@@ -20,7 +20,10 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TideRoom"] }],
   "vars": {
-    /* Comma-separated origins allowed to open the room's socket. Empty allows all. */
-    "ALLOWED_ORIGINS": ""
+    /*
+     * Comma-separated origins allowed to open the room's socket (empty allows
+     * all): the site itself, and `bun run preview:cf` on this machine.
+     */
+    "ALLOWED_ORIGINS": "https://farshore.armanenv.workers.dev,http://localhost:8787"
   }
 }
