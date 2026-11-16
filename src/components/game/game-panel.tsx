@@ -1,4 +1,9 @@
-import { EnvelopeSimpleIcon, ArrowBendDownLeftIcon, PlayIcon } from "@phosphor-icons/react";
+import {
+  ArrowBendDownLeftIcon,
+  EnvelopeSimpleIcon,
+  PlayIcon,
+  StorefrontIcon,
+} from "@phosphor-icons/react";
 import { cn } from "cn";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -8,6 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
+import { Marketplace } from "./marketplace";
 import { ControlsCard, MenuPointer, WaitlistCard } from "./menu-cards";
 import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
 import { SettleScreen } from "./settle-screen";
@@ -51,6 +57,8 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [touch, setTouch] = useState(false);
   /* The grand map, over the game (N). */
   const [mapOpen, setMapOpen] = useState(false);
+  /* The marketplace (K), from the title screen or out on the island. */
+  const [marketOpen, setMarketOpen] = useState(false);
   /*
    * Both menu cards open on hover. Keyboard focus opens Controls; the waitlist
    * opens on Enter or a tap, and stays up while focus is inside it (typing, or
@@ -107,8 +115,20 @@ export function GamePanel(props: { onPress?: () => void }) {
         setWaitlistOpen(false);
         setControlsOpen((open) => !open);
       }
+      /* K opens or closes the marketplace, but not over another panel or the settle screen. */
+      const blocked = !!latest.current.hud?.panel || !!latest.current.hud?.settling;
+      if (e.code === "KeyK" && !e.repeat && !typing && latest.current.ready && !blocked) {
+        e.preventDefault();
+        if (latest.current.marketOpen) latest.current.closeMarket(true);
+        else latest.current.openMarket();
+      }
       /* On the title screen: Enter goes ashore, J opens the waitlist (and its field). */
-      const onTitle = latest.current.ready && !latest.current.playing && !typing && !e.repeat;
+      const onTitle =
+        latest.current.ready &&
+        !latest.current.playing &&
+        !latest.current.marketOpen &&
+        !typing &&
+        !e.repeat;
       if (onTitle && e.code === "Enter" && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
         latest.current.play("online");
@@ -146,12 +166,49 @@ export function GamePanel(props: { onPress?: () => void }) {
     game.lock();
   };
 
+  const openMarket = () => {
+    setMapOpen(false);
+    setWaitlistOpen(false);
+    setControlsOpen(false);
+    setMarketOpen(true);
+    gameRef.current?.input.unlock();
+  };
+
+  /* Closed by a click, the island takes the mouse back; Escape leaves the pause screen up. */
+  const closeMarket = useCallback((byClick: boolean) => {
+    setMarketOpen(false);
+    if (byClick && latest.current.playing) gameRef.current?.lock();
+  }, []);
+
   /* The keyboard handler and the status poll live outside renders; give them the latest. */
-  const latest = useRef({ hud, playing, mode, muted, touch, ready: false, play });
-  latest.current = { hud, playing, mode, muted, touch, ready: status === "ready", play };
+  const latest = useRef({
+    hud,
+    playing,
+    mode,
+    muted,
+    touch,
+    ready: false,
+    play,
+    marketOpen,
+    openMarket,
+    closeMarket,
+  });
+  latest.current = {
+    hud,
+    playing,
+    mode,
+    muted,
+    touch,
+    ready: status === "ready",
+    play,
+    marketOpen,
+    openMarket,
+    closeMarket,
+  };
 
   const leave = () => {
     setMapOpen(false);
+    setMarketOpen(false);
     game?.input.unlock();
     game?.start("attract");
   };
@@ -164,6 +221,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     !hud.locked &&
     !hud.panel &&
     !hud.settling &&
+    !marketOpen &&
     performance.now() - startedAt.current > 500;
 
   return (
@@ -233,6 +291,7 @@ export function GamePanel(props: { onPress?: () => void }) {
                   </Kbd>
                 )}
               </Button>
+              <MarketLink touch={touch} onClick={openMarket} />
               {!touch && (
                 <ControlsMenu open={controlsOpen && !waitlistOpen} onOpenChange={setControlsOpen} />
               )}
@@ -309,9 +368,12 @@ export function GamePanel(props: { onPress?: () => void }) {
               {!touch && <Kbd className={menuKbd}>Esc</Kbd>}
             </Button>
           ) : touch ? (
-            <Button variant="menu" size="inline" onClick={leave}>
-              Leave
-            </Button>
+            <>
+              {hud?.player && <MarketLink touch onClick={openMarket} />}
+              <Button variant="menu" size="inline" onClick={leave}>
+                Leave
+              </Button>
+            </>
           ) : (
             <>
               {mode === "online" && hud?.player && (
@@ -320,12 +382,25 @@ export function GamePanel(props: { onPress?: () => void }) {
                   <Kbd className={menuKbd}>N</Kbd>
                 </Button>
               )}
+              {hud?.player && <MarketLink touch={false} onClick={openMarket} />}
               <ControlsMenu open={controlsOpen} onOpenChange={setControlsOpen} />
             </>
           )}
         </div>
       )}
+
+      {marketOpen && game && <Marketplace game={game} touch={touch} onClose={closeMarket} />}
     </div>
+  );
+}
+
+/* The title-bar link to the marketplace. */
+function MarketLink(props: { touch: boolean; onClick: () => void }) {
+  return (
+    <Button variant="menu" size="inline" onClick={props.onClick}>
+      Marketplace
+      {props.touch ? <StorefrontIcon size={14} weight="fill" /> : <Kbd className={menuKbd}>K</Kbd>}
+    </Button>
   );
 }
 

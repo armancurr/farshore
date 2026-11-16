@@ -13,9 +13,10 @@ import {
   type KitId,
 } from "./items";
 import type { Prefab } from "./prefabs";
+import { isSkinId, type SkinId } from "./skins";
 import type { WeaponKind } from "./weapons";
 
-export type RosterEntry = { id: number; name: string };
+export type RosterEntry = { id: number; name: string; skin: SkinId };
 
 /* A weapon lying on the ground, waiting for someone to pick it up. */
 export type GroundWeapon = {
@@ -143,7 +144,17 @@ export type ClientMsg =
    * than one borrowed from another tab: an own token takes over a connection
    * still using it (a reload), a borrowed one already in use gets a new identity.
    */
-  | { t: "hello"; name?: string; spectate?: boolean; token?: string; own?: boolean }
+  | {
+      t: "hello";
+      name?: string;
+      spectate?: boolean;
+      token?: string;
+      own?: boolean;
+      /* The skin you last wore, kept by this browser. */
+      skin?: SkinId;
+    }
+  /* Wear a different skin from the marketplace. */
+  | { t: "skin"; skin: SkinId }
   /* Put your island on the grand map, centred at (x, z). */
   | { t: "settle"; shape: ShapeId; seed: number; x: number; z: number }
   | {
@@ -220,7 +231,10 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         spectate: m.spectate === true,
         token: isToken(m.token) ? m.token : undefined,
         own: m.own === true,
+        skin: isSkinId(m.skin) ? m.skin : undefined,
       };
+    case "skin":
+      return isSkinId(m.skin) ? { t: "skin", skin: m.skin } : null;
     case "settle":
       if (!isShapeId(m.shape) || !isInt(m.seed, 0, 2 ** 32 - 1)) return null;
       if (!finite(m.x, COORD) || !finite(m.z, COORD)) return null;
