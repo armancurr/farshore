@@ -153,13 +153,10 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   },
 };
 
-export const ITEM_IDS = Object.keys(ITEMS) as ItemId[];
-
 export const isItemId = (v: unknown): v is ItemId =>
   typeof v === "string" && Object.hasOwn(ITEMS, v);
 export const isKitId = (v: unknown): v is KitId =>
   typeof v === "string" && (KIT_IDS as readonly string[]).includes(v);
-export const isFish = (id: ItemId): id is FishId => ITEMS[id].kind === "fish";
 
 export function rarityRank(r: Rarity) {
   return RARITIES.indexOf(r);
@@ -214,7 +211,6 @@ export const TOOLS: Record<ToolKind, ToolDef> = {
   axe2: { name: "Bearded axe", weapon: "axe", fine: true, droppable: false },
 };
 
-export const TOOL_KINDS = Object.keys(TOOLS) as ToolKind[];
 export const isToolKind = (v: unknown): v is ToolKind =>
   typeof v === "string" && Object.hasOwn(TOOLS, v);
 

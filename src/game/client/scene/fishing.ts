@@ -98,12 +98,12 @@ export class FishingLines {
       const sag = c.state === "bite" ? 0.15 : 0.9 * k;
       const p = c.positions;
       let j = 0;
-      for (let i = 0; i < SEGMENTS; i++) {
-        for (const s of [i / SEGMENTS, (i + 1) / SEGMENTS]) {
-          p[j++] = tip.x + (fx - tip.x) * s;
-          p[j++] = tip.y + (fy + 0.1 - tip.y) * s - Math.sin(s * Math.PI) * sag;
-          p[j++] = tip.z + (fz - tip.z) * s;
-        }
+      for (let i = 0; i < SEGMENTS * 2; i++) {
+        /* Each segment's two ends: i/2 rounded down, then up. */
+        const s = ((i >> 1) + (i & 1)) / SEGMENTS;
+        p[j++] = tip.x + (fx - tip.x) * s;
+        p[j++] = tip.y + (fy + 0.1 - tip.y) * s - Math.sin(s * Math.PI) * sag;
+        p[j++] = tip.z + (fz - tip.z) * s;
       }
       (c.line.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     }

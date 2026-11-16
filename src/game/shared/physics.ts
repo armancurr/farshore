@@ -62,8 +62,6 @@ export type StepEvents = {
 /* How deep your feet hang while floating: eyes stay above water, the cold still gets you. */
 export const FLOAT_DEPTH = 1.3;
 
-export const IDLE: Intent = { forward: 0, right: 0, jump: false, sprint: false };
-
 export function createBody(x: number, y: number, z: number, yaw: number): Body {
   return {
     x,

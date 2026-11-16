@@ -41,7 +41,6 @@ import {
   HOTBAR,
   heldTool,
   type Inventory,
-  isKitId,
   ITEMS,
   KIT_IDS,
   type KitId,
@@ -53,7 +52,7 @@ import {
 import { COMBO_WINDOW, WEAPONS, weaponDef, weaponFromIndex } from "../shared/weapons";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
-import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
+import { type Connection, clearSave, LocalConnection, serverBase, WsConnection } from "./net";
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
 import { BoatView } from "./scene/boats";
@@ -363,8 +362,8 @@ export class Game {
 
   /* ---------- lifecycle ---------- */
 
-  start(mode: Mode) {
-    const seed = this.world?.seed;
+  start(mode: Mode, fresh = false) {
+    const seed = fresh ? undefined : this.world?.seed;
     this.conn?.close();
     this.conn = null;
     this.reset();
@@ -390,8 +389,8 @@ export class Game {
       this.connecting = true;
       this.conn = new WsConnection(base, handlers);
     } else {
-      /* Solo picks up the island you were just looking at. */
-      this.conn = new LocalConnection(mode, handlers, seed);
+      /* Solo picks up your saved island, or else the one you were just looking at. */
+      this.conn = new LocalConnection(mode, handlers, { seed, fresh });
     }
     this.emitHud();
   }
@@ -427,6 +426,15 @@ export class Game {
     this.haveClock = false;
     this.myId = -1;
     this.input.clear();
+  }
+
+  /* Throw the saved island away and wake up on a new one. */
+  newIsland() {
+    this.conn?.close();
+    this.conn = null;
+    clearSave();
+    this.start("solo", true);
+    this.lock();
   }
 
   lock() {

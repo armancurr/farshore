@@ -75,6 +75,7 @@ import {
   type Prefab,
   prefabBlocks,
 } from "../shared/prefabs";
+import { SAVE_VERSION, type SaveData, type SavedPlayer } from "../shared/save";
 import { SHOP_REACH, shopEntry } from "../shared/shop";
 import { blockSolid, overSolid, Terrain } from "../shared/terrain";
 import {
@@ -156,6 +157,8 @@ export type RoomOptions = {
   now?: () => number;
   maxHumans?: number;
   seed?: number;
+  /* An island to pick up where it was left. */
+  save?: SaveData | null;
 };
 
 /* Points round a body's centre, to test whether it fits somewhere. */
@@ -196,6 +199,10 @@ export class Room {
   private posted = new Map<number, number>();
   private prefabs = new Map<number, Prefab>();
   private boatSpeed = new Map<number, number>();
+  /* The saved player, waiting for the first person to arrive. */
+  private returning: SavedPlayer | null = null;
+  /* Something happened that would hurt to lose: the host should save soon. */
+  saveSoon = false;
   private prefabId = 1;
   private bountyId = 1;
   private prey: Prey[] = [];
@@ -205,7 +212,8 @@ export class Room {
   constructor(private readonly opts: RoomOptions) {
     this.now = opts.now ?? (() => Date.now() / 1000);
     this.rng = mulberry32((Math.random() * 2 ** 32) >>> 0);
-    this.seed = opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
+    const save = opts.save ?? null;
+    this.seed = save?.seed ?? opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
     this.terrain = new Terrain(this.seed);
     const t = this.terrain;
     this.herd = new Herd(
@@ -225,8 +233,75 @@ export class Room {
         { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
       ],
     );
+    if (save) this.restore(save);
     this.fillBoard();
     for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
+  }
+
+  /* ---------- saving ---------- */
+
+  private restore(save: SaveData) {
+    this.time = save.time;
+    this.toolId = save.ids.tool;
+    this.prefabId = save.ids.prefab;
+    this.bountyId = save.ids.bounty;
+    for (const p of save.prefabs) this.build(structuredClone(p));
+    this.board = save.board.map((b) => structuredClone(b));
+    for (const b of this.board) this.posted.set(b.id, this.time);
+    this.returning = save.player ? structuredClone(save.player) : null;
+  }
+
+  /* The island as it stands, with the first player's things, ready to store. */
+  exportSave(): SaveData {
+    const m = [...this.members.values()].find((o) => !o.spectator);
+    let player: SavedPlayer | null = this.returning;
+    if (m) {
+      /* Saved while down: you come back on your feet, where you'd have woken. */
+      const down = m.respawnAt !== null;
+      const at = down ? this.spawnPoint(m) : { ...m.body, yaw: m.body.yaw };
+      player = {
+        x: round2(at.x),
+        y: round2(at.y),
+        z: round2(at.z),
+        yaw: round2(at.yaw),
+        health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
+        inv: structuredClone(m.inv),
+        boat: down ? null : m.boat,
+      };
+    }
+    return {
+      v: SAVE_VERSION,
+      seed: this.seed,
+      time: round2(this.time),
+      prefabs: [...this.prefabs.values()].map((p) => structuredClone(p)),
+      board: this.board.map((b) => structuredClone(b)),
+      player,
+      ids: { tool: this.toolId, prefab: this.prefabId, bounty: this.bountyId },
+    };
+  }
+
+  /* Put the saved player back where they were, with everything they had. */
+  private welcomeBack(m: Member, saved: SavedPlayer) {
+    m.inv = saved.inv;
+    m.health = saved.health;
+    m.invDirty = true;
+    const boat = saved.boat === null ? null : this.prefabs.get(saved.boat);
+    if (boat?.kind === "rowboat") {
+      m.boat = boat.id;
+      m.body = createBody(saved.x, SEA_LEVEL + 0.3, saved.z, saved.yaw);
+      return;
+    }
+    /* Never inside something that was built over the spot, or underground. */
+    const { ground } = this.terrain.groundAt(saved.x, saved.z, saved.y + 0.3);
+    const inside = this.terrain
+      .solidsNear(saved.x, saved.z)
+      .some(
+        (o) => o.top > ground + 0.6 && o.bottom < ground + 1.7 && overSolid(o, saved.x, saved.z),
+      );
+    if (inside) {
+      const s = this.spawnPoint(m);
+      m.body = createBody(s.x, s.y, s.z, s.yaw);
+    } else m.body = createBody(saved.x, Math.max(saved.y, ground), saved.z, saved.yaw);
   }
 
   humans() {
@@ -270,10 +345,14 @@ export class Room {
       blockSince: 0,
       charging: false,
     };
-    if (!spectator) this.giveTool(member, "rod", 2);
+    if (!spectator && this.returning) {
+      this.welcomeBack(member, this.returning);
+      this.returning = null;
+    } else if (!spectator) this.giveTool(member, "rod", 2);
     this.members.set(id, member);
     peer.send({ t: "welcome", id, name: member.name, online: this.opts.online });
     peer.send({ t: "world", ...this.worldInfo(member) });
+    if (member.boat !== null) peer.send({ t: "aboard", boat: member.boat });
     if (!spectator) {
       this.broadcastRoster();
       if (this.opts.online) this.feed(`${member.name} washed ashore`);
@@ -474,6 +553,7 @@ export class Room {
     } else this.addItem(m, entry.give.kit);
     m.inv.coins -= entry.price;
     m.invDirty = true;
+    this.saveSoon = true;
   }
 
   private build(p: Prefab) {
@@ -504,6 +584,7 @@ export class Room {
     this.build(p);
     this.addItem(m, kind, -1);
     if (kind === "bed") m.inv.bed = p.id;
+    this.saveSoon = true;
     this.broadcast({ t: "prefab", prefab: p });
   }
 
@@ -522,6 +603,7 @@ export class Room {
         o.invDirty = true;
       }
     }
+    this.saveSoon = true;
     this.broadcast({ t: "unprefab", id });
   }
 
@@ -668,6 +750,7 @@ export class Room {
     m.inv.coins += b.reward;
     m.inv.bounty = null;
     m.invDirty = true;
+    this.saveSoon = true;
     m.peer.send({ t: "paid", bounty: b });
   }
 
@@ -728,7 +811,10 @@ export class Room {
     const line = m.line;
     if (!line) return;
     m.line = null;
-    if (fish) this.addItem(m, fish);
+    if (fish) {
+      this.addItem(m, fish);
+      this.saveSoon = true;
+    }
     this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "none" });
     this.broadcast({ t: "catch", by: m.id, fish });
   }
@@ -1165,7 +1251,10 @@ export class Room {
       const afz = -Math.cos(a.yaw);
       if (p.kind === "daggers" && (afx * dx + afz * dz) / (d || 1) > 0.4) damage *= 2.5;
       const dead = this.herd.strike(a, this.asPrey(m), damage, now);
-      if (dead) this.addItem(m, a.kind);
+      if (dead) {
+        this.addItem(m, a.kind);
+        this.saveSoon = true;
+      }
       this.broadcast({
         t: "ahit",
         id: a.id,

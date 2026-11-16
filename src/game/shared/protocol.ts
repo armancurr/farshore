@@ -11,7 +11,7 @@ import {
   type KitId,
 } from "./items";
 import type { Prefab } from "./prefabs";
-import { WEAPON_KINDS, type WeaponKind } from "./weapons";
+import type { WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string };
 
@@ -267,6 +267,3 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       return null;
   }
 }
-
-export const isWeaponKind = (v: unknown): v is WeaponKind =>
-  typeof v === "string" && (WEAPON_KINDS as readonly string[]).includes(v);

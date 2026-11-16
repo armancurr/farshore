@@ -44,6 +44,7 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [muted, setMuted] = createSignal(false);
   const [touch, setTouch] = createSignal(false);
   const [controlsOpen, setControlsOpen] = createSignal(false);
+  const [confirmNew, setConfirmNew] = createSignal(false);
 
   const mode = (): Mode => hud()?.mode ?? "attract";
   const playing = () => mode() !== "attract";
@@ -279,6 +280,26 @@ export function GamePanel(props: { onPress?: () => void }) {
             >
               Leave island
             </button>
+            <Show when={mode() === "solo"}>
+              <button
+                type="button"
+                class="border border-white/20 px-5 py-2 font-mono text-[10px] tracking-[0.2em] text-white/60 uppercase hover:border-white/60 hover:text-white"
+                onClick={() => {
+                  if (!confirmNew()) {
+                    setConfirmNew(true);
+                    return;
+                  }
+                  setConfirmNew(false);
+                  startedAt = performance.now();
+                  game?.newIsland();
+                }}
+              >
+                {confirmNew() ? "Sure? Everything here is lost" : "Start a new island"}
+              </button>
+            </Show>
+            <div class="font-mono text-[10px] tracking-[0.12em] text-white/35 uppercase">
+              Your island saves itself in this browser
+            </div>
             <div class="mt-2 font-mono text-[10px] leading-5 tracking-[0.12em] text-white/40 uppercase">
               WASD move · Space jump · Shift sprint
               <br />
