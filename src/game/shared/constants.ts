@@ -46,7 +46,3 @@ export const FALL_DAMAGE = 7; // per m/s beyond that
 export const HEALTH_REGEN = 1.2; // per second
 export const REGEN_DELAY = 8; // seconds after the last hurt
 export const RESPAWN_DELAY = 3.5;
-
-/* Day and night: one full day, in seconds, and where on it a new island starts (0 = midnight). */
-export const DAY_LENGTH = 20 * 60;
-export const DAY_START = 0.3;

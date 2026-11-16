@@ -157,7 +157,7 @@ export type ClientMsg =
   | { t: "stance"; block: boolean; charge: boolean }
   | { t: "interact"; kind: InteractKind; id: number }
   | { t: "slot"; i: number }
-  /* Move a tool into a hotbar slot (1-4), or back to the pack with -1. */
+  /* Move a tool into a hotbar slot (1 to HOTBAR - 1), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
   | { t: "drop"; tool: number }
   | { t: "buy"; item: string }

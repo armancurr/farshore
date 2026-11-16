@@ -25,7 +25,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
   varying vec3 vNormal;
   void main() {
     vec3 n = normalize(vNormal);
-    float diff = moonlight(n);
+    float diff = sunlight(n);
     float h = vWorld.y;
 
     float minor = isoLine(h / uContour, 1.1);
@@ -42,7 +42,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     float dotMask = 1.0 - smoothstep(0.05, 0.09, length(cellPos));
     float dots = step(0.94, grain) * dotMask * 0.12 * (1.0 - steep);
 
-    float c = dayLift(0.022 + 0.11 * diff) + (lines + hatch) * (0.55 + 0.45 * diff) + dots;
+    float c = lift(0.04 + 0.12 * diff) + (lines + hatch) * (0.55 + 0.45 * diff) + dots;
 
     /* Wet sand: a dark band just above the waterline. */
     float above = h - SEA_LEVEL;
@@ -89,14 +89,15 @@ const WATER_FRAGMENT = /* glsl */ `
     float warp = sin(vWorld.x * 0.045 + uTime * 0.3) * 4.0 + sin(vWorld.x * 0.011 - uTime * 0.17) * 11.0;
     float swell = isoLine((vWorld.z + warp) * 0.22 + uTime * 0.2, 0.9) * smoothstep(1.5, 10.0, depth);
 
-    /* The moon's path on the water, broken up by the swell. */
+    /* The sun's path on the water, broken up by the swell. */
     vec3 view = normalize(vWorld - cameraPosition);
     vec3 r = reflect(view, vec3(0.0, 1.0, 0.0));
-    float glint = pow(max(dot(r, uMoon), 0.0), 60.0) * uLight;
+    float glint = pow(max(dot(r, uSun), 0.0), 60.0) * uLight;
     float sparkle = 0.5 + 0.5 * sin(vWorld.x * 2.7 + sin(vWorld.z * 1.9 + uTime * 1.3) * 2.0 + uTime * 2.2);
     glint *= 0.3 + 0.7 * sparkle * sparkle;
 
-    float c = dayLift(0.075) + ripples * 0.32 + swell * 0.16 + foam2 * 0.4 + glint * 0.9;
+    /* Near-black, so the lighter land stands clear of it; the swell stays faint. */
+    float c = 0.08 + ripples * 0.32 + swell * 0.08 + foam2 * 0.4 + glint * 0.9;
     c = max(c, foam * 0.95);
     float alpha = mix(0.55, 0.95, smoothstep(0.0, 5.0, depth));
     alpha = max(alpha, foam);

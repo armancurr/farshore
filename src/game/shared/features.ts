@@ -1,13 +1,14 @@
 /*
  * What's switched on. Everything here still has its code; flipping a flag
- * back brings it back. For now the island is bare: trees, the sea, and you.
+ * back brings it back. For now the island is bare: just the sea and you.
  */
 export const FEATURES = {
   /* The lighthouse on the summit, with the bounty board and the keeper's stall on its plinth. */
   lighthouse: false,
   /* Everything else built: windmill, chapel, mast, henge, villages, towers, aqueduct, wrecks, jetties. */
   landmarks: false,
-  /* Natural and leftover props. Trees are always on. */
+  /* Natural and leftover props. */
+  trees: false,
   rocks: false,
   ruins: false,
   cairns: false,

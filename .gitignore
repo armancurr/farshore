@@ -28,3 +28,4 @@ tsconfig.tsbuildinfo
 .DS_Store
 Thumbs.db
 .oc
+.env*

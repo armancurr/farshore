@@ -29,7 +29,6 @@ import {
   progress,
 } from "../shared/bounties";
 import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
-import { isNight, untilDawn } from "../shared/daylight";
 import { FEATURES } from "../shared/features";
 import {
   BITE_WINDOW,
@@ -666,21 +665,11 @@ export class Room {
     this.boatSpeed.set(p.id, b.speed);
   }
 
-  /*
-   * A bed is where you wake from now on. At night, if you're the only one
-   * here, you sleep straight through to the morning.
-   */
+  /* A bed is where you wake from now on. */
   private sleep(m: Member, bed: Prefab) {
     m.inv.bed = bed.id;
     m.invDirty = true;
-    if (isNight(this.time) && this.humans() === 1) {
-      this.time += untilDawn(this.time);
-      m.health = HEALTH_MAX;
-      m.peer.send({ t: "feed", text: "You sleep until morning" });
-      this.broadcastWorld();
-    } else {
-      m.peer.send({ t: "feed", text: "You'll wake here from now on" });
-    }
+    m.peer.send({ t: "feed", text: "You'll wake here from now on" });
   }
 
   private stash(m: Member, chestId: number, item: ItemId, n: number) {
@@ -840,7 +829,7 @@ export class Room {
       return;
     }
     if (!line.fish && now >= line.biteAt) {
-      line.fish = pickFish(this.rng, line.depth, rod, isNight(this.time));
+      line.fish = pickFish(this.rng, line.depth, rod);
       line.strike = strikeFor(this.rng, line.fish, rod);
       line.biteAt = now;
       m.peer.send({ t: "bite", ...line.strike });

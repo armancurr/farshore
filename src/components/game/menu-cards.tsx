@@ -1,39 +1,26 @@
-import { Check, EnvelopeSimple } from "phosphor-solid";
-import { createSignal, For, type JSX, Show } from "solid-js";
-import { isEmail, joinWaitlist } from "../../lib/waitlist";
-import { Button } from "../ui/button";
-
-/* A key drawn as a little keycap. */
-export function Key(props: { children: JSX.Element }) {
-  return (
-    <kbd class="inline-flex h-6 min-w-6 items-center justify-center rounded-ui border border-[#333] bg-[#222] px-[7px] font-key text-[11px] font-medium text-[#ececec] not-italic shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]">
-      {props.children}
-    </kbd>
-  );
-}
+import { CheckIcon, EnvelopeSimpleIcon } from "@phosphor-icons/react";
+import { Fragment, useRef, useState } from "react";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import { Kbd } from "@/components/ui/kbd";
+import { PopoverTitle } from "@/components/ui/popover";
+import { Separator } from "@/components/ui/separator";
+import { isEmail, joinWaitlist } from "@/lib/waitlist";
 
 /*
- * A solid dark card hanging from a menu button, with a small pointer up to it.
- * It sits a little past the button's right edge so the pointer lands under the icon.
+ * The small pointer from a menu card up to its button. The card sits a little
+ * past the button's right edge, so the pointer lands under the button's icon.
  */
-export function MenuCard(props: {
-  id?: string;
-  role?: JSX.HTMLAttributes<HTMLDivElement>["role"];
-  class?: string;
-  children: JSX.Element;
-}) {
+export function MenuPointer() {
   return (
-    <div
-      id={props.id}
-      role={props.role}
-      class={`relative rounded-[14px] border border-[#242424] bg-[#121212] font-sans text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_24px_48px_-16px_rgba(0,0,0,0.7),0_2px_6px_rgba(0,0,0,0.4)] ${props.class ?? ""}`}
-    >
-      <span
-        aria-hidden="true"
-        class="absolute -top-[6px] right-[14px] size-[10px] rotate-45 rounded-tl-[2px] border-t border-l border-[#242424] bg-[#121212]"
-      />
-      {props.children}
-    </div>
+    <span
+      aria-hidden="true"
+      className="absolute -top-[6px] right-[14px] size-[10px] rotate-45 rounded-tl-[2px] border-t border-l border-[#242424] bg-[#121212]"
+    />
   );
 }
 
@@ -50,7 +37,7 @@ const CONTROL_GROUPS: [string, string[]][][] = [
   [
     ["Use what you hold", ["Click", "F"]],
     ["Grab, talk, open", ["E"]],
-    ["Pick a tool", ["1–5", "Wheel"]],
+    ["Pick a tool", ["1–9", "Wheel"]],
     ["Open your pack", ["Tab", "I"]],
   ],
   [
@@ -61,126 +48,133 @@ const CONTROL_GROUPS: [string, string[]][][] = [
 ];
 
 const CONTROL_FOOT: [string, string][] = [
-  ["N", "Toggle music"],
+  ["C", "This card"],
+  ["N", "Music"],
   ["M", "Mute"],
   ["Esc", "Pause"],
 ];
 
-export function ControlsCard(props: { id?: string }) {
+/* What goes inside the Controls tooltip. */
+export function ControlsCard() {
   return (
-    <MenuCard id={props.id} role="tooltip" class="w-[21rem] px-[18px] pt-[18px] pb-4">
-      <h2 class={title}>Controls</h2>
-      <p class={sub}>Getting by on the island</p>
-      <For each={CONTROL_GROUPS}>
-        {(rows) => (
-          <div class="mt-2 border-t border-[#222] pt-2 first-of-type:mt-3 first-of-type:border-t-0 first-of-type:pt-0">
-            <For each={rows}>
-              {([action, keys]) => (
-                <div class="flex items-center justify-between gap-3 py-[5px] text-[13px] text-[#d6d6d6]">
-                  {action}
-                  <span class="flex gap-1">
-                    <For each={keys}>{(key) => <Key>{key}</Key>}</For>
-                  </span>
-                </div>
-              )}
-            </For>
-          </div>
-        )}
-      </For>
-      <div class="mt-3.5 flex justify-between border-t border-[#222] pt-3 text-xs text-[#8a8a8a]">
-        <For each={CONTROL_FOOT}>
-          {([key, action]) => (
-            <span class="flex items-center gap-1.5">
-              <Key>{key}</Key>
+    <>
+      <h2 className={title}>Controls</h2>
+      <p className={sub}>Getting by on the island</p>
+      {CONTROL_GROUPS.map((rows, g) => (
+        <Fragment key={rows[0][0]}>
+          {g === 0 ? <div className="mt-3" /> : <Separator className="mt-2 mb-2" />}
+          {rows.map(([action, keys]) => (
+            <div
+              key={action}
+              className="flex items-center justify-between gap-3 py-[5px] text-[13px] text-[#d6d6d6]"
+            >
               {action}
-            </span>
-          )}
-        </For>
+              <span className="flex gap-1">
+                {keys.map((key) => (
+                  <Kbd key={key}>{key}</Kbd>
+                ))}
+              </span>
+            </div>
+          ))}
+        </Fragment>
+      ))}
+      <Separator className="mt-3.5" />
+      <div className="flex justify-between pt-3 text-xs text-[#8a8a8a]">
+        {CONTROL_FOOT.map(([key, action]) => (
+          <span key={key} className="flex items-center gap-1.5">
+            <Kbd>{key}</Kbd>
+            {action}
+          </span>
+        ))}
       </div>
-    </MenuCard>
+    </>
   );
 }
 
 /*
- * The form and the "you're on the list" note share one grid cell, so the card
- * keeps its size when it flips between them. Joining shows the note right
- * away; if the send fails, the form comes back with the email still in it.
+ * What goes inside the waitlist popover. The form and the "you're on the list"
+ * note share one grid cell, so the card keeps its size when it flips between
+ * them. Joining shows the note right away; if the send fails, the form comes
+ * back with the email still in it.
  */
-export function WaitlistCard(props: { id?: string }) {
-  let input: HTMLInputElement | undefined;
-  let note: HTMLDivElement | undefined;
-  const [email, setEmail] = createSignal("");
-  const [status, setStatus] = createSignal<"idle" | "done" | "error">("idle");
-  const done = () => status() === "done";
+export function WaitlistCard() {
+  const input = useRef<HTMLInputElement>(null);
+  const note = useRef<HTMLDivElement>(null);
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState<"idle" | "done" | "error">("idle");
+  const done = status === "done";
 
-  const submit = (e: SubmitEvent) => {
+  const submit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (done() || !isEmail(email())) return;
+    if (done || !isEmail(email)) return;
     setStatus("done");
     /* Keep focus inside the card so it stays open on the note. */
-    note?.focus();
-    joinWaitlist(email()).catch((error) => {
+    note.current?.focus();
+    joinWaitlist(email).catch((error) => {
       console.error(error);
       setStatus("error");
-      input?.focus();
+      input.current?.focus();
     });
   };
 
   return (
-    <MenuCard id={props.id} class="grid w-[min(20rem,calc(100vw-1.5rem))]">
+    <div className="grid">
       <form
-        class="[grid-area:1/1] px-[18px] pt-[18px] pb-[18px]"
-        classList={{ invisible: done() }}
+        className={`[grid-area:1/1] px-[18px] pt-[18px] pb-[18px] ${done ? "invisible" : ""}`}
         onSubmit={submit}
       >
-        <h2 class={title}>Join the waitlist</h2>
-        <label for="waitlist-email" class={`block ${sub}`}>
+        <PopoverTitle>Join the waitlist</PopoverTitle>
+        <label htmlFor="waitlist-email" className={`block ${sub}`}>
           You will get an invite when the game is done.
         </label>
-        <div class="mt-4 flex h-[42px] items-center gap-2.5 rounded-ui border border-[#2a2a2a] bg-[#0a0a0a] pr-1.5 pl-3 text-[#5c5c5c] transition-colors focus-within:border-[#4a4a4a]">
-          <EnvelopeSimple size={15} weight="fill" class="flex-none" />
-          <input
+        <InputGroup className="mt-4">
+          <InputGroupAddon>
+            <EnvelopeSimpleIcon size={15} weight="fill" />
+          </InputGroupAddon>
+          <InputGroupInput
             ref={input}
             id="waitlist-email"
             type="email"
             name="email"
             required
-            autocomplete="email"
-            enterkeyhint="send"
+            autoComplete="email"
+            enterKeyHint="send"
             placeholder="you@example.com"
-            value={email()}
-            onInput={(e) => {
+            value={email}
+            onChange={(e) => {
               setEmail(e.currentTarget.value);
-              if (status() === "error") setStatus("idle");
+              if (status === "error") setStatus("idle");
             }}
-            class="h-full min-w-0 flex-1 bg-transparent font-sans text-[13px] text-white placeholder:text-[#5c5c5c] focus:outline-none"
           />
-          <Button type="submit" size="sm" disabled={!isEmail(email())}>
-            Get invite
-          </Button>
-        </div>
-        <Show when={status() === "error"}>
-          <p class="mt-2.5 mb-0 text-xs text-[#8a8a8a]">Couldn't sign you up. Try again.</p>
-        </Show>
+          <InputGroupAddon align="inline-end">
+            <InputGroupButton type="submit" variant="default" size="sm" disabled={!isEmail(email)}>
+              Get invite
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+        {status === "error" && (
+          <p className="mt-2.5 mb-0 text-xs text-[#8a8a8a]">Couldn't sign you up. Try again.</p>
+        )}
       </form>
 
       <div
         ref={note}
         tabIndex={-1}
         aria-live="polite"
-        class="flex flex-col items-center justify-center px-[18px] text-center [grid-area:1/1] focus:outline-none"
-        classList={{ invisible: !done() }}
+        className={`flex flex-col items-center justify-center px-[18px] text-center [grid-area:1/1] focus:outline-none ${done ? "" : "invisible"}`}
       >
-        <Show when={done()}>
-          <div class="mb-3 grid size-[46px] place-items-center rounded-ui border border-[#333] bg-[#222] shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]">
-            <Check size={20} weight="bold" />
-          </div>
-          <h2 class={title}>You're on the list</h2>
-          <p class={`${sub} break-all`}>
-            We'll send your invite to <b class="font-bold text-[#d6d6d6]">{email().trim()}</b>
-          </p>
-        </Show>
+        {done && (
+          <>
+            <div className="mb-3 grid size-[46px] place-items-center rounded-lg border border-[#333] bg-[#222] shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]">
+              <CheckIcon size={20} weight="bold" />
+            </div>
+            <h2 className={title}>You're on the list</h2>
+            <p className={`${sub} break-all`}>
+              We'll send your invite to <b className="font-bold text-[#d6d6d6]">{email.trim()}</b>
+            </p>
+          </>
+        )}
       </div>
-    </MenuCard>
+    </div>
   );
 }

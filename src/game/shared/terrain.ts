@@ -395,7 +395,7 @@ export class Terrain {
     };
 
     /*
-     * Every kind is scattered (so the trees always land in the same places),
+     * Every kind is scattered (so everything always lands in the same places),
      * but a kind that's switched off is taken straight back out again.
      */
     const keepIf = (on: boolean, place: () => void) => {
@@ -482,28 +482,30 @@ export class Terrain {
       }),
     );
 
-    scatter(140, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
-      const scale = range(rng, 0.8, 1.35);
-      this.props.push({
-        id: id++,
-        kind: "tree",
-        x,
-        y: y - 0.3,
-        z,
-        rot: rng() * Math.PI * 2,
-        scale,
-        height: 6.5 * scale,
-        variant: Math.floor(rng() * 1e6),
-      });
-      this.solids.push({
-        x,
-        z,
-        r: 0.32 * scale,
-        bottom: y - 1,
-        top: y + 7 * scale,
-        standable: false,
-      });
-    });
+    keepIf(FEATURES.trees, () =>
+      scatter(140, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
+        const scale = range(rng, 0.8, 1.35);
+        this.props.push({
+          id: id++,
+          kind: "tree",
+          x,
+          y: y - 0.3,
+          z,
+          rot: rng() * Math.PI * 2,
+          scale,
+          height: 6.5 * scale,
+          variant: Math.floor(rng() * 1e6),
+        });
+        this.solids.push({
+          x,
+          z,
+          r: 0.32 * scale,
+          bottom: y - 1,
+          top: y + 7 * scale,
+          standable: false,
+        });
+      }),
+    );
 
     keepIf(FEATURES.buoys, () => {
       for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {

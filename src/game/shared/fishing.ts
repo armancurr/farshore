@@ -33,7 +33,6 @@ export const BITE_WINDOW = 3.2;
 type FishDef = {
   /* Relative odds in shallow, mid and deep water. */
   odds: [number, number, number];
-  night?: "only" | "more";
 };
 
 export const FISH: Record<FishId, FishDef> = {
@@ -42,9 +41,9 @@ export const FISH: Record<FishId, FishDef> = {
   mullet: { odds: [3, 4, 1] },
   bass: { odds: [1, 4, 3] },
   cod: { odds: [0, 1.5, 5] },
-  eel: { odds: [0.3, 1, 1.5], night: "more" },
+  eel: { odds: [0.3, 1, 1.5] },
   moonfish: { odds: [0, 0.25, 2.2] },
-  lanternfish: { odds: [0, 0, 0.7], night: "only" },
+  lanternfish: { odds: [0, 0, 0.35] },
 };
 
 /* Per rarity: the catch window (fraction of the bar) and the needle's speed (sweeps a second). */
@@ -55,7 +54,7 @@ const STRIKE: Record<Rarity, { width: number; speed: number }> = {
   legendary: { width: 0.1, speed: 1.15 },
 };
 
-export function pickFish(rng: Rng, depth: number, rod: RodDef, night: boolean): FishId {
+export function pickFish(rng: Rng, depth: number, rod: RodDef): FishId {
   const w = watersFor(depth);
   const zone = w === "shallow" ? 0 : w === "mid" ? 1 : 2;
   /* Out past the shelf, rare things come closer to the surface. */
@@ -65,8 +64,6 @@ export function pickFish(rng: Rng, depth: number, rod: RodDef, night: boolean): 
     const def = FISH[id];
     const rank = rarityRank(ITEMS[id].rarity ?? "common");
     let o = def.odds[zone] * (1 + rod.luck * rank * 0.6) * (rank >= 2 ? open : 1);
-    if (def.night === "only" && !night) o = 0;
-    if (def.night === "more" && night) o *= 3;
     total += o;
     return o;
   });
