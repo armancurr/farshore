@@ -1,5 +1,6 @@
-import { onCleanup, onMount } from "solid-js";
+import { useEffect } from "react";
 
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { haptics } from "./lib/use-haptics";
 import { playLensClick, unlockAudio } from "./lib/use-sound";
 import { HomePage } from "./pages/home";
@@ -13,10 +14,18 @@ function getRoute(pathname: string): AppRoute {
   return { name: "not-found" };
 }
 
+const handlePress = () => {
+  void unlockAudio().then((ready) => {
+    if (ready) playLensClick({ direction: 1, intensity: 0.7 });
+  });
+
+  haptics.click();
+};
+
 export default function App() {
   const route = getRoute(window.location.pathname);
 
-  onMount(() => {
+  useEffect(() => {
     const primeAudio = () => {
       void unlockAudio();
     };
@@ -24,23 +33,15 @@ export default function App() {
     window.addEventListener("pointerdown", primeAudio, { capture: true });
     window.addEventListener("keydown", primeAudio, { capture: true });
 
-    onCleanup(() => {
+    return () => {
       window.removeEventListener("pointerdown", primeAudio, { capture: true });
       window.removeEventListener("keydown", primeAudio, { capture: true });
-    });
-  });
+    };
+  }, []);
 
-  const handlePress = () => {
-    void unlockAudio().then((ready) => {
-      if (ready) playLensClick({ direction: 1, intensity: 0.7 });
-    });
-
-    haptics.click();
-  };
-
-  if (route.name === "not-found") {
-    return <NotFoundPage />;
-  }
-
-  return <HomePage onPress={handlePress} />;
+  return (
+    <TooltipProvider>
+      {route.name === "not-found" ? <NotFoundPage /> : <HomePage onPress={handlePress} />}
+    </TooltipProvider>
+  );
 }

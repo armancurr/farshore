@@ -2,7 +2,6 @@ import * as THREE from "three";
 import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
 import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
 import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
-import { clockLabel, daylight, isNight } from "../shared/daylight";
 import { FEATURES } from "../shared/features";
 import {
   BITE_TEXT,
@@ -123,7 +122,6 @@ export type HudState = {
   mode: Mode;
   connecting: boolean;
   notice: string | null;
-  clock: { day: number; time: string; part: string };
   humans: number;
   name: string;
   player: boolean;
@@ -484,7 +482,6 @@ export class Game {
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setSize(w, h, false);
     this.post.setSize(Math.floor(w * this.pixelRatio), Math.floor(h * this.pixelRatio));
-    this.sky.setPixelRatio(this.pixelRatio);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
@@ -1069,7 +1066,6 @@ export class Game {
 
     const t = now / 1000;
     shared.uTime.value = t;
-    if (this.haveClock) this.sky.update(this.worldTime());
 
     this.update(dt);
 
@@ -1322,14 +1318,12 @@ export class Game {
           id: p.id,
           label: "E · Open the chest",
         }));
-      else if (p.kind === "bed") {
-        const night = this.haveClock && isNight(this.worldTime());
+      else if (p.kind === "bed")
         consider(p.x, p.y, p.z, 2.6, () => ({
           kind: "prefab",
           id: p.id,
-          label: night ? "E · Sleep until morning" : "E · Rest (you'll wake here)",
+          label: "E · Rest (you'll wake here)",
         }));
-      }
     }
     for (const w of world.drops.list()) {
       consider(w.x, w.y, w.z, 2.6, () => ({
@@ -1807,7 +1801,6 @@ export class Game {
       mode: this.mode,
       connecting: this.connecting,
       notice: this.notice,
-      clock: clockLabel(this.haveClock ? this.worldTime() : 0),
       humans: this.roster.length,
       name: this.myName,
       player: playing,
@@ -1862,11 +1855,10 @@ export class Game {
     });
   }
 
-  /* How tense the score should be: night, low breath, low health. */
+  /* How tense the score should be: low breath, low health, danger. */
   private musicIntensity() {
     if (this.mode === "attract") return 0.05;
     if (!this.body || this.down) return 0.15;
-    const night = this.haveClock ? 1 - daylight(this.worldTime()) : 0;
     let danger = 0;
     for (const a of this.herd.list().values()) {
       if (a.state !== ANIMAL_STATE.charge && a.state !== ANIMAL_STATE.alert) continue;
@@ -1874,6 +1866,6 @@ export class Game {
     }
     const breath = clamp(1 - this.breath / 100, 0, 1);
     const hurt = clamp(1 - this.health / HEALTH_MAX, 0, 1);
-    return clamp(0.12 + night * 0.12 + breath * 0.4 + hurt * 0.45 + danger * 0.4, 0, 1);
+    return clamp(0.12 + breath * 0.4 + hurt * 0.45 + danger * 0.4, 0, 1);
   }
 }

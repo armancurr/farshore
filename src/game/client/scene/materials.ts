@@ -1,26 +1,24 @@
 import * as THREE from "three";
 
 /*
- * One light, one fog: every material reads the same uniforms. The sky moves
- * them through the day: `uMoon` is whichever of moon or sun is up, `uLight`
- * how much it shapes things (nothing at dawn and dusk), `uDay` how far into
- * daylight we are, and the fog fades from black to a soft grey.
+ * One light, one fog: every material reads the same uniforms. They're fixed:
+ * it's always day. `uSun` is the direction to the sun (high in the sky, where
+ * the sky draws it), `uLight` how much it shapes things, and `uFogTone` the
+ * grey distance fades to.
  */
 export const shared = {
-  uFog: { value: 0.0033 },
-  uFogTone: { value: 0 },
-  uMoon: { value: new THREE.Vector3(-0.45, 0.62, -0.64).normalize() },
+  uFog: { value: 0.0012 },
+  uFogTone: { value: 0.1 },
+  uSun: { value: new THREE.Vector3(-0.33, 0.82, -0.47).normalize() },
   uLight: { value: 1 },
-  uDay: { value: 0 },
   uTime: { value: 0 },
 };
 
 export const GLSL_COMMON = /* glsl */ `
   uniform float uFog;
   uniform float uFogTone;
-  uniform vec3 uMoon;
+  uniform vec3 uSun;
   uniform float uLight;
-  uniform float uDay;
   uniform float uTime;
   const float SEA_LEVEL = 0.0;
 
@@ -29,19 +27,19 @@ export const GLSL_COMMON = /* glsl */ `
     return 1.0 - exp(-uFog * uFog * d * d);
   }
 
-  /* Distance fades into the fog: black at night, grey by day. */
+  /* Distance fades into the fog's grey. */
   float applyFog(float c, vec3 world) {
     return mix(c, uFogTone, fogFactor(world));
   }
 
   /* Diffuse light, flattened when the light source sits on the horizon. */
-  float moonlight(vec3 n) {
-    return mix(0.45, max(dot(n, uMoon), 0.0), uLight);
+  float sunlight(vec3 n) {
+    return mix(0.45, max(dot(n, uSun), 0.0), uLight);
   }
 
-  /* Daylight lifts the dark ink toward soft greys. */
-  float dayLift(float c) {
-    return min(c * (1.0 + uDay * 1.5) + uDay * 0.045, 0.97);
+  /* Lifts the dark ink toward soft greys. */
+  float lift(float c) {
+    return min(c * 2.5 + 0.045, 0.97);
   }
 
   /* An anti-aliased iso-line of v, roughly px pixels wide, fading out where it would alias. */
@@ -79,9 +77,9 @@ export const INK_FRAGMENT = /* glsl */ `
   void main() {
     vec3 n = normalize(vNormal);
     if (!gl_FrontFacing) n = -n;
-    float diff = moonlight(n);
+    float diff = sunlight(n);
     float rim = pow(1.0 - abs(dot(n, normalize(cameraPosition - vWorld))), 3.0);
-    float c = dayLift(uTone * (0.35 + 0.65 * diff) + rim * 0.05) + uLit;
+    float c = lift(uTone * (0.35 + 0.65 * diff) + rim * 0.05) + uLit;
     /* Anything below the waterline reads as submerged. */
     c *= mix(1.0, 0.45, step(vWorld.y, SEA_LEVEL));
     gl_FragColor = vec4(vec3(applyFog(c, vWorld)), uOpacity);

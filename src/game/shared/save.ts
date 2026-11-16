@@ -99,8 +99,10 @@ function prefab(v: unknown): Prefab | null {
 function inventory(v: unknown): Inventory | null {
   if (!isObj(v) || !int(v.coins, 0, 1e9) || !int(v.slot, 0, HOTBAR - 1)) return null;
   const its = items(v.items);
-  if (!its || !Array.isArray(v.tools) || !Array.isArray(v.hotbar) || v.hotbar.length !== HOTBAR)
+  /* Older saves have a shorter belt; the new slots start empty. */
+  if (!its || !Array.isArray(v.tools) || !Array.isArray(v.hotbar) || v.hotbar.length > HOTBAR)
     return null;
+  const saved: unknown[] = [...v.hotbar, ...Array(HOTBAR - v.hotbar.length).fill(null)];
   const tools: Tool[] = [];
   for (const t of v.tools) {
     if (!isObj(t) || !id(t.id) || !isToolKind(t.kind) || !int(t.uses, -1, 1000)) return null;
@@ -110,7 +112,7 @@ function inventory(v: unknown): Inventory | null {
   if (tools.length > MAX_TOOLS) return null;
   /* Slot 1 is always fists; other slots must point at tools you have, once each. */
   const seen = new Set<number>();
-  const hotbar = v.hotbar.map((h, i) => {
+  const hotbar = saved.map((h, i) => {
     if (i === 0 || !id(h) || seen.has(h) || !tools.some((t) => t.id === h)) return null;
     seen.add(h);
     return h;

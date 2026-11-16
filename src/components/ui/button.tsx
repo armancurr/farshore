@@ -1,25 +1,68 @@
-import { type JSX, splitProps } from "solid-js";
-
-const SIZES = {
-  /* The full button, the one clear action on a card. */
-  md: "h-[42px] px-4 text-sm",
-  /* Tucked inside a field, at the end of an input. */
-  sm: "h-[30px] px-3 text-[13px]",
-};
+import { Button as ButtonPrimitive } from "@base-ui/react/button";
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "cn";
 
 /*
- * The solid light button. Pass `class` to size or place it, `size` for the
- * smaller one that sits inside a field.
+ * shadcn's Button, restyled for farshore. `default` is the solid light button
+ * on the menu cards; `menu` is the bold title-bar link; the mono, uppercase
+ * variants are the in-game panels; `slot` is the belt.
  */
-export function Button(
-  props: JSX.ButtonHTMLAttributes<HTMLButtonElement> & { size?: keyof typeof SIZES },
-) {
-  const [local, rest] = splitProps(props, ["class", "type", "size"]);
+const buttonVariants = cva(
+  "group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap outline-none select-none [&_svg]:pointer-events-none [&_svg]:shrink-0",
+  {
+    variants: {
+      variant: {
+        default:
+          "gap-2 rounded-lg border border-[#d4d4d4] bg-[#f2f2f2] font-sans font-extrabold text-[#0a0a0a] transition-[background-color,scale] duration-100 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#f2f2f2] disabled:active:scale-100",
+        menu: "gap-1.5 font-sans leading-none font-bold text-white transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100",
+        ghost: "rounded-lg text-white hover:bg-white/10 focus-visible:bg-white/10",
+        /* Thin white rule, fills white under the pointer. Panels and the pause menu. */
+        outline:
+          "border border-white/40 font-mono text-white uppercase hover:bg-white hover:text-black disabled:pointer-events-none disabled:opacity-30",
+        /* The dark twin of default: the second choice next to a light button. */
+        secondary:
+          "gap-2 rounded-lg border border-[#2a2a2a] bg-[#1c1c1c] font-sans font-extrabold text-white transition-[background-color,scale] duration-100 hover:bg-[#242424] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white active:scale-[0.98]",
+        /* Quiet text, for the less likely choice. */
+        link: "font-sans text-xs font-bold text-[#8a8a8a] transition-colors hover:text-white focus-visible:text-white",
+        /* A belt slot. data-selected marks the one in hand: it turns bright. */
+        slot: "relative rounded-lg bg-[#1c1c1c] text-[#bdbdbd] transition-colors data-[selected=true]:bg-[#f2f2f2] data-[selected=true]:text-[#0a0a0a]",
+        /* The round thumb buttons on phones. */
+        touch:
+          "rounded-full border border-white/40 bg-black/40 font-mono text-[10px] tracking-[0.15em] text-white uppercase active:bg-white active:text-black",
+      },
+      size: {
+        default: "h-[42px] px-4 text-sm",
+        sm: "h-[30px] px-3 text-[13px]",
+        /* Sized by its text alone: the title-bar links. */
+        inline: "text-[15px]",
+        "hud-xs": "px-2.5 py-1 text-[10px] tracking-[0.18em]",
+        /* Sized by its text alone, at the text's own size. */
+        bare: "",
+        slot: "size-[34px] sm:size-10",
+        touch: "size-16",
+        "icon-sm": "size-7",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  },
+);
+
+function Button({
+  className,
+  variant = "default",
+  size = "default",
+  ...props
+}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
   return (
-    <button
-      type={local.type ?? "button"}
-      class={`inline-flex flex-none cursor-pointer items-center justify-center gap-2 rounded-ui border border-[#d4d4d4] bg-[#f2f2f2] font-sans font-extrabold text-[#0a0a0a] transition-[background-color,scale] duration-100 select-none hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#f2f2f2] disabled:active:scale-100 ${SIZES[local.size ?? "md"]} ${local.class ?? ""}`}
-      {...rest}
+    <ButtonPrimitive
+      data-slot="button"
+      className={cn(buttonVariants({ variant, size, className }))}
+      {...props}
     />
   );
 }
+
+export { Button, buttonVariants };

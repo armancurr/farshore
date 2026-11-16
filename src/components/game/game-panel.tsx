@@ -1,26 +1,33 @@
-import { EnvelopeSimple, GameController, Play } from "phosphor-solid";
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { EnvelopeSimpleIcon, ArrowBendDownLeftIcon, PlayIcon } from "@phosphor-icons/react";
+import { cn } from "cn";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Kbd } from "@/components/ui/kbd";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
-import { ControlsCard, WaitlistCard } from "./menu-cards";
+import { ControlsCard, MenuPointer, WaitlistCard } from "./menu-cards";
 import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
 
 const ONLINE_ENABLED = false;
-/* The game stays closed to the public unless a build opts in with VITE_PLAY_ENABLED=true. */
-const PLAY_ENABLED = import.meta.env.VITE_PLAY_ENABLED === "true";
 
-/* Menu buttons: written like the card titles (bold sans, sentence case), growing a little under the pointer. */
-const menuButton =
-  "flex cursor-pointer items-center gap-1.5 font-sans text-[15px] leading-none font-bold text-white transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100";
+/*
+ * Where a menu card hangs: under its button, right edges lined up, then
+ * pushed 12px past the button so the card's pointer sits under the icon.
+ */
+/* The key badge after a title-bar link. */
+const menuKbd = "h-5 min-w-5 px-1.5 text-[10px]";
 
-/* A card hanging under a menu button, scaling in from the button's corner. */
-const menuPop =
-  "absolute top-full -right-3 z-10 origin-top-right pt-3 transition-[opacity,scale,visibility] duration-150 ease-out";
-const menuPopShut = "invisible scale-[0.96] opacity-0";
-const menuPopOpen = "visible scale-100 opacity-100";
+const menuCardPlacement = {
+  side: "bottom",
+  align: "end",
+  sideOffset: 12,
+  alignOffset: -12,
+} as const;
 
 /*
  * The left two thirds of the site. While nobody is playing, the island idles
@@ -28,343 +35,303 @@ const menuPopOpen = "visible scale-100 opacity-100";
  * takes over the screen.
  */
 export function GamePanel(props: { onPress?: () => void }) {
-  let host!: HTMLDivElement;
-  let root!: HTMLDivElement;
-  let waitlistRoot: HTMLDivElement | undefined;
-  let waitlistCard: HTMLDivElement | undefined;
-  let game: Game | null = null;
-  let statusTimer: ReturnType<typeof setInterval> | undefined;
+  const host = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const waitlistCard = useRef<HTMLDivElement>(null);
+  const gameRef = useRef<Game | null>(null);
+  const startedAt = useRef(0);
 
-  const [status, setStatus] = createSignal<Status>("loading");
-  const [hud, setHud] = createSignal<HudState | null>(null, { equals: false });
-  const [online, setOnline] = createSignal<number | null>(null);
-  const [onlineAvailable, setOnlineAvailable] = createSignal(false);
-  const [muted, setMuted] = createSignal(false);
-  const [touch, setTouch] = createSignal(false);
+  const [status, setStatus] = useState<Status>("loading");
+  const [game, setGame] = useState<Game | null>(null);
+  const [hud, setHud] = useState<HudState | null>(null);
+  const [online, setOnline] = useState<number | null>(null);
+  const [onlineAvailable, setOnlineAvailable] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [touch, setTouch] = useState(false);
+  const [confirmNew, setConfirmNew] = useState(false);
   /*
-   * Both menu cards open on hover. Keyboard focus opens them too, and the
-   * waitlist stays up while focus is inside it (typing, or the note after
-   * joining). A tap pins it on touch screens, where nothing hovers.
+   * Both menu cards open on hover. Keyboard focus opens Controls; the waitlist
+   * opens on Enter or a tap, and stays up while focus is inside it (typing, or
+   * the note after joining). The Controls card steps aside while it's up.
    */
-  const [hovered, setHovered] = createSignal<"controls" | "waitlist" | null>(null);
-  const [controlsKeyed, setControlsKeyed] = createSignal(false);
-  const [waitlistKeyed, setWaitlistKeyed] = createSignal(false);
-  const [waitlistFocused, setWaitlistFocused] = createSignal(false);
-  const [waitlistPinned, setWaitlistPinned] = createSignal(false);
-  const controlsShown = () => (hovered() === "controls" || controlsKeyed()) && !waitlistFocused();
-  const waitlistShown = () =>
-    waitlistFocused() ||
-    (!controlsShown() && (hovered() === "waitlist" || waitlistKeyed() || waitlistPinned()));
-  const hoverOn = (which: "controls" | "waitlist") => (e: PointerEvent) => {
-    if (e.pointerType === "mouse") setHovered(which);
-  };
-  const hoverOff = (which: "controls" | "waitlist") => () => {
-    if (hovered() === which) setHovered(null);
-  };
-  const closeWaitlist = () => {
-    setWaitlistPinned(false);
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && waitlistRoot?.contains(active)) active.blur();
-  };
-  const [confirmNew, setConfirmNew] = createSignal(false);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [waitlistOpen, setWaitlistOpen] = useState(false);
 
-  const mode = (): Mode => hud()?.mode ?? "attract";
-  const playing = () => mode() !== "attract";
+  const mode: Mode = hud?.mode ?? "attract";
+  const playing = mode !== "attract";
 
-  const load = async () => {
-    try {
-      const mod = await import("../../game/client/game");
-      const net = await import("../../game/client/net");
-      game = new mod.Game(host, setHud);
-      setTouch(game.touch);
-      if (import.meta.env.DEV) (window as unknown as { __tide: Game }).__tide = game;
-      setStatus("ready");
-      setOnlineAvailable(net.serverBase() !== null);
-      const poll = async () => {
-        const s = await net.fetchStatus();
-        setOnline(s ? s.humans : null);
-      };
-      void poll();
-      statusTimer = setInterval(() => {
-        if (mode() === "attract") void poll();
-      }, 15000);
-    } catch (error) {
-      console.error(error);
-      setStatus("failed");
-    }
-  };
+  const toggleMute = useCallback(() => {
+    const next = !latest.current.muted;
+    setMuted(next);
+    gameRef.current?.setMuted(next);
+  }, []);
 
-  onMount(() => {
+  useEffect(() => {
+    let disposed = false;
+    let statusTimer: ReturnType<typeof setInterval> | undefined;
+
+    const load = async () => {
+      try {
+        const mod = await import("../../game/client/game");
+        const net = await import("../../game/client/net");
+        if (disposed || !host.current) return;
+        const g = new mod.Game(host.current, setHud);
+        gameRef.current = g;
+        setGame(g);
+        setTouch(g.touch);
+        if (import.meta.env.DEV) (window as unknown as { __tide: Game }).__tide = g;
+        setStatus("ready");
+        setOnlineAvailable(net.serverBase() !== null);
+        const poll = async () => {
+          const s = await net.fetchStatus();
+          if (!disposed) setOnline(s ? s.humans : null);
+        };
+        void poll();
+        statusTimer = setInterval(() => {
+          if (latest.current.mode === "attract") void poll();
+        }, 15000);
+      } catch (error) {
+        console.error(error);
+        if (!disposed) setStatus("failed");
+      }
+    };
+
     /* Don't pull three.js in until the panel is actually on screen. */
     const io = new IntersectionObserver(([entry]) => {
       if (!entry.isIntersecting) return;
       io.disconnect();
       void load();
     });
-    io.observe(root);
+    if (root.current) io.observe(root.current);
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === "KeyM" && playing()) toggleMute();
-      if (e.code === "Escape") closeWaitlist();
+      if (e.code === "KeyM" && latest.current.playing) toggleMute();
+      if (e.code === "Escape") setWaitlistOpen(false);
+      /* C toggles the Controls card, anywhere but a text field. */
+      const typing =
+        e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      if (e.code === "KeyC" && !e.repeat && !typing && !latest.current.touch) {
+        setWaitlistOpen(false);
+        setControlsOpen((open) => !open);
+      }
+      /* On the title screen: Enter goes ashore, J opens the waitlist (and its field). */
+      const onTitle = latest.current.ready && !latest.current.playing && !typing && !e.repeat;
+      if (onTitle && e.code === "Enter" && !(e.target instanceof HTMLButtonElement)) {
+        e.preventDefault();
+        latest.current.play("solo");
+      }
+      if (onTitle && e.code === "KeyJ") {
+        e.preventDefault();
+        setControlsOpen(false);
+        setWaitlistOpen(true);
+        setTimeout(() => document.getElementById("waitlist-email")?.focus(), 30);
+      }
       /* Panels have the mouse; these keys put it away again. */
-      const panel = hud()?.panel;
+      const panel = latest.current.hud?.panel;
       if (panel && ["Escape", "Tab", "KeyI", "KeyE"].includes(e.code)) {
         e.preventDefault();
-        game?.closePanel();
+        gameRef.current?.closePanel();
       }
     };
-    const onPointerDown = (e: PointerEvent) => {
-      if (waitlistRoot && !waitlistRoot.contains(e.target as Node)) setWaitlistPinned(false);
-    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("pointerdown", onPointerDown);
-    onCleanup(() => {
+
+    return () => {
+      disposed = true;
       io.disconnect();
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onPointerDown);
       clearInterval(statusTimer);
-      game?.dispose();
-    });
-  });
+      gameRef.current?.dispose();
+      gameRef.current = null;
+    };
+  }, [toggleMute]);
 
-  let startedAt = 0;
   const play = (next: Mode) => {
-    if (!PLAY_ENABLED) return;
     props.onPress?.();
-    closeWaitlist();
+    setWaitlistOpen(false);
     if (!game) return;
-    startedAt = performance.now();
+    startedAt.current = performance.now();
     game.start(next);
     game.lock();
   };
+
+  /* The keyboard handler and the status poll live outside renders; give them the latest. */
+  const latest = useRef({ hud, playing, mode, muted, touch, ready: false, play });
+  latest.current = { hud, playing, mode, muted, touch, ready: status === "ready", play };
 
   const leave = () => {
     game?.input.unlock();
     game?.start("attract");
   };
 
-  const toggleMute = () => {
-    const next = !muted();
-    setMuted(next);
-    game?.setMuted(next);
-  };
-
-  const paused = () => {
-    const h = hud();
-    /* Give the pointer lock a moment to engage before calling it a pause. */
-    return (
-      !!h && playing() && !touch() && !h.locked && !h.panel && performance.now() - startedAt > 500
-    );
-  };
+  /* Give the pointer lock a moment to engage before calling it a pause. */
+  const paused =
+    !!hud &&
+    playing &&
+    !touch &&
+    !hud.locked &&
+    !hud.panel &&
+    performance.now() - startedAt.current > 500;
 
   return (
     <div
       ref={root}
-      class="bg-black"
-      classList={{
-        "fixed inset-0 z-50": playing(),
-        "relative h-full w-full": !playing(),
-      }}
+      className={cn("bg-black", playing ? "fixed inset-0 z-50" : "relative h-full w-full")}
     >
       <div
         ref={host}
-        class="absolute inset-0"
-        classList={{ "cursor-none": playing() && !paused() }}
-        onClick={() => playing() && game?.lock()}
+        className={cn("absolute inset-0", playing && !paused && "cursor-none")}
+        onClick={() => playing && game?.lock()}
       />
 
-      <Show when={status() !== "ready"}>
-        <div class="absolute inset-0 flex items-center justify-center">
-          <div class="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
-            {status() === "failed"
+      {status !== "ready" && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
+            {status === "failed"
               ? "This browser can't draw the island (WebGL is off)"
               : "Charting the island…"}
           </div>
         </div>
-      </Show>
+      )}
 
-      <Show when={playing() && hud()}>
-        {(h) => <Hud hud={h()} touch={touch()} onSelect={(i) => game?.selectSlot(i)} />}
-      </Show>
+      {playing && hud && <Hud hud={hud} touch={touch} onSelect={(i) => game?.selectSlot(i)} />}
 
-      <Show when={playing() && hud()?.panel === "inventory" && game}>
-        <InventoryPanel hud={hud()!} game={game!} />
-      </Show>
-      <Show when={playing() && hud()?.panel === "board" && game}>
-        <BoardPanel hud={hud()!} game={game!} />
-      </Show>
-      <Show when={playing() && hud()?.panel === "shop" && game}>
-        <ShopPanel hud={hud()!} game={game!} />
-      </Show>
-      <Show when={playing() && hud()?.panel === "chest" && game}>
-        <ChestPanel hud={hud()!} game={game!} />
-      </Show>
+      {playing && hud && game && (
+        <>
+          {hud.panel === "inventory" && <InventoryPanel hud={hud} game={game} />}
+          {hud.panel === "board" && <BoardPanel hud={hud} game={game} />}
+          {hud.panel === "shop" && <ShopPanel hud={hud} game={game} />}
+          {hud.panel === "chest" && <ChestPanel hud={hud} game={game} />}
+        </>
+      )}
 
-      <Show when={status() === "ready" && !playing()}>
-        <div class="absolute inset-x-5 top-5 flex items-center justify-between gap-6 sm:inset-x-6 sm:top-6">
-          <div class="font-display text-2xl leading-none text-white select-none">farshore</div>
-          <div class="flex items-center gap-4 sm:gap-6">
-            <button
-              type="button"
-              class={menuButton}
-              disabled={!PLAY_ENABLED}
-              title={PLAY_ENABLED ? undefined : "Not open yet. Join the waitlist"}
-              onClick={() => play("solo")}
-            >
-              Go ashore
-              <Play size={13} weight="fill" />
-            </button>
-            {/* Multiplayer is parked for now; the online path still builds. */}
-            <Show when={ONLINE_ENABLED && onlineAvailable()}>
-              <button type="button" class={menuButton} onClick={() => play("online")}>
-                Online
-                <Show when={online()}>
-                  <span class="opacity-50">{online()}</span>
-                </Show>
-              </button>
-            </Show>
-            <Show when={!touch()}>
-              <div
-                class="relative flex flex-col items-end"
-                onPointerEnter={hoverOn("controls")}
-                onPointerLeave={hoverOff("controls")}
-                onFocusIn={(e) => setControlsKeyed(e.target.matches(":focus-visible"))}
-                onFocusOut={() => setControlsKeyed(false)}
-              >
-                <button type="button" class={menuButton} aria-describedby="controls-card">
-                  Controls
-                  <GameController size={14} weight="fill" />
-                </button>
-                <div class={`${menuPop} ${controlsShown() ? menuPopOpen : menuPopShut}`}>
-                  <ControlsCard id="controls-card" />
-                </div>
-              </div>
-            </Show>
-            <div
-              ref={waitlistRoot}
-              class="relative flex flex-col items-end"
-              onPointerEnter={hoverOn("waitlist")}
-              onPointerLeave={hoverOff("waitlist")}
-              onFocusIn={(e) => {
-                setWaitlistKeyed(e.target.matches(":focus-visible"));
-                setWaitlistFocused(!!waitlistCard?.contains(e.target));
-              }}
-              onFocusOut={(e) => {
-                if (waitlistRoot?.contains(e.relatedTarget as Node | null)) return;
-                setWaitlistKeyed(false);
-                setWaitlistFocused(false);
-              }}
-            >
-              <button
-                type="button"
-                class={menuButton}
-                aria-expanded={waitlistShown()}
-                aria-controls="waitlist-card"
-                onClick={(e) => {
-                  if (!touch()) return;
-                  e.currentTarget.blur();
-                  setWaitlistPinned(!waitlistPinned());
+      {status === "ready" && !playing && (
+        <>
+          <div className="absolute inset-x-5 top-5 flex items-center justify-between gap-6 sm:inset-x-6 sm:top-6">
+            <div className="font-display text-2xl leading-none text-white select-none">
+              farshore
+            </div>
+            <div className="flex items-center gap-4 sm:gap-6">
+              <Button variant="menu" size="inline" onClick={() => play("solo")}>
+                Go ashore
+                {touch ? (
+                  <PlayIcon size={13} weight="fill" />
+                ) : (
+                  <Kbd className={menuKbd} aria-label="Enter">
+                    <ArrowBendDownLeftIcon weight="bold" />
+                  </Kbd>
+                )}
+              </Button>
+              {/* Multiplayer is parked for now; the online path still builds. */}
+              {ONLINE_ENABLED && onlineAvailable && (
+                <Button variant="menu" size="inline" onClick={() => play("online")}>
+                  Online
+                  {!!online && <span className="opacity-50">{online}</span>}
+                </Button>
+              )}
+              {!touch && (
+                <ControlsMenu open={controlsOpen && !waitlistOpen} onOpenChange={setControlsOpen} />
+              )}
+              <Popover
+                open={waitlistOpen}
+                onOpenChange={(open, details) => {
+                  /* Wandering off with the pointer doesn't close it mid-typing. */
+                  const typing = waitlistCard.current?.contains(document.activeElement);
+                  if (!open && details.reason === "trigger-hover" && typing) return;
+                  setWaitlistOpen(open);
                 }}
               >
-                Join waitlist
-                <EnvelopeSimple size={14} weight="fill" />
-              </button>
-              <div
-                ref={waitlistCard}
-                class={`${menuPop} ${waitlistShown() ? menuPopOpen : menuPopShut}`}
-              >
-                <WaitlistCard id="waitlist-card" />
-              </div>
+                <PopoverTrigger
+                  openOnHover={!touch}
+                  delay={0}
+                  render={<Button variant="menu" size="inline" />}
+                >
+                  Join waitlist
+                  {touch ? (
+                    <EnvelopeSimpleIcon size={14} weight="fill" />
+                  ) : (
+                    <Kbd className={menuKbd}>J</Kbd>
+                  )}
+                </PopoverTrigger>
+                <PopoverContent
+                  ref={waitlistCard}
+                  initialFocus={false}
+                  {...menuCardPlacement}
+                  className="w-[min(20rem,calc(100vw-1.5rem))]"
+                >
+                  <MenuPointer />
+                  <WaitlistCard />
+                </PopoverContent>
+              </Popover>
             </div>
           </div>
-        </div>
-        <Show when={hud()?.notice}>
-          <div class="absolute top-5 left-1/2 -translate-x-1/2 border border-white/30 bg-black/80 px-4 py-2 text-sm text-white">
-            {hud()?.notice}
-          </div>
-        </Show>
-      </Show>
-
-      <Show when={playing() && touch() && game}>
-        <TouchControls input={game!.input} />
-      </Show>
-
-      <Show when={playing()}>
-        <div class="absolute top-4 right-4 flex gap-2">
-          <button
-            type="button"
-            class="border border-white/30 bg-black/60 px-3 py-1.5 font-mono text-[10px] tracking-[0.2em] text-white/80 uppercase hover:bg-white hover:text-black"
-            onClick={toggleMute}
-          >
-            {muted() ? "Sound off" : "Sound on"}
-          </button>
-          <button
-            type="button"
-            class="border border-white/30 bg-black/60 px-3 py-1.5 font-mono text-[10px] tracking-[0.2em] text-white/80 uppercase hover:bg-white hover:text-black"
-            onClick={() => game?.toggleMusic()}
-          >
-            {hud()?.music === false ? "Music off" : "Music on"}
-          </button>
-          <Show when={touch()}>
-            <button
-              type="button"
-              class="border border-white/30 bg-black/60 px-3 py-1.5 font-mono text-[10px] tracking-[0.2em] text-white/80 uppercase"
-              onClick={leave}
-            >
-              Leave
-            </button>
-          </Show>
-        </div>
-      </Show>
-
-      <Show when={paused()}>
-        <div class="absolute inset-0 flex items-center justify-center bg-black/70">
-          <div class="flex w-[min(90%,320px)] flex-col gap-3">
-            <div class="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
-              {mode() === "solo" ? "Paused" : "The island carries on without you"}
+          {hud?.notice && (
+            <div className="absolute top-5 left-1/2 -translate-x-1/2 border border-white/30 bg-black/80 px-4 py-2 text-sm text-white">
+              {hud.notice}
             </div>
-            <button
-              type="button"
-              class="bg-white px-5 py-3 font-mono text-[12px] tracking-[0.2em] text-black uppercase"
-              onClick={() => game?.lock()}
-            >
-              Resume
-            </button>
-            <button
-              type="button"
-              class="border border-white/50 px-5 py-3 font-mono text-[12px] tracking-[0.2em] text-white uppercase hover:bg-white hover:text-black"
-              onClick={leave}
-            >
+          )}
+        </>
+      )}
+
+      {playing && touch && game && <TouchControls input={game.input} />}
+
+      {paused && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/45 backdrop-blur-[6px]">
+          <div className="flex gap-2">
+            <Button onClick={() => game?.lock()}>Resume</Button>
+            <Button variant="secondary" onClick={leave}>
               Leave island
-            </button>
-            <Show when={mode() === "solo"}>
-              <button
-                type="button"
-                class="border border-white/20 px-5 py-2 font-mono text-[10px] tracking-[0.2em] text-white/60 uppercase hover:border-white/60 hover:text-white"
-                onClick={() => {
-                  if (!confirmNew()) {
-                    setConfirmNew(true);
-                    return;
-                  }
-                  setConfirmNew(false);
-                  startedAt = performance.now();
-                  game?.newIsland();
-                }}
-              >
-                {confirmNew() ? "Sure? Everything here is lost" : "Start a new island"}
-              </button>
-            </Show>
-            <div class="font-mono text-[10px] tracking-[0.12em] text-white/35 uppercase">
-              Your island saves itself in this browser
-            </div>
-            <div class="mt-2 font-mono text-[10px] leading-5 tracking-[0.12em] text-white/40 uppercase">
-              WASD move · Space jump · Shift sprint
-              <br />
-              Click / F punch, cast and strike
-              <br />E interact · 1–5 hotbar · Tab pack · B build · N music · M mute
-            </div>
+            </Button>
           </div>
+          {mode === "solo" && (
+            <Button
+              variant="link"
+              size="bare"
+              onClick={() => {
+                if (!confirmNew) {
+                  setConfirmNew(true);
+                  return;
+                }
+                setConfirmNew(false);
+                startedAt.current = performance.now();
+                game?.newIsland();
+              }}
+            >
+              {confirmNew ? "Sure? Everything here is lost" : "Start a new island"}
+            </Button>
+          )}
         </div>
-      </Show>
+      )}
+      {/*
+        Above the pause screen, so the card can be read there. Sound and music
+        live on M and N, which the card lists.
+      */}
+      {playing && (
+        <div className="absolute top-5 right-5 z-10 sm:top-6 sm:right-6">
+          {touch ? (
+            <Button variant="menu" size="inline" onClick={leave}>
+              Leave
+            </Button>
+          ) : (
+            <ControlsMenu open={controlsOpen} onOpenChange={setControlsOpen} />
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+/* The Controls link and the card of keys hanging under it. */
+function ControlsMenu(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  return (
+    <Tooltip open={props.open} onOpenChange={(open) => props.onOpenChange(open)}>
+      <TooltipTrigger closeOnClick={false} render={<Button variant="menu" size="inline" />}>
+        Controls
+        <Kbd className={menuKbd}>C</Kbd>
+      </TooltipTrigger>
+      <TooltipContent {...menuCardPlacement} className="w-[21rem] px-[18px] pt-[18px] pb-4">
+        <MenuPointer />
+        <ControlsCard />
+      </TooltipContent>
+    </Tooltip>
   );
 }

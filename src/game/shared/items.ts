@@ -96,7 +96,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     plural: "conger eels",
     kind: "fish",
     rarity: "rare",
-    note: "Comes up from the dark at night.",
+    note: "Comes up from the dark, in deeper water.",
   },
   moonfish: {
     name: "Moonfish",
@@ -110,7 +110,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     plural: "lanternfish",
     kind: "fish",
     rarity: "legendary",
-    note: "Glows in the deep, and only at night.",
+    note: "Glows in the deep, and seldom bites.",
   },
   deer: {
     name: "Deer carcass",
@@ -131,7 +131,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     note: "Warmth: you heal faster beside it.",
   },
   chest: { name: "Storage chest", plural: "chests", kind: "kit", note: "Keeps your catch safe." },
-  bed: { name: "Bed", plural: "beds", kind: "kit", note: "Sleep through the night; wake here." },
+  bed: { name: "Bed", plural: "beds", kind: "kit", note: "Rest here, and wake here." },
   hut: { name: "Hut", plural: "huts", kind: "kit", note: "Four walls, a door and a roof." },
   cabin: {
     name: "Cabin",
@@ -222,7 +222,8 @@ export const FINE_DAMAGE = 1.7;
 
 /* ---------- inventory ---------- */
 
-export const HOTBAR = 5;
+/* Slots on the belt, picked with 1–9. Slot 0 is fists. */
+export const HOTBAR = 9;
 export const MAX_TOOLS = 12;
 
 export type Inventory = {
@@ -243,7 +244,7 @@ export function emptyInventory(): Inventory {
     coins: 0,
     items: {},
     tools: [],
-    hotbar: [null, null, null, null, null],
+    hotbar: Array<number | null>(HOTBAR).fill(null),
     slot: 0,
     bounty: null,
     bed: null,

@@ -202,7 +202,7 @@ export class Input {
   }
 
   get down() {
-    return this.has("ControlLeft", "KeyC");
+    return this.has("ControlLeft");
   }
 
   private has(...codes: string[]) {
