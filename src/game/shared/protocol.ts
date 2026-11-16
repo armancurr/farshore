@@ -78,11 +78,15 @@ export type WorldInfo = {
   weapons: GroundWeapon[];
   board: Bounty[];
   prefabs: Prefab[];
+  collected: number[];
+  felledTrees: number[];
   /* Where you stand right now; null when only watching. */
   you: Spawn | null;
 };
 
 export type ServerMsg =
+  | { t: "tree_felled"; id: number }
+  | { t: "gathered"; id: number }
   | { t: "welcome"; id: number; name: string; online: boolean }
   | ({ t: "world" } & WorldInfo)
   | { t: "roster"; roster: RosterEntry[] }
@@ -154,11 +158,15 @@ export type ClientMsg =
       boat?: { rot: number; speed: number };
     }
   | { t: "attack"; charge: number; climb: boolean }
+  | { t: "gather"; id: number }
+  | { t: "craft_axe" }
+  | { t: "craft_boat" }
   | { t: "stance"; block: boolean; charge: boolean }
   | { t: "interact"; kind: InteractKind; id: number }
   | { t: "slot"; i: number }
   /* Move a tool into a hotbar slot (1 to HOTBAR - 1), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
+  | { t: "equip_item"; item: ItemId; slot: number }
   | { t: "drop"; tool: number }
   | { t: "buy"; item: string }
   | { t: "place"; kind: KitId; x: number; z: number; rot: number }
@@ -201,6 +209,12 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
   }
   if (!m || typeof m !== "object") return null;
   switch (m.t) {
+    case "gather":
+      return isId(m.id) ? { t: "gather", id: m.id } : null;
+    case "craft_axe":
+      return { t: "craft_axe" };
+    case "craft_boat":
+      return { t: "craft_boat" };
     case "hello":
       return { t: "hello", spectate: m.spectate === true };
     case "attack":
@@ -220,6 +234,10 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "equip":
       if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
       return { t: "equip", tool: m.tool, slot: m.slot };
+    case "equip_item":
+      return isItemId(m.item) && isInt(m.slot, -1, HOTBAR - 1)
+        ? { t: "equip_item", item: m.item, slot: m.slot }
+        : null;
     case "buy":
       return typeof m.item === "string" && m.item.length < 32 ? { t: "buy", item: m.item } : null;
     case "place":

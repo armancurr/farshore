@@ -1,4 +1,5 @@
 import { cn } from "cn";
+import { HandGrabbingIcon } from "@phosphor-icons/react";
 import { useEffect, useRef } from "react";
 import { Progress } from "@/components/ui/progress";
 import type { HudState } from "../../game/client/game";
@@ -78,8 +79,18 @@ function Crosshair(props: { hud: HudState }) {
           </div>
         </>
       )}
-      <span className="absolute top-1/2 left-1/2 h-px w-3 -translate-1/2 bg-white/80 mix-blend-difference" />
-      <span className="absolute top-1/2 left-1/2 h-3 w-px -translate-1/2 bg-white/80 mix-blend-difference" />
+      {h.prompt?.startsWith("Click") ? (
+        <HandGrabbingIcon
+          size={24}
+          weight="bold"
+          className="absolute top-1/2 left-1/2 -translate-1/2 text-white drop-shadow-[0_1px_3px_black]"
+        />
+      ) : (
+        <>
+          <span className="absolute top-1/2 left-1/2 h-px w-3 -translate-1/2 bg-white/80 mix-blend-difference" />
+          <span className="absolute top-1/2 left-1/2 h-3 w-px -translate-1/2 bg-white/80 mix-blend-difference" />
+        </>
+      )}
       {h.hitMarker > 0 && (
         /* Hit marker: four ticks round the centre, and what the blow did. */
         <div className="absolute inset-0" style={{ opacity: Math.min(1, h.hitMarker * 1.6) }}>
@@ -252,8 +263,9 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           <Crosshair hud={h} />
           <Fishing hud={h} />
           {h.prompt && (
-            <div className="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-              {props.touch ? h.prompt.replace("E · ", "") : h.prompt}
+            <div className="absolute bottom-36 left-1/2 flex -translate-x-1/2 items-center gap-2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+              {h.prompt.startsWith("Click") && <HandGrabbingIcon size={18} weight="bold" />}
+              {props.touch ? h.prompt.replace("Q · ", "") : h.prompt}
             </div>
           )}
           {h.hurt > 0 && (

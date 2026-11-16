@@ -55,6 +55,7 @@ import { Input } from "./input";
 import { type Connection, clearSave, LocalConnection, serverBase, WsConnection } from "./net";
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
+import { FishShoals } from "./scene/fish";
 import { BoatView } from "./scene/boats";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
@@ -111,12 +112,17 @@ export type InventoryView = {
   coins: number;
   slot: number;
   hotbar: (ToolView | null)[];
+  itemHotbar: ({ id: ItemId; name: string; count: number; kind: string } | null)[];
   pack: ToolView[];
   items: { id: ItemId; name: string; count: number; kind: string; rarity?: Rarity }[];
 };
 
-/* Something you could press E on: in the room's world, or a panel to open here. */
-type Focus = { kind: InteractKind | "board" | "shop" | "chest"; id: number; label: string };
+/* Something you could press Q on: in the room's world, or a panel to open here. */
+type Focus = {
+  kind: InteractKind | "board" | "shop" | "chest" | "resource";
+  id: number;
+  label: string;
+};
 
 export type HudState = {
   mode: Mode;
@@ -185,6 +191,7 @@ type World = {
   group: THREE.Group;
   props: WorldProps;
   drops: WeaponDrops;
+  fish: FishShoals;
 };
 
 const STEP = 1 / 60;
@@ -538,12 +545,14 @@ export class Game {
     const group = new THREE.Group();
     group.add(createTerrainMesh(terrain));
     group.add(createWater(terrain));
+    const fish = new FishShoals(terrain);
+    group.add(fish.group);
     const props = new WorldProps(terrain);
     group.add(props.group);
     const drops = new WeaponDrops();
     group.add(drops.group);
     this.scene.add(group);
-    this.world = { seed, terrain, group, props, drops };
+    this.world = { seed, terrain, group, props, drops, fish };
   }
 
   /* ---------- networking ---------- */
@@ -566,6 +575,13 @@ export class Game {
         break;
       case "world":
         this.onWorld(msg);
+        break;
+      case "gathered":
+        this.world?.props.removeResource(msg.id);
+        break;
+      case "tree_felled":
+        this.world?.props.removeTree(msg.id);
+        this.world?.terrain.removeTree(msg.id);
         break;
       case "roster":
         this.setRoster(msg.roster);
@@ -682,7 +698,7 @@ export class Game {
         };
         if (msg.fish) {
           this.audio.chime();
-          this.pushFeed(`You caught a ${ITEMS[msg.fish].name.toLowerCase()}`);
+          this.pushFeed(`${ITEMS[msg.fish].name} added to your inventory`);
         } else {
           this.audio.slip();
           this.pushFeed("It got away");
@@ -892,6 +908,11 @@ export class Game {
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
     const world = this.world!;
+    for (const id of info.collected ?? []) world.props.removeResource(id);
+    for (const id of info.felledTrees ?? []) {
+      world.props.removeTree(id);
+      world.terrain.removeTree(id);
+    }
     world.drops.clear();
     for (const w of info.weapons) world.drops.add(w);
     this.board = info.board;
@@ -1072,6 +1093,7 @@ export class Game {
     if (this.world) {
       this.world.props.update(t);
       this.world.drops.update(t);
+      this.world.fish.update(t, this.camera.position);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
@@ -1175,8 +1197,11 @@ export class Game {
       /* Attack: instant swings on press; hammers and flails charge until release. */
       const now = performance.now() / 1000;
       const fishing = !!(heldTool(this.inv) && TOOLS[heldTool(this.inv)!.kind].rod);
+      this.focus = this.build ? null : this.findFocus(b);
       if (this.build) this.buildInput(b);
-      else if (fishing && this.input.take("attack")) this.castOrStrike();
+      else if (this.focus?.kind === "resource" && this.input.take("attack")) {
+        this.conn?.send({ t: "gather", id: this.focus.id });
+      } else if (fishing && this.input.take("attack")) this.castOrStrike();
       else if (this.input.take("attack") && !this.blocking) {
         if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
@@ -1190,14 +1215,14 @@ export class Game {
       this.input.take("alt");
       this.input.take("altUp");
       if (!this.build) this.hotbarInput();
-      this.focus = this.build ? null : this.findFocus(b);
       if (this.input.take("interact") && this.focus) {
         const f = this.focus;
         if (f.kind === "board" || f.kind === "shop") this.openPanel(f.kind);
         else if (f.kind === "chest") {
           this.chestId = f.id;
           this.openPanel("chest");
-        } else this.conn?.send({ t: "interact", kind: f.kind, id: f.id });
+        } else if (f.kind === "resource") this.conn?.send({ t: "gather", id: f.id });
+        else this.conn?.send({ t: "interact", kind: f.kind, id: f.id });
       }
       if (this.input.take("inventory")) this.openPanel("inventory");
       if (this.input.take("build")) this.toggleBuild();
@@ -1273,7 +1298,7 @@ export class Game {
     this.selectSlot(slot);
   }
 
-  /* The nearest thing in front of you worth pressing E on. */
+  /* The nearest thing in front of you worth pressing Q on. */
   private findFocus(b: Body): Focus | null {
     const world = this.world;
     if (!world) return null;
@@ -1281,6 +1306,26 @@ export class Game {
     const fz = -Math.cos(b.yaw);
     let best: Focus | null = null;
     let bestScore = Number.POSITIVE_INFINITY;
+    const direction = this.camera.getWorldDirection(new THREE.Vector3());
+    for (const resource of world.props.resources) {
+      if (!world.props.hasResource(resource.id)) continue;
+      const dx = resource.x - this.camera.position.x;
+      const dy = resource.y + (resource.kind === "bush" ? 0.3 : 0.06) - this.camera.position.y;
+      const dz = resource.z - this.camera.position.z;
+      const distance = Math.hypot(dx, dy, dz);
+      if (distance > 3 || distance < 0.01) continue;
+      const alignment = (dx * direction.x + dy * direction.y + dz * direction.z) / distance;
+      if (alignment < 0.97) continue;
+      const score = distance * (2 - alignment);
+      if (score < bestScore) {
+        bestScore = score;
+        best = {
+          kind: "resource",
+          id: resource.id,
+          label: resource.kind === "bush" ? "Click · Gather dry bush" : "Click · Pick up stone",
+        };
+      }
+    }
     const consider = (x: number, y: number, z: number, reach: number, f: () => Focus) => {
       const dx = x - b.x;
       const dz = z - b.z;
@@ -1294,42 +1339,42 @@ export class Game {
         best = f();
       }
     };
-    if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
+    if (this.boat) return { kind: "prefab", id: this.boat.id, label: "Q · Get out" };
     const bd = world.terrain.board;
     if (FEATURES.bounties)
-      consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
+      consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "Q · Bounty board" }));
     const sh = world.terrain.shop;
     if (FEATURES.shop)
       consider(sh.x, sh.y, sh.z, 3.4, () => ({
         kind: "shop",
         id: 0,
-        label: "E · The keeper's stall",
+        label: "Q · The keeper's stall",
       }));
     for (const p of this.built.list()) {
       if (p.kind === "rowboat")
         consider(p.x, b.y, p.z, BOAT_REACH, () => ({
           kind: "prefab",
           id: p.id,
-          label: "E · Get in the rowboat",
+          label: "Q · Get in the rowboat",
         }));
       else if (p.kind === "chest")
         consider(p.x, p.y, p.z, 2.4, () => ({
           kind: "chest",
           id: p.id,
-          label: "E · Open the chest",
+          label: "Q · Open the chest",
         }));
       else if (p.kind === "bed")
         consider(p.x, p.y, p.z, 2.6, () => ({
           kind: "prefab",
           id: p.id,
-          label: "E · Rest (you'll wake here)",
+          label: "Q · Rest (you'll wake here)",
         }));
     }
     for (const w of world.drops.list()) {
       consider(w.x, w.y, w.z, 2.6, () => ({
         kind: "weapon",
         id: w.id,
-        label: `E · Pick up the ${WEAPONS[w.kind].name.toLowerCase()}`,
+        label: `Q · Pick up the ${WEAPONS[w.kind].name.toLowerCase()}`,
       }));
     }
     return best;
@@ -1570,6 +1615,18 @@ export class Game {
     );
   }
 
+  craftAxe() {
+    this.conn?.send({ t: "craft_axe" });
+  }
+
+  craftBoat() {
+    this.conn?.send({ t: "craft_boat" });
+  }
+
+  equipItem(item: ItemId, slot: number) {
+    this.conn?.send({ t: "equip_item", item, slot });
+  }
+
   equip(tool: number, slot: number) {
     this.conn?.send({ t: "equip", tool, slot });
   }
@@ -1612,6 +1669,9 @@ export class Game {
       coins: inv.coins,
       slot: inv.slot,
       hotbar: inv.hotbar.map((id) => this.toolView(id)),
+      itemHotbar: inv.itemHotbar.map((id) =>
+        id ? (items.find((item) => item.id === id) ?? null) : null,
+      ),
       pack: inv.tools
         .filter((t) => !inv.hotbar.includes(t.id))
         .map((t) => this.toolView(t.id))
@@ -1816,7 +1876,7 @@ export class Game {
       inv: this.inventoryView(),
       panel: this.panel,
       hint: this.boat
-        ? `W/S row · A/D turn · E get out${held && TOOLS[held.kind].rod ? ` · ${this.rodHint()}` : ""}`
+        ? `W/S row · A/D turn · Q get out${held && TOOLS[held.kind].rod ? ` · ${this.rodHint()}` : ""}`
         : held && TOOLS[held.kind].rod
           ? this.rodHint()
           : held

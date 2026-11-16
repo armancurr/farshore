@@ -46,8 +46,8 @@ export class Input {
       this.keys.add(e.code);
       if (e.repeat) return;
       if (e.code === "KeyF") this.setAttack(true);
-      if (e.code === "KeyE") this.queued.add("interact");
-      if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
+      if (e.code === "KeyQ") this.queued.add("interact");
+      if (e.code === "KeyE" || e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
       if (e.code === "KeyB") this.queued.add("build");
       if (e.code === "KeyR") this.queued.add("rotate");
       if (e.code === "KeyN") this.queued.add("music");

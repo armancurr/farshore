@@ -129,6 +129,7 @@ export class Terrain {
   private bucketsPerSide = Math.ceil(WORLD_SIZE / BUCKET);
   /* Solids added after generation (placed prefabs), by owner key. */
   private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
+  private treeSolids = new Map<number, Solid>();
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
@@ -485,8 +486,9 @@ export class Terrain {
     keepIf(FEATURES.trees, () =>
       scatter(140, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
         const scale = range(rng, 0.8, 1.35);
+        const treeId = id++;
         this.props.push({
-          id: id++,
+          id: treeId,
           kind: "tree",
           x,
           y: y - 0.3,
@@ -496,14 +498,16 @@ export class Terrain {
           height: 6.5 * scale,
           variant: Math.floor(rng() * 1e6),
         });
-        this.solids.push({
+        const solid: Solid = {
           x,
           z,
           r: 0.32 * scale,
           bottom: y - 1,
           top: y + 7 * scale,
           standable: false,
-        });
+        };
+        this.solids.push(solid);
+        this.treeSolids.set(treeId, solid);
       }),
     );
 
@@ -583,6 +587,18 @@ export class Terrain {
       this.buckets[c] = this.buckets[c].filter((s) => !gone.has(s));
     }
     this.dynamic.delete(key);
+  }
+
+  removeTree(id: number) {
+    const solid = this.treeSolids.get(id);
+    if (!solid) return;
+    this.treeSolids.delete(id);
+    const index = this.solids.indexOf(solid);
+    if (index >= 0) this.solids.splice(index, 1);
+    for (let i = 0; i < this.buckets.length; i++) {
+      if (this.buckets[i].includes(solid))
+        this.buckets[i] = this.buckets[i].filter((s) => s !== solid);
+    }
   }
 
   /*
