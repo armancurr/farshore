@@ -11,7 +11,7 @@ const ONLINE_ENABLED = false;
 
 /* Menu buttons: plain text and an icon, growing a little under the pointer. */
 const menuButton =
-  "flex cursor-pointer items-center gap-2.5 font-sans text-lg font-normal tracking-[0.12em] text-white uppercase transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none";
+  "flex cursor-pointer items-center gap-1.5 font-sans text-[11px] font-normal tracking-[0.2em] text-white uppercase transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none";
 
 const CONTROLS = [
   ["WASD", "Move"],
@@ -179,14 +179,12 @@ export function GamePanel(props: { onPress?: () => void }) {
       </Show>
 
       <Show when={status() === "ready" && !playing()}>
-        <div class="absolute inset-x-6 top-6 flex items-center justify-between gap-6 sm:inset-x-8 sm:top-8">
-          <div class="font-display text-5xl leading-none text-white select-none sm:text-6xl">
-            farshore
-          </div>
-          <div class="flex items-center gap-8">
+        <div class="absolute inset-x-5 top-5 flex items-center justify-between gap-6 sm:inset-x-6 sm:top-6">
+          <div class="font-display text-2xl leading-none text-white select-none">farshore</div>
+          <div class="flex items-center gap-6">
             <button type="button" class={menuButton} onClick={() => play("solo")}>
               Play
-              <Play size={22} weight="fill" />
+              <Play size={13} weight="fill" />
             </button>
             {/* Multiplayer is parked for now; the online path still builds. */}
             <Show when={ONLINE_ENABLED && onlineAvailable()}>
@@ -206,10 +204,10 @@ export function GamePanel(props: { onPress?: () => void }) {
                   onClick={() => setControlsOpen(!controlsOpen())}
                 >
                   Controls
-                  <GameController size={22} />
+                  <GameController size={14} />
                 </button>
                 <Show when={controlsOpen()}>
-                  <dl class="absolute top-full right-0 mt-3 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
+                  <dl class="absolute top-full right-0 mt-2 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
                     {CONTROLS.map(([key, action]) => (
                       <>
                         <dt class="text-white">{key}</dt>
