@@ -58,7 +58,7 @@ import { FishingLines } from "./scene/fishing";
 import { BoatView } from "./scene/boats";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
-import { createTerrainMesh, createWater } from "./scene/land";
+import { createLand } from "./scene/land";
 import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
@@ -536,8 +536,7 @@ export class Game {
     this.dropWorld();
     const terrain = new Terrain(seed);
     const group = new THREE.Group();
-    group.add(createTerrainMesh(terrain));
-    group.add(createWater(terrain));
+    group.add(...createLand(terrain));
     const props = new WorldProps(terrain);
     group.add(props.group);
     const drops = new WeaponDrops();
