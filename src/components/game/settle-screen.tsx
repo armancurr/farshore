@@ -1,4 +1,4 @@
-import { ShuffleIcon } from "@phosphor-icons/react";
+import { FlagIcon, ShuffleIcon } from "@phosphor-icons/react";
 import { cn } from "cn";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -119,13 +119,14 @@ export function SettleScreen(props: {
             ))}
           </div>
           <div className="mx-0.5 w-px self-stretch bg-[#262626]" />
-          <div className="flex shrink-0 flex-col gap-1.5">
-            <Button variant="secondary" size="sm" onClick={reroll}>
-              <ShuffleIcon size={13} weight="bold" />
+          <div className="flex shrink-0 flex-col items-start gap-3 px-2">
+            <Button variant="menu" size="inline" onClick={reroll}>
               Variant
+              <ShuffleIcon size={14} weight="bold" />
             </Button>
-            <Button size="sm" disabled={!ready} onClick={settle}>
+            <Button variant="menu" size="inline" disabled={!ready} onClick={settle}>
               Settle
+              <FlagIcon size={14} weight="fill" />
             </Button>
           </div>
         </div>
