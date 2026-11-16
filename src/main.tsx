@@ -6,8 +6,11 @@ import { createRoot } from "react-dom/client";
 
 import App from "./App";
 
-inject();
-injectSpeedInsights();
+/* Vercel's analytics only exist on Vercel; the Cloudflare build skips them. */
+if (window.location.hostname.endsWith(".vercel.app")) {
+  inject();
+  injectSpeedInsights();
+}
 
 const root = document.getElementById("root");
 
