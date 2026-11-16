@@ -152,9 +152,12 @@ export function keepWeapon(kind: WeaponKind | null) {
 export function serverBase() {
   const configured = import.meta.env.VITE_TIDE_SERVER as string | undefined;
   if (configured) return configured.replace(/\/$/, "");
-  /* In dev the Vite server hosts the room itself. */
-  if (import.meta.env.DEV) return window.location.origin;
-  return null;
+  /*
+   * Otherwise the room lives next to the page: the Vite dev server hosts it in
+   * dev, and in production the same Cloudflare Worker serves both the site
+   * and the room.
+   */
+  return window.location.origin;
 }
 
 function wsUrl(base: string, path: string) {
