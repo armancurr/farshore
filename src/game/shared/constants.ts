@@ -5,24 +5,12 @@ export const ISLAND_RADIUS = 300;
 export const MAX_HEIGHT = 46;
 export const CONTOUR = 2.5; // metres between contour lines
 export const SEA_FLOOR = -14;
+export const SEA_LEVEL = 0;
 export const BOUNDARY = WORLD_SIZE / 2 - 6;
 
 /* Room */
 export const MAX_PLAYERS = 8;
 export const TICK_HZ = 20;
-export const COUNTDOWN_SOLO = 3;
-export const COUNTDOWN_ONLINE = 6;
-export const RESULTS_TIME = 8;
-
-/* Tide: a grace period, then a surge every interval that lifts the sea one step. */
-export const TIDE_START = 0;
-export const GRACE = 12;
-export const SURGE_INTERVAL = 11;
-export const SURGE_DURATION = 4.5;
-export const SURGE_STEP = 3.6;
-export const SURGE_WARNING = 3.5;
-/* Once every human is out, the sea hurries the bots along. */
-export const HURRY_RATE = 2.4; // m/s
 
 /* Body */
 export const PLAYER_RADIUS = 0.42;
@@ -50,17 +38,15 @@ export const BREATH_WADE = 7;
 export const BREATH_UNDER = 30;
 export const BREATH_REGEN = 14;
 
-/* Shove */
-export const SHOVE_RANGE = 2.9;
-export const SHOVE_CONE = 0.35; // cos of the half-angle
-export const SHOVE_COOLDOWN = 1.3;
-export const SHOVE_FORCE = 12.5;
-export const SHOVE_LIFT = 5.5;
-export const SHOVE_CREDIT = 7; // seconds a shove counts toward an elimination
+/* Health: drowning, falls and animals wear it down; it comes back slowly once you're safe. */
+export const HEALTH_MAX = 100;
+export const DROWN_DAMAGE = 14; // per second with no breath left
+export const FALL_SAFE_SPEED = 13; // m/s at impact, about a 3.5 m drop
+export const FALL_DAMAGE = 7; // per m/s beyond that
+export const HEALTH_REGEN = 1.2; // per second
+export const REGEN_DELAY = 8; // seconds after the last hurt
+export const RESPAWN_DELAY = 3.5;
 
-/* Stones */
-export const STONES_START = 2;
-export const STONES_MAX = 5;
-export const PILLAR_HEIGHT = 3.2;
-export const PILLAR_RADIUS = 1.05;
-export const CAIRN_REACH = 1.9;
+/* Day and night: one full day, in seconds, and where on it a new island starts (0 = midnight). */
+export const DAY_LENGTH = 20 * 60;
+export const DAY_START = 0.3;

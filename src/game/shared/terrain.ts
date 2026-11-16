@@ -1,12 +1,5 @@
-import {
-  GRID,
-  ISLAND_RADIUS,
-  MAX_HEIGHT,
-  MAX_PLAYERS,
-  SEA_FLOOR,
-  STEP_HEIGHT,
-  WORLD_SIZE,
-} from "./constants";
+import { GRID, ISLAND_RADIUS, MAX_HEIGHT, SEA_FLOOR, STEP_HEIGHT, WORLD_SIZE } from "./constants";
+import { FEATURES } from "./features";
 import { angleTo, clamp, createNoise2D, fbm, mulberry32, range, smoothstep } from "./math";
 import {
   type Block,
@@ -15,6 +8,7 @@ import {
   type Perch,
   planStructures,
   type Structure,
+  toWorld,
 } from "./structures";
 
 export { LIGHTHOUSE };
@@ -51,10 +45,10 @@ export type Solid = {
   hole?: { x: number; z: number; r: number };
 };
 
-export type Spot = { x: number; y: number; z: number; ladder?: boolean };
+export type Spot = { x: number; y: number; z: number };
 
-/* A perch the bots can aim for; `route` lists the footholds that lead up to it. */
-export type HighSpot = Spot & { route?: Spot[] };
+/* A place on the lighthouse plinth: its centre and the way its front faces. */
+export type Site = Spot & { rot: number };
 
 const BUCKET = 12;
 const NO_SOLIDS: Solid[] = [];
@@ -119,18 +113,22 @@ export class Terrain {
   readonly half = WORLD_SIZE / 2;
   readonly props: Prop[] = [];
   readonly solids: Solid[] = [];
-  readonly cairns: Prop[] = [];
-  readonly highSpots: HighSpot[] = [];
-  readonly spawns: (Spot & { yaw: number })[] = [];
   readonly structures: Structure[] = [];
   readonly ladders: Ladder[] = [];
+  /* Walkable high places on the structures: where loose weapons like to lie. */
+  perches: readonly Perch[] = [];
   lighthouse: Spot = { x: 0, y: 0, z: 0 };
+  /* Where a new arrival wakes up: a flat, open patch near the middle of the island. */
+  home: Spot & { yaw: number } = { x: 0, y: 0, z: 0, yaw: 0 };
+  /* The bounty board and the keeper's stall, either side of the lighthouse door. */
+  board: Site = { x: 0, y: 0, z: 0, rot: 0 };
+  shop: Site = { x: 0, y: 0, z: 0, rot: 0 };
   peak = 0;
-  private perches: Perch[] = [];
   private taken: { x: number; z: number; r: number }[] = [];
-  private propSolidsFrom = 0;
   private buckets: Solid[][] = [];
   private bucketsPerSide = Math.ceil(WORLD_SIZE / BUCKET);
+  /* Solids added after generation (placed prefabs), by owner key. */
+  private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
@@ -138,9 +136,8 @@ export class Terrain {
     this.raiseLighthouse();
     this.raiseStructures();
     this.scatterProps();
-    this.findHighSpots();
     this.indexSolids();
-    this.findSpawns();
+    this.findHome();
   }
 
   private generateHeights() {
@@ -212,7 +209,8 @@ export class Terrain {
     const z = -this.half + Math.floor(best / GRID) * this.cell;
     const top = this.heights[best];
 
-    this.levelPad(x, z, LIGHTHOUSE.plinthRadius - 1, LIGHTHOUSE.plinthRadius + 5, top);
+    if (FEATURES.lighthouse)
+      this.levelPad(x, z, LIGHTHOUSE.plinthRadius - 1, LIGHTHOUSE.plinthRadius + 5, top);
 
     this.lighthouse = { x, y: top, z };
     /* The lantern deck, built with the other structures. */
@@ -238,15 +236,134 @@ export class Terrain {
 
   /* Windmill, chapel, mast, henge, villages, watchtowers, aqueduct, wrecks, jetties. */
   private raiseStructures() {
-    const plan = planStructures(this, this.seed);
+    const plan = planStructures(this, this.seed, {
+      lighthouse: FEATURES.lighthouse,
+      landmarks: FEATURES.landmarks,
+    });
     this.structures.push(...plan.structures);
     this.perches = plan.perches;
     this.taken = plan.footprints;
+    const lighthouse = plan.structures.find((st) => st.kind === "lighthouse");
+    if (lighthouse) this.furnishPlinth(lighthouse);
     for (const st of plan.structures) {
       for (const b of st.blocks) if (b.solid) this.solids.push(blockSolid(b));
       this.ladders.push(...st.ladders);
     }
-    this.propSolidsFrom = this.solids.length;
+  }
+
+  /*
+   * The board and the stall stand on the plinth either side of the door,
+   * facing out. Their front (local +z) points away from the tower.
+   */
+  private furnishPlinth(st: Structure) {
+    const base = st.y + LIGHTHOUSE.plinthHeight;
+    const site = (a: number): Site => ({
+      x: st.x + Math.cos(a) * 5.05,
+      y: base,
+      z: st.z + Math.sin(a) * 5.05,
+      rot: Math.PI / 2 - a,
+    });
+    this.board = site(st.rot + 0.78);
+    this.shop = site(st.rot - 0.78);
+    const B = st.blocks;
+    const block = (
+      s: Site,
+      lx: number,
+      lz: number,
+      b: Partial<Block> & Pick<Block, "bottom" | "top" | "hx" | "hz">,
+    ): Block => {
+      const p = toWorld(s.x, s.z, s.rot, lx, lz);
+      return {
+        shape: "box",
+        rot: s.rot,
+        tone: "mid",
+        solid: true,
+        standable: false,
+        ...b,
+        x: p.x,
+        z: p.z,
+      };
+    };
+    /* Board: two posts, a planked face, notices pinned to it, a little roof. */
+    const b = this.board;
+    for (const side of [-1, 1])
+      B.push(
+        block(b, side * 0.85, 0, {
+          bottom: base,
+          top: base + 2.3,
+          hx: 0.06,
+          hz: 0.06,
+          tone: "dark",
+        }),
+      );
+    B.push(block(b, 0, 0, { bottom: base + 0.75, top: base + 2.05, hx: 0.82, hz: 0.05 }));
+    B.push(
+      block(b, 0, 0.02, {
+        bottom: base + 2.3,
+        top: base + 2.38,
+        hx: 1.05,
+        hz: 0.28,
+        tone: "dark",
+        solid: false,
+      }),
+    );
+    for (const [lx, ly, w, h] of [
+      [-0.45, 1.6, 0.17, 0.2],
+      [0.05, 1.68, 0.15, 0.22],
+      [0.5, 1.55, 0.18, 0.18],
+      [-0.2, 1.05, 0.2, 0.17],
+      [0.35, 1.08, 0.14, 0.2],
+    ])
+      B.push(
+        block(b, lx, 0.065, {
+          bottom: base + ly - h,
+          top: base + ly + h,
+          hx: w,
+          hz: 0.012,
+          tone: "light",
+          solid: false,
+        }),
+      );
+    st.lamps.push({ x: b.x, y: base + 2.2, z: b.z });
+    /* Stall: a counter, two posts holding up an awning, a crate beside it. */
+    const s = this.shop;
+    B.push(
+      block(s, 0, 0.05, { bottom: base, top: base + 1.05, hx: 1.0, hz: 0.38, standable: true }),
+    );
+    B.push(
+      block(s, 0, 0.05, {
+        bottom: base + 1.05,
+        top: base + 1.12,
+        hx: 1.08,
+        hz: 0.45,
+        tone: "dark",
+        standable: true,
+      }),
+    );
+    for (const side of [-1, 1])
+      B.push(
+        block(s, side * 0.95, -0.25, {
+          bottom: base,
+          top: base + 2.45,
+          hx: 0.06,
+          hz: 0.06,
+          tone: "dark",
+        }),
+      );
+    B.push(
+      block(s, 0, 0.1, {
+        bottom: base + 2.45,
+        top: base + 2.53,
+        hx: 1.2,
+        hz: 0.75,
+        tone: "light",
+        solid: false,
+      }),
+    );
+    B.push(
+      block(s, 1.45, 0.2, { bottom: base, top: base + 0.6, hx: 0.3, hz: 0.3, standable: true }),
+    );
+    st.lamps.push({ x: s.x, y: base + 2.3, z: s.z });
   }
 
   private scatterProps() {
@@ -277,75 +394,93 @@ export class Terrain {
       }
     };
 
+    /*
+     * Every kind is scattered (so the trees always land in the same places),
+     * but a kind that's switched off is taken straight back out again.
+     */
+    const keepIf = (on: boolean, place: () => void) => {
+      const props = this.props.length;
+      const solids = this.solids.length;
+      place();
+      if (on) return;
+      this.props.length = props;
+      this.solids.length = solids;
+    };
+
     /* Ruins: broken columns climbing in a ring, a parkour stair to a high perch. */
-    scatter(8, { minH: 5, spacing: 11, minNy: 0.8 }, (cx, cy, cz) => {
-      const n = 5 + Math.floor(rng() * 3);
-      const start = rng() * Math.PI * 2;
-      const turn = range(rng, 0.65, 0.85) * (rng() < 0.5 ? -1 : 1);
-      const radius = range(rng, 4.2, 5.6);
-      let top = cy;
-      for (let c = 0; c < n; c++) {
-        const a = start + c * turn;
-        const x = cx + Math.cos(a) * radius;
-        const z = cz + Math.sin(a) * radius;
-        const ground = this.heightAt(x, z);
-        top = Math.max(top + range(rng, 0.95, 1.2), ground + 1.1);
-        const scale = range(rng, 0.62, 0.74);
+    keepIf(FEATURES.ruins, () =>
+      scatter(8, { minH: 5, spacing: 11, minNy: 0.8 }, (cx, cy, cz) => {
+        const n = 5 + Math.floor(rng() * 3);
+        const start = rng() * Math.PI * 2;
+        const turn = range(rng, 0.65, 0.85) * (rng() < 0.5 ? -1 : 1);
+        const radius = range(rng, 4.2, 5.6);
+        let top = cy;
+        for (let c = 0; c < n; c++) {
+          const a = start + c * turn;
+          const x = cx + Math.cos(a) * radius;
+          const z = cz + Math.sin(a) * radius;
+          const ground = this.heightAt(x, z);
+          top = Math.max(top + range(rng, 0.95, 1.2), ground + 1.1);
+          const scale = range(rng, 0.62, 0.74);
+          this.props.push({
+            id: id++,
+            kind: "column",
+            x,
+            y: ground - 0.4,
+            z,
+            rot: rng() * Math.PI,
+            scale,
+            height: top - ground + 0.4,
+            variant: c === n - 1 && rng() < 0.6 ? 1 : 0,
+          });
+          this.solids.push({ x, z, r: scale, bottom: ground - 1, top, standable: true });
+        }
+      }),
+    );
+
+    /* Stacked stones left by whoever was here before. */
+    keepIf(FEATURES.cairns, () =>
+      scatter(30, { minH: 1.5, spacing: 18, minNy: 0.75 }, (x, y, z) => {
         this.props.push({
           id: id++,
-          kind: "column",
+          kind: "cairn",
           x,
-          y: ground - 0.4,
+          y,
           z,
-          rot: rng() * Math.PI,
-          scale,
-          height: top - ground + 0.4,
-          variant: c === n - 1 && rng() < 0.6 ? 1 : 0,
+          rot: rng() * Math.PI * 2,
+          scale: 1,
+          height: 1.1,
+          variant: Math.floor(rng() * 3),
         });
-        this.solids.push({ x, z, r: scale, bottom: ground - 1, top, standable: true });
-      }
-    });
+      }),
+    );
 
-    scatter(30, { minH: 1.5, spacing: 18, minNy: 0.75 }, (x, y, z) => {
-      const cairn: Prop = {
-        id: id++,
-        kind: "cairn",
-        x,
-        y,
-        z,
-        rot: rng() * Math.PI * 2,
-        scale: 1,
-        height: 1.1,
-        variant: Math.floor(rng() * 3),
-      };
-      this.props.push(cairn);
-      this.cairns.push(cairn);
-    });
-
-    scatter(240, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
-      const scale = rng() < 0.15 ? range(rng, 2.2, 3.4) : range(rng, 0.6, 1.9);
-      const sink = scale * 0.28;
-      const height = scale * range(rng, 0.8, 1.15);
-      this.props.push({
-        id: id++,
-        kind: "rock",
-        x,
-        y: y - sink,
-        z,
-        rot: rng() * Math.PI * 2,
-        scale,
-        height,
-        variant: Math.floor(rng() * 1e6),
-      });
-      this.solids.push({
-        x,
-        z,
-        r: scale * 0.82,
-        bottom: y - sink,
-        top: y - sink + height * 0.86,
-        standable: true,
-      });
-    });
+    keepIf(FEATURES.rocks, () =>
+      scatter(240, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
+        const scale = rng() < 0.15 ? range(rng, 2.2, 3.4) : range(rng, 0.6, 1.9);
+        const sink = scale * 0.28;
+        const height = scale * range(rng, 0.8, 1.15);
+        this.props.push({
+          id: id++,
+          kind: "rock",
+          x,
+          y: y - sink,
+          z,
+          rot: rng() * Math.PI * 2,
+          scale,
+          height,
+          variant: Math.floor(rng() * 1e6),
+        });
+        this.solids.push({
+          x,
+          z,
+          r: scale * 0.82,
+          bottom: y - sink,
+          top: y - sink + height * 0.86,
+          standable: true,
+        });
+      }),
+    );
 
     scatter(140, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
       const scale = range(rng, 0.8, 1.35);
@@ -370,56 +505,27 @@ export class Terrain {
       });
     });
 
-    for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {
-      const a = rng() * Math.PI * 2;
-      const d = range(rng, ISLAND_RADIUS * 0.95, ISLAND_RADIUS * 1.15);
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
-      if (this.heightAt(x, z) > -3) continue;
-      this.props.push({
-        id: id++,
-        kind: "buoy",
-        x,
-        y: 0,
-        z,
-        rot: rng() * 6.28,
-        scale: 1,
-        height: 3,
-        variant: b,
-      });
-      b++;
-    }
-  }
-
-  /* Perches the bots aim for: local summits, rock tops, column tops, the plinth. */
-  private findHighSpots() {
-    const spots: HighSpot[] = [];
-    const stride = 6;
-    for (let i = stride; i < GRID - stride; i += stride) {
-      for (let j = stride; j < GRID - stride; j += stride) {
-        const h = this.heights[i * GRID + j];
-        if (h < 4) continue;
-        let summit = true;
-        for (let di = -1; di <= 1 && summit; di++) {
-          for (let dj = -1; dj <= 1; dj++) {
-            if ((di || dj) && this.heights[(i + di * stride) * GRID + j + dj * stride] > h) {
-              summit = false;
-              break;
-            }
-          }
-        }
-        if (summit)
-          spots.push({ x: -this.half + j * this.cell, y: h, z: -this.half + i * this.cell });
+    keepIf(FEATURES.buoys, () => {
+      for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {
+        const a = rng() * Math.PI * 2;
+        const d = range(rng, ISLAND_RADIUS * 0.95, ISLAND_RADIUS * 1.15);
+        const x = Math.cos(a) * d;
+        const z = Math.sin(a) * d;
+        if (this.heightAt(x, z) > -3) continue;
+        this.props.push({
+          id: id++,
+          kind: "buoy",
+          x,
+          y: 0,
+          z,
+          rot: rng() * 6.28,
+          scale: 1,
+          height: 3,
+          variant: b,
+        });
+        b++;
       }
-    }
-    /* Rocks and columns (structures bring their own perches, with routes). */
-    for (let k = this.propSolidsFrom; k < this.solids.length; k++) {
-      const s = this.solids[k];
-      if (s.standable && s.top - this.heightAt(s.x, s.z) > 0.6)
-        spots.push({ x: s.x, y: s.top, z: s.z });
-    }
-    spots.sort((a, b) => b.y - a.y);
-    this.highSpots.push(...spots.slice(0, 120), ...this.perches);
+    });
   }
 
   /* Bucket every solid by the cells its footprint (plus a body) overlaps. */
@@ -440,48 +546,88 @@ export class Terrain {
     return clamp(Math.floor((v + this.half) / BUCKET), 0, this.bucketsPerSide - 1);
   }
 
-  /* The solids a body standing at (x, z) could touch. */
+  /* The solids a body standing at (x, z) could touch, placed prefabs included. */
   solidsNear(x: number, z: number): readonly Solid[] {
     if (!this.buckets.length) return this.solids;
     return this.buckets[this.bucketOf(z) * this.bucketsPerSide + this.bucketOf(x)] ?? NO_SOLIDS;
   }
 
-  /* One spawn per player, spread round the island on low ground, facing inland. */
-  private findSpawns() {
-    const rng = mulberry32(this.seed ^ 0x2545f491);
-    const offset = rng() * Math.PI * 2;
-    for (let p = 0; p < MAX_PLAYERS; p++) {
-      const a = offset + (p / MAX_PLAYERS) * Math.PI * 2;
-      const dx = Math.cos(a);
-      const dz = Math.sin(a);
-      /* Walk inland from the sea and take the first flat patch of beach. */
-      let spot: { x: number; z: number } | null = null;
-      let fallback = { x: dx * 30, z: dz * 30 };
-      let seenLand = false;
-      for (let d = ISLAND_RADIUS * 1.2; d > 10; d -= 1.5) {
-        const x = dx * d;
-        const z = dz * d;
-        const h = this.heightAt(x, z);
-        if (h > 2.5 && !seenLand) {
-          seenLand = true;
-          fallback = { x, z };
-        }
-        if (h > 2.5 && h < 9 && this.normalAt(x, z)[1] > 0.8 && this.clearOfSolids(x, z)) {
-          spot = { x, z };
-          break;
+  /* Add collision for something built after generation; `key` removes it again. */
+  addSolids(key: number, solids: readonly Solid[]) {
+    this.removeSolids(key);
+    const n = this.bucketsPerSide;
+    const cells: number[] = [];
+    for (const s of solids) {
+      const pad = s.r + 1;
+      const j0 = this.bucketOf(s.x - pad);
+      const j1 = this.bucketOf(s.x + pad);
+      const i0 = this.bucketOf(s.z - pad);
+      const i1 = this.bucketOf(s.z + pad);
+      for (let i = i0; i <= i1; i++) {
+        for (let j = j0; j <= j1; j++) {
+          this.buckets[i * n + j].push(s);
+          cells.push(i * n + j);
         }
       }
-      spot ??= fallback;
-      this.spawns.push({
-        ...spot,
-        y: this.heightAt(spot.x, spot.z),
-        yaw: angleTo(-dx, -dz),
-      });
     }
+    this.dynamic.set(key, { solids: [...solids], cells });
   }
 
-  private clearOfSolids(x: number, z: number) {
-    return this.solids.every((s) => Math.hypot(s.x - x, s.z - z) > s.r + 1);
+  removeSolids(key: number) {
+    const entry = this.dynamic.get(key);
+    if (!entry) return;
+    const gone = new Set(entry.solids);
+    for (const c of new Set(entry.cells)) {
+      this.buckets[c] = this.buckets[c].filter((s) => !gone.has(s));
+    }
+    this.dynamic.delete(key);
+  }
+
+  /*
+   * Walk outward from the middle of the island in rings and take the first
+   * patch that is dry, level, and clear of buildings, rocks and trees.
+   */
+  private findHome() {
+    const lh = this.lighthouse;
+    const open = (x: number, z: number, r: number) =>
+      this.taken.every((t) => Math.hypot(t.x - x, t.z - z) > t.r + r);
+    const level = (x: number, z: number, r: number) => {
+      let lo = this.heightAt(x, z);
+      let hi = lo;
+      for (let a = 0; a < 8; a++) {
+        for (const k of [0.5, 1]) {
+          const h = this.heightAt(x + Math.cos(a * 0.785) * r * k, z + Math.sin(a * 0.785) * r * k);
+          lo = Math.min(lo, h);
+          hi = Math.max(hi, h);
+        }
+      }
+      return { lo, hi };
+    };
+    let best: { x: number; z: number } | null = null;
+    for (let d = 0; d < ISLAND_RADIUS * 0.8 && !best; d += 5) {
+      const steps = Math.max(1, Math.round((d * Math.PI * 2) / 5));
+      for (let k = 0; k < steps; k++) {
+        const a = (k / steps) * Math.PI * 2;
+        const x = Math.cos(a) * d;
+        const z = Math.sin(a) * d;
+        if (Math.hypot(x - lh.x, z - lh.z) < 22) continue;
+        const { lo, hi } = level(x, z, 7);
+        if (lo < 2.5 || hi > 34 || hi - lo > 1.8) continue;
+        if (!open(x, z, 3) || !this.clearOfSolids(x, z, 5)) continue;
+        best = { x, z };
+        break;
+      }
+    }
+    best ??= { x: lh.x + 16, z: lh.z };
+    this.home = {
+      ...best,
+      y: this.heightAt(best.x, best.z),
+      yaw: angleTo(lh.x - best.x, lh.z - best.z),
+    };
+  }
+
+  clearOfSolids(x: number, z: number, margin = 1) {
+    return this.solids.every((s) => Math.hypot(s.x - x, s.z - z) > s.r + margin);
   }
 
   heightAt(x: number, z: number) {
@@ -508,17 +654,15 @@ export class Terrain {
   }
 
   /* Highest surface under (x, z) that a body with feet at feetY could stand on. */
-  groundAt(x: number, z: number, feetY: number, extra: readonly Solid[] = []) {
+  groundAt(x: number, z: number, feetY: number) {
     let ground = this.heightAt(x, z);
     let onSolid = false;
-    const check = (s: Solid) => {
+    for (const s of this.solidsNear(x, z)) {
       if (s.standable && s.top > ground && s.top <= feetY + STEP_HEIGHT && overSolid(s, x, z)) {
         ground = s.top;
         onSolid = true;
       }
-    };
-    for (const s of this.solidsNear(x, z)) check(s);
-    for (const s of extra) check(s);
+    }
     return { ground, onSolid };
   }
 }

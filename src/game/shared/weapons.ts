@@ -1,7 +1,6 @@
 /*
- * Melee weapons. Nobody dies from a hit: each one adds to the victim's
- * stagger, and stagger multiplies knockback, so a battered player flies
- * further and further until the sea takes them.
+ * Melee weapons. Against other people a hit adds to their stagger, and
+ * stagger multiplies knockback; against animals it does damage.
  */
 
 export type WeaponKind =
@@ -37,6 +36,8 @@ export type WeaponDef = {
   cooldown: number;
   /* Stagger % added, and the push at 0% (m/s, horizontal and up). */
   stagger: number;
+  /* Health taken from an animal. */
+  damage: number;
   knock: number;
   lift: number;
   /* Hold to charge, release to strike: seconds for a minimum and a full charge. */
@@ -49,6 +50,7 @@ export type WeaponDef = {
 export const FISTS: WeaponDef = {
   name: "Fists",
   uses: Number.POSITIVE_INFINITY,
+  damage: 6,
   reach: 2.9,
   arc: 0.35,
   windup: 0.06,
@@ -62,6 +64,7 @@ export const FISTS: WeaponDef = {
 export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   sword: {
     name: "Sword",
+    damage: 14,
     uses: 14,
     reach: 2.8,
     arc: 0.55,
@@ -74,6 +77,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   axe: {
     name: "Battle axe",
+    damage: 24,
     uses: 7,
     reach: 2.6,
     arc: 0.7,
@@ -86,6 +90,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   spear: {
     name: "Spear",
+    damage: 18,
     uses: 10,
     reach: 4.2,
     arc: 0.94,
@@ -98,6 +103,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   hammer: {
     name: "Warhammer",
+    damage: 30,
     uses: 5,
     reach: 3,
     arc: -1,
@@ -112,6 +118,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   pickaxe: {
     name: "Pickaxe",
+    damage: 12,
     uses: 10,
     reach: 2.4,
     arc: 0.6,
@@ -124,6 +131,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   daggers: {
     name: "Twin daggers",
+    damage: 8,
     uses: 24,
     reach: 1.9,
     arc: 0.6,
@@ -136,6 +144,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   shield: {
     name: "Shield",
+    damage: 7,
     uses: 10,
     reach: 2.2,
     arc: 0.5,
@@ -148,6 +157,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   },
   flail: {
     name: "Flail",
+    damage: 10,
     uses: 6,
     reach: 2.7,
     arc: -1,

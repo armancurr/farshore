@@ -1,34 +1,37 @@
+import { EnvelopeSimple, GameController, Play } from "phosphor-solid";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
+import { ControlsCard, WaitlistCard } from "./menu-cards";
+import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
 
-const pill = "px-3.5 py-2 font-mono text-[11px] tracking-[0.2em] uppercase transition-colors";
+const ONLINE_ENABLED = false;
+/* The game stays closed to the public unless a build opts in with VITE_PLAY_ENABLED=true. */
+const PLAY_ENABLED = import.meta.env.VITE_PLAY_ENABLED === "true";
 
-const CONTROLS = [
-  ["WASD", "Move"],
-  ["Space", "Jump"],
-  ["Shift", "Sprint"],
-  ["Click / F", "Attack · hold to charge"],
-  ["Right-click", "Block (shield) / raise stone"],
-  ["E", "Raise stone"],
-  ["R", "Swap weapon"],
-  ["N", "Music"],
-  ["M", "Mute"],
-  ["Esc", "Pause"],
-] as const;
+/* Menu buttons: written like the card titles (bold sans, sentence case), growing a little under the pointer. */
+const menuButton =
+  "flex cursor-pointer items-center gap-1.5 font-sans text-[15px] leading-none font-bold text-white transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100";
+
+/* A card hanging under a menu button, scaling in from the button's corner. */
+const menuPop =
+  "absolute top-full -right-3 z-10 origin-top-right pt-3 transition-[opacity,scale,visibility] duration-150 ease-out";
+const menuPopShut = "invisible scale-[0.96] opacity-0";
+const menuPopOpen = "visible scale-100 opacity-100";
 
 /*
- * The left two thirds of the site. While nobody is playing, bots play on their
- * own under a slow orbiting camera; pressing play drops you onto the beach and
- * the panel takes over the screen.
+ * The left two thirds of the site. While nobody is playing, the island idles
+ * under a slow orbiting camera; pressing play wakes you up on it and the panel
+ * takes over the screen.
  */
 export function GamePanel(props: { onPress?: () => void }) {
   let host!: HTMLDivElement;
   let root!: HTMLDivElement;
-  let controlsRoot: HTMLDivElement | undefined;
+  let waitlistRoot: HTMLDivElement | undefined;
+  let waitlistCard: HTMLDivElement | undefined;
   let game: Game | null = null;
   let statusTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -38,7 +41,32 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [onlineAvailable, setOnlineAvailable] = createSignal(false);
   const [muted, setMuted] = createSignal(false);
   const [touch, setTouch] = createSignal(false);
-  const [controlsOpen, setControlsOpen] = createSignal(false);
+  /*
+   * Both menu cards open on hover. Keyboard focus opens them too, and the
+   * waitlist stays up while focus is inside it (typing, or the note after
+   * joining). A tap pins it on touch screens, where nothing hovers.
+   */
+  const [hovered, setHovered] = createSignal<"controls" | "waitlist" | null>(null);
+  const [controlsKeyed, setControlsKeyed] = createSignal(false);
+  const [waitlistKeyed, setWaitlistKeyed] = createSignal(false);
+  const [waitlistFocused, setWaitlistFocused] = createSignal(false);
+  const [waitlistPinned, setWaitlistPinned] = createSignal(false);
+  const controlsShown = () => (hovered() === "controls" || controlsKeyed()) && !waitlistFocused();
+  const waitlistShown = () =>
+    waitlistFocused() ||
+    (!controlsShown() && (hovered() === "waitlist" || waitlistKeyed() || waitlistPinned()));
+  const hoverOn = (which: "controls" | "waitlist") => (e: PointerEvent) => {
+    if (e.pointerType === "mouse") setHovered(which);
+  };
+  const hoverOff = (which: "controls" | "waitlist") => () => {
+    if (hovered() === which) setHovered(null);
+  };
+  const closeWaitlist = () => {
+    setWaitlistPinned(false);
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && waitlistRoot?.contains(active)) active.blur();
+  };
+  const [confirmNew, setConfirmNew] = createSignal(false);
 
   const mode = (): Mode => hud()?.mode ?? "attract";
   const playing = () => mode() !== "attract";
@@ -76,10 +104,16 @@ export function GamePanel(props: { onPress?: () => void }) {
     io.observe(root);
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "KeyM" && playing()) toggleMute();
-      if (e.code === "Escape") setControlsOpen(false);
+      if (e.code === "Escape") closeWaitlist();
+      /* Panels have the mouse; these keys put it away again. */
+      const panel = hud()?.panel;
+      if (panel && ["Escape", "Tab", "KeyI", "KeyE"].includes(e.code)) {
+        e.preventDefault();
+        game?.closePanel();
+      }
     };
     const onPointerDown = (e: PointerEvent) => {
-      if (controlsRoot && !controlsRoot.contains(e.target as Node)) setControlsOpen(false);
+      if (waitlistRoot && !waitlistRoot.contains(e.target as Node)) setWaitlistPinned(false);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("pointerdown", onPointerDown);
@@ -94,8 +128,9 @@ export function GamePanel(props: { onPress?: () => void }) {
 
   let startedAt = 0;
   const play = (next: Mode) => {
+    if (!PLAY_ENABLED) return;
     props.onPress?.();
-    setControlsOpen(false);
+    closeWaitlist();
     if (!game) return;
     startedAt = performance.now();
     game.start(next);
@@ -116,7 +151,9 @@ export function GamePanel(props: { onPress?: () => void }) {
   const paused = () => {
     const h = hud();
     /* Give the pointer lock a moment to engage before calling it a pause. */
-    return !!h && playing() && !touch() && !h.locked && performance.now() - startedAt > 500;
+    return (
+      !!h && playing() && !touch() && !h.locked && !h.panel && performance.now() - startedAt > 500
+    );
   };
 
   return (
@@ -145,51 +182,100 @@ export function GamePanel(props: { onPress?: () => void }) {
         </div>
       </Show>
 
-      <Show when={playing() && hud()}>{(h) => <Hud hud={h()} touch={touch()} />}</Show>
+      <Show when={playing() && hud()}>
+        {(h) => <Hud hud={h()} touch={touch()} onSelect={(i) => game?.selectSlot(i)} />}
+      </Show>
+
+      <Show when={playing() && hud()?.panel === "inventory" && game}>
+        <InventoryPanel hud={hud()!} game={game!} />
+      </Show>
+      <Show when={playing() && hud()?.panel === "board" && game}>
+        <BoardPanel hud={hud()!} game={game!} />
+      </Show>
+      <Show when={playing() && hud()?.panel === "shop" && game}>
+        <ShopPanel hud={hud()!} game={game!} />
+      </Show>
+      <Show when={playing() && hud()?.panel === "chest" && game}>
+        <ChestPanel hud={hud()!} game={game!} />
+      </Show>
 
       <Show when={status() === "ready" && !playing()}>
-        <div class="absolute bottom-6 left-6 flex items-center gap-2 sm:bottom-8 sm:left-8">
-          <button
-            type="button"
-            class={`bg-white text-black hover:opacity-85 ${pill}`}
-            onClick={() => play("solo")}
-          >
-            Play
-          </button>
-          <Show when={onlineAvailable()}>
+        <div class="absolute inset-x-5 top-5 flex items-center justify-between gap-6 sm:inset-x-6 sm:top-6">
+          <div class="font-display text-2xl leading-none text-white select-none">farshore</div>
+          <div class="flex items-center gap-4 sm:gap-6">
             <button
               type="button"
-              class={`border border-white/40 bg-black/60 text-white hover:bg-white hover:text-black ${pill}`}
-              onClick={() => play("online")}
+              class={menuButton}
+              disabled={!PLAY_ENABLED}
+              title={PLAY_ENABLED ? undefined : "Not open yet. Join the waitlist"}
+              onClick={() => play("solo")}
             >
-              Online
-              <Show when={online()}>
-                <span class="ml-1.5 opacity-50">{online()}</span>
-              </Show>
+              Go ashore
+              <Play size={13} weight="fill" />
             </button>
-          </Show>
-          <Show when={!touch()}>
-            <div ref={controlsRoot} class="relative">
+            {/* Multiplayer is parked for now; the online path still builds. */}
+            <Show when={ONLINE_ENABLED && onlineAvailable()}>
+              <button type="button" class={menuButton} onClick={() => play("online")}>
+                Online
+                <Show when={online()}>
+                  <span class="opacity-50">{online()}</span>
+                </Show>
+              </button>
+            </Show>
+            <Show when={!touch()}>
+              <div
+                class="relative flex flex-col items-end"
+                onPointerEnter={hoverOn("controls")}
+                onPointerLeave={hoverOff("controls")}
+                onFocusIn={(e) => setControlsKeyed(e.target.matches(":focus-visible"))}
+                onFocusOut={() => setControlsKeyed(false)}
+              >
+                <button type="button" class={menuButton} aria-describedby="controls-card">
+                  Controls
+                  <GameController size={14} weight="fill" />
+                </button>
+                <div class={`${menuPop} ${controlsShown() ? menuPopOpen : menuPopShut}`}>
+                  <ControlsCard id="controls-card" />
+                </div>
+              </div>
+            </Show>
+            <div
+              ref={waitlistRoot}
+              class="relative flex flex-col items-end"
+              onPointerEnter={hoverOn("waitlist")}
+              onPointerLeave={hoverOff("waitlist")}
+              onFocusIn={(e) => {
+                setWaitlistKeyed(e.target.matches(":focus-visible"));
+                setWaitlistFocused(!!waitlistCard?.contains(e.target));
+              }}
+              onFocusOut={(e) => {
+                if (waitlistRoot?.contains(e.relatedTarget as Node | null)) return;
+                setWaitlistKeyed(false);
+                setWaitlistFocused(false);
+              }}
+            >
               <button
                 type="button"
-                aria-expanded={controlsOpen()}
-                class={`border border-white/40 bg-black/60 text-white/70 hover:text-white ${pill}`}
-                onClick={() => setControlsOpen(!controlsOpen())}
+                class={menuButton}
+                aria-expanded={waitlistShown()}
+                aria-controls="waitlist-card"
+                onClick={(e) => {
+                  if (!touch()) return;
+                  e.currentTarget.blur();
+                  setWaitlistPinned(!waitlistPinned());
+                }}
               >
-                Controls
+                Join waitlist
+                <EnvelopeSimple size={14} weight="fill" />
               </button>
-              <Show when={controlsOpen()}>
-                <dl class="absolute bottom-full left-0 mb-2 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
-                  {CONTROLS.map(([key, action]) => (
-                    <>
-                      <dt class="text-white">{key}</dt>
-                      <dd class="text-white/50">{action}</dd>
-                    </>
-                  ))}
-                </dl>
-              </Show>
+              <div
+                ref={waitlistCard}
+                class={`${menuPop} ${waitlistShown() ? menuPopOpen : menuPopShut}`}
+              >
+                <WaitlistCard id="waitlist-card" />
+              </div>
             </div>
-          </Show>
+          </div>
         </div>
         <Show when={hud()?.notice}>
           <div class="absolute top-5 left-1/2 -translate-x-1/2 border border-white/30 bg-black/80 px-4 py-2 text-sm text-white">
@@ -199,7 +285,7 @@ export function GamePanel(props: { onPress?: () => void }) {
       </Show>
 
       <Show when={playing() && touch() && game}>
-        <TouchControls input={game!.input} shield={hud()?.weapon?.kind === "shield"} />
+        <TouchControls input={game!.input} />
       </Show>
 
       <Show when={playing()}>
@@ -234,7 +320,7 @@ export function GamePanel(props: { onPress?: () => void }) {
         <div class="absolute inset-0 flex items-center justify-center bg-black/70">
           <div class="flex w-[min(90%,320px)] flex-col gap-3">
             <div class="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
-              {mode() === "solo" ? "Paused" : "The tide waits for no one"}
+              {mode() === "solo" ? "Paused" : "The island carries on without you"}
             </div>
             <button
               type="button"
@@ -250,11 +336,31 @@ export function GamePanel(props: { onPress?: () => void }) {
             >
               Leave island
             </button>
+            <Show when={mode() === "solo"}>
+              <button
+                type="button"
+                class="border border-white/20 px-5 py-2 font-mono text-[10px] tracking-[0.2em] text-white/60 uppercase hover:border-white/60 hover:text-white"
+                onClick={() => {
+                  if (!confirmNew()) {
+                    setConfirmNew(true);
+                    return;
+                  }
+                  setConfirmNew(false);
+                  startedAt = performance.now();
+                  game?.newIsland();
+                }}
+              >
+                {confirmNew() ? "Sure? Everything here is lost" : "Start a new island"}
+              </button>
+            </Show>
+            <div class="font-mono text-[10px] tracking-[0.12em] text-white/35 uppercase">
+              Your island saves itself in this browser
+            </div>
             <div class="mt-2 font-mono text-[10px] leading-5 tracking-[0.12em] text-white/40 uppercase">
               WASD move · Space jump · Shift sprint
               <br />
-              Click / F attack, hold to charge · right-click block / stone
-              <br />E stone · R swap weapon · N music · M mute
+              Click / F punch, cast and strike
+              <br />E interact · 1–5 hotbar · Tab pack · B build · N music · M mute
             </div>
           </div>
         </div>

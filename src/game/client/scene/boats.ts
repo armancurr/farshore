@@ -1,0 +1,154 @@
+import * as THREE from "three";
+import { SEA_LEVEL } from "../../shared/constants";
+import { wrapAngle } from "../../shared/math";
+import { Batch, compose } from "./batch";
+import { inkMaterial, lineMaterial } from "./materials";
+
+/* The hull's outline from above, bow toward -z. */
+const OUTLINE: [number, number][] = [
+  [0, -1.95],
+  [0.5, -1.35],
+  [0.72, -0.3],
+  [0.68, 1.2],
+  [0.48, 1.85],
+  [-0.48, 1.85],
+  [-0.68, 1.2],
+  [-0.72, -0.3],
+  [-0.5, -1.35],
+];
+
+function hull(batch: Batch) {
+  const shape = new THREE.Shape();
+  OUTLINE.forEach(([x, z], i) =>
+    i ? shape.lineTo(x * 0.92, -z * 0.92) : shape.moveTo(x * 0.92, -z * 0.92),
+  );
+  shape.closePath();
+  const bottom = new THREE.ExtrudeGeometry(shape, { depth: 0.32, bevelEnabled: false });
+  bottom.rotateX(-Math.PI / 2);
+  batch.add(bottom, compose(0, -0.28, 0), 25);
+  /* Planked sides, flaring out a little, round the outline. */
+  for (let i = 0; i < OUTLINE.length; i++) {
+    const [ax, az] = OUTLINE[i];
+    const [bx, bz] = OUTLINE[(i + 1) % OUTLINE.length];
+    const len = Math.hypot(bx - ax, bz - az);
+    const a = Math.atan2(bx - ax, bz - az);
+    batch.add(
+      new THREE.BoxGeometry(0.05, 0.36, len + 0.04),
+      compose((ax + bx) / 2, 0.2, (az + bz) / 2, a),
+    );
+  }
+  /* Thwarts: a seat for the rower and one at the bow. */
+  batch.add(new THREE.BoxGeometry(1.32, 0.05, 0.28), compose(0, 0.18, 0.45));
+  batch.add(new THREE.BoxGeometry(1.2, 0.05, 0.24), compose(0, 0.18, -0.9));
+}
+
+function oar() {
+  const b = new Batch();
+  const shaft = new THREE.CylinderGeometry(0.025, 0.025, 2.3, 5);
+  shaft.rotateZ(Math.PI / 2);
+  b.add(shaft, compose(1.0, 0, 0));
+  b.add(new THREE.BoxGeometry(0.5, 0.02, 0.16), compose(2.0, 0, 0));
+  return b;
+}
+
+type Shown = {
+  group: THREE.Group;
+  oars: [THREE.Group, THREE.Group];
+  x: number;
+  z: number;
+  rot: number;
+  tx: number;
+  tz: number;
+  trot: number;
+  speed: number;
+  phase: number;
+};
+
+/* Rowboats on the sea, a handful at most, each with oars that pull as it moves. */
+export class BoatView {
+  readonly group = new THREE.Group();
+  private boats = new Map<number, Shown>();
+  private fill = inkMaterial(0.11);
+  private line = lineMaterial(0.85);
+  private hullGeo: THREE.Group;
+  private oarGeo: THREE.Group;
+
+  constructor() {
+    const h = new Batch();
+    hull(h);
+    this.hullGeo = h.build(this.fill, this.line);
+    this.oarGeo = oar().build(this.fill, this.line);
+  }
+
+  /* Where a boat is, as the room (or our own rowing) says. `snap` jumps there at once. */
+  set(id: number, x: number, z: number, rot: number, speed: number, snap = false) {
+    let b = this.boats.get(id);
+    if (!b) {
+      const group = new THREE.Group();
+      group.add(this.hullGeo.clone());
+      const oars: [THREE.Group, THREE.Group] = [new THREE.Group(), new THREE.Group()];
+      oars.forEach((o, i) => {
+        const m = this.oarGeo.clone();
+        if (i) m.scale.x = -1;
+        o.add(m);
+        o.position.set(i ? -0.66 : 0.66, 0.42, 0.25);
+        group.add(o);
+      });
+      this.group.add(group);
+      b = { group, oars, x, z, rot, tx: x, tz: z, trot: rot, speed, phase: 0 };
+      this.boats.set(id, b);
+    }
+    b.tx = x;
+    b.tz = z;
+    b.trot = rot;
+    b.speed = speed;
+    if (snap) {
+      b.x = x;
+      b.z = z;
+      b.rot = rot;
+    }
+  }
+
+  clear() {
+    for (const id of [...this.boats.keys()]) this.remove(id);
+  }
+
+  remove(id: number) {
+    const b = this.boats.get(id);
+    if (!b) return;
+    this.group.remove(b.group);
+    this.boats.delete(id);
+  }
+
+  update(time: number, dt: number) {
+    const k = 1 - Math.exp(-dt * 10);
+    for (const [id, b] of this.boats) {
+      b.x += (b.tx - b.x) * k;
+      b.z += (b.tz - b.z) * k;
+      b.rot = wrapAngle(b.rot + wrapAngle(b.trot - b.rot) * k);
+      const g = b.group;
+      g.position.set(b.x, SEA_LEVEL + Math.sin(time * 1.3 + id) * 0.04, b.z);
+      g.rotation.set(
+        Math.sin(time * 0.9 + id) * 0.025,
+        b.rot,
+        Math.cos(time * 1.1 + id) * 0.035,
+        "YXZ",
+      );
+      /* Oars: a sweep and a dip per stroke while under way, resting otherwise. */
+      const rowing = Math.min(1, Math.abs(b.speed) / 2);
+      b.phase += dt * (1.2 + Math.abs(b.speed) * 0.5) * (rowing > 0.05 ? 1 : 0);
+      const sweep = Math.sin(b.phase * Math.PI) * 0.55 * rowing * Math.sign(b.speed || 1);
+      const dip = (Math.cos(b.phase * Math.PI) * 0.5 + 0.5) * 0.3 * rowing;
+      b.oars[0].rotation.set(0, sweep, -0.25 - dip);
+      b.oars[1].rotation.set(0, -sweep, 0.25 + dip);
+    }
+  }
+
+  dispose() {
+    this.clear();
+    this.hullGeo.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+    this.oarGeo.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+    this.fill.dispose();
+    this.line.dispose();
+  }
+}

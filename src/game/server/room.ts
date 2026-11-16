@@ -4,40 +4,81 @@ import {
   BREATH_REGEN,
   BREATH_UNDER,
   BREATH_WADE,
-  CAIRN_REACH,
-  COUNTDOWN_ONLINE,
-  COUNTDOWN_SOLO,
-  HURRY_RATE,
+  DROWN_DAMAGE,
+  FALL_DAMAGE,
+  FALL_SAFE_SPEED,
+  HEALTH_MAX,
+  HEALTH_REGEN,
   ISLAND_RADIUS,
   MAX_PLAYERS,
-  PILLAR_HEIGHT,
-  PILLAR_RADIUS,
   PLAYER_HEIGHT,
-  RESULTS_TIME,
+  REGEN_DELAY,
+  RESPAWN_DELAY,
   SEA_FLOOR,
-  SHOVE_CREDIT,
-  STONES_MAX,
-  STONES_START,
+  SEA_LEVEL,
   TICK_HZ,
 } from "../shared/constants";
-import { clamp, mulberry32, type Rng, wrapAngle } from "../shared/math";
+import {
+  BOARD_REACH,
+  BOARD_REFRESH,
+  BOARD_SIZE,
+  type Bounty,
+  consume,
+  isEasy,
+  makeBounty,
+  progress,
+} from "../shared/bounties";
+import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
+import { isNight, untilDawn } from "../shared/daylight";
+import { FEATURES } from "../shared/features";
+import {
+  BITE_WINDOW,
+  depthAt,
+  MIN_CAST_DEPTH,
+  pickFish,
+  type Strike,
+  strikeFor,
+  struck,
+} from "../shared/fishing";
+import { clamp, mulberry32, type Rng } from "../shared/math";
 import { randomName } from "../shared/names";
-import { type Body, createBody, stepBody } from "../shared/physics";
+import { type Body, createBody } from "../shared/physics";
 import {
   type ClientMsg,
   FLAG,
+  type BoatSnap,
   type GroundWeapon,
-  type Held,
-  type Phase,
-  type Pillar,
-  type Placement,
+  type HurtCause,
   type PlayerSnap,
-  type RoundInfo,
   round2,
   type ServerMsg,
+  type Spawn,
+  type WorldInfo,
 } from "../shared/protocol";
-import { Terrain } from "../shared/terrain";
-import { nextTide, tideAt } from "../shared/tide";
+import {
+  emptyInventory,
+  FINE_DAMAGE,
+  type FishId,
+  HOTBAR,
+  heldTool,
+  type Inventory,
+  isKitId,
+  type ItemId,
+  MAX_TOOLS,
+  type Tool,
+  type ToolKind,
+  TOOLS,
+} from "../shared/items";
+import {
+  CAMPFIRE_WARMTH,
+  checkPlacement,
+  MAX_PREFABS,
+  type Prefab,
+  prefabBlocks,
+} from "../shared/prefabs";
+import { SAVE_VERSION, type SaveData, type SavedPlayer } from "../shared/save";
+import { SHOP_REACH, shopEntry } from "../shared/shop";
+import { blockSolid, overSolid, Terrain } from "../shared/terrain";
 import {
   COMBO_WINDOW,
   knockScale,
@@ -50,7 +91,8 @@ import {
   weaponDef,
   weaponIndex,
 } from "../shared/weapons";
-import { type Brain, createBrain, think } from "./bots";
+
+import { Herd, type Prey } from "./animals";
 
 export interface Peer {
   send(msg: ServerMsg): void;
@@ -59,20 +101,26 @@ export interface Peer {
 type Member = {
   id: number;
   name: string;
-  bot: boolean;
-  peer: Peer | null;
+  peer: Peer;
   spectator: boolean; // joined only to watch
-  player: boolean; // taking part in the current round
-  alive: boolean;
   body: Body;
   pitch: number;
   flags: number;
   breath: number;
-  stones: number;
+  health: number;
+  lastHurtAt: number;
+  /* Falling speed from the last airborne report, for landing damage. */
+  airVy: number;
+  /* While down: when you get back up. */
+  respawnAt: number | null;
   attackReadyAt: number;
   shoveFlagUntil: number;
-  shovedBy: { id: number; at: number } | null;
-  weapon: Held | null;
+  inv: Inventory;
+  line: Line | null;
+  /* The rowboat you're in. */
+  boat: number | null;
+  /* Something in the inventory changed; send it at the end of the step. */
+  invDirty: boolean;
   stagger: number;
   lastHitAt: number;
   combo: number;
@@ -80,7 +128,16 @@ type Member = {
   blocking: boolean;
   blockSince: number;
   charging: boolean;
-  brain: Brain | null;
+};
+
+/* A line in the water: waiting for a bite, then a fish on, waiting for the strike. */
+type Line = {
+  x: number;
+  z: number;
+  depth: number;
+  biteAt: number;
+  fish: FishId | null;
+  strike: Strike | null;
 };
 
 /* A swing in flight: it lands after the weapon's wind-up. */
@@ -88,6 +145,8 @@ type PendingHit = {
   at: number;
   by: number;
   kind: WeaponKind | null;
+  /* Bought gear hits harder. */
+  fine: boolean;
   heavy: boolean;
   /* 0..1: how far a flail was spun up. */
   power: number;
@@ -96,49 +155,168 @@ type PendingHit = {
 
 export type RoomOptions = {
   online: boolean;
-  /* Bots only, forever: the idle background of the site. */
-  attract?: boolean;
   now?: () => number;
   maxHumans?: number;
+  seed?: number;
+  /* An island to pick up where it was left. */
+  save?: SaveData | null;
 };
 
-const MAX_PILLARS = 60;
+/* Points round a body's centre, to test whether it fits somewhere. */
+const PROBES = [
+  [0, 0],
+  [0.4, 0],
+  [-0.4, 0],
+  [0, 0.4],
+  [0, -0.4],
+] as const;
+
+/* Loose weapons lying about the island; a fresh one washes up when the count drops. */
+const GROUND_WEAPONS = 8;
+const WEAPON_RESPAWN = 45;
 
 /*
- * One match. Transport-agnostic: the Cloudflare Durable Object, the Vite dev
- * server and the in-browser solo mode all drive this same class. The room owns
- * the tide, breath, shoves, stones, bots and placements; each human reports
- * their own movement.
+ * The island. Transport-agnostic: the Cloudflare Durable Object, the Vite dev
+ * server and the in-browser solo mode all drive this same class. The room
+ * runs the world and everything in it; each human reports their own movement
+ * and asks for everything else.
  */
 export class Room {
   private members = new Map<number, Member>();
   private nextId = 1;
-  private phase: Phase = "idle";
-  private phaseEndsAt = 0;
-  private startAt = 0;
-  private endTime = 0;
-  private terrain: Terrain | null = null;
-  private seed = 0;
-  private pillars: Pillar[] = [];
-  private cairnsTaken = new Set<number>();
+  private readonly terrain: Terrain;
+  private readonly seed: number;
+  /* World clock in seconds; it only advances while the room ticks. */
+  private time = 0;
+  private lastTick: number | null = null;
   private weapons: GroundWeapon[] = [];
   private weaponId = 1;
+  private toolId = 1;
+  private nextWeaponAt = 0;
   private pending: PendingHit[] = [];
-  private results: Placement[] = [];
-  private hurryFrom: number | null = null;
-  private pillarId = 1;
+  /* Animals, when they're switched on. */
+  private herd: Herd | null = null;
+  /* The bounty board: offers, and when each was posted (world time). */
+  private board: Bounty[] = [];
+  private posted = new Map<number, number>();
+  private prefabs = new Map<number, Prefab>();
+  private boatSpeed = new Map<number, number>();
+  /* The saved player, waiting for the first person to arrive. */
+  private returning: SavedPlayer | null = null;
+  /* Something happened that would hurt to lose: the host should save soon. */
+  saveSoon = false;
+  private prefabId = 1;
+  private bountyId = 1;
+  private prey: Prey[] = [];
   private rng: Rng;
   private readonly now: () => number;
 
   constructor(private readonly opts: RoomOptions) {
     this.now = opts.now ?? (() => Date.now() / 1000);
     this.rng = mulberry32((Math.random() * 2 ** 32) >>> 0);
-    if (opts.attract) this.startCountdown();
+    const save = opts.save ?? null;
+    this.seed = save?.seed ?? opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
+    this.terrain = new Terrain(this.seed);
+    const t = this.terrain;
+    if (FEATURES.animals)
+      this.herd = new Herd(
+        {
+          terrain: t,
+          rng: this.rng,
+          gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
+          blocked: (id) => {
+            const m = this.members.get(id);
+            if (!m) return;
+            this.wear(m);
+            m.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
+          },
+        },
+        [
+          { x: t.home.x, z: t.home.z, r: 45 },
+          { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
+        ],
+      );
+    if (save) this.restore(save);
+    this.fillBoard();
+    if (FEATURES.weapons)
+      for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
+  }
+
+  /* ---------- saving ---------- */
+
+  private restore(save: SaveData) {
+    this.time = save.time;
+    this.toolId = save.ids.tool;
+    this.prefabId = save.ids.prefab;
+    this.bountyId = save.ids.bounty;
+    for (const p of save.prefabs) this.build(structuredClone(p));
+    this.board = save.board.map((b) => structuredClone(b));
+    for (const b of this.board) this.posted.set(b.id, this.time);
+    this.returning = save.player ? structuredClone(save.player) : null;
+  }
+
+  /* The island as it stands, with the first player's things, ready to store. */
+  exportSave(): SaveData {
+    const m = [...this.members.values()].find((o) => !o.spectator);
+    let player: SavedPlayer | null = this.returning;
+    if (m) {
+      /* Saved while down: you come back on your feet, where you'd have woken. */
+      const down = m.respawnAt !== null;
+      const at = down ? this.spawnPoint(m) : { ...m.body, yaw: m.body.yaw };
+      player = {
+        x: round2(at.x),
+        y: round2(at.y),
+        z: round2(at.z),
+        yaw: round2(at.yaw),
+        health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
+        inv: structuredClone(m.inv),
+        boat: down ? null : m.boat,
+      };
+    }
+    return {
+      v: SAVE_VERSION,
+      seed: this.seed,
+      time: round2(this.time),
+      prefabs: [...this.prefabs.values()].map((p) => structuredClone(p)),
+      board: this.board.map((b) => structuredClone(b)),
+      player,
+      ids: { tool: this.toolId, prefab: this.prefabId, bounty: this.bountyId },
+    };
+  }
+
+  /* Put the saved player back where they were, with everything they had. */
+  private welcomeBack(m: Member, saved: SavedPlayer) {
+    m.inv = saved.inv;
+    /* Weapons are off for now: anything you'd found or bought stays behind. */
+    if (!FEATURES.weapons) {
+      const keep = m.inv.tools.filter((t) => !TOOLS[t.kind].weapon);
+      m.inv.hotbar = m.inv.hotbar.map((id) => (keep.some((t) => t.id === id) ? id : null));
+      m.inv.tools = keep;
+    }
+    m.health = saved.health;
+    m.invDirty = true;
+    const boat = saved.boat === null ? null : this.prefabs.get(saved.boat);
+    if (boat?.kind === "rowboat") {
+      m.boat = boat.id;
+      m.body = createBody(saved.x, SEA_LEVEL + 0.3, saved.z, saved.yaw);
+      return;
+    }
+    /* Never inside something that was built over the spot, or underground. */
+    const { ground } = this.terrain.groundAt(saved.x, saved.z, saved.y + 0.3);
+    const inside = this.terrain
+      .solidsNear(saved.x, saved.z)
+      .some(
+        (o) => o.top > ground + 0.6 && o.bottom < ground + 1.7 && overSolid(o, saved.x, saved.z),
+      );
+    if (inside) {
+      const s = this.spawnPoint(m);
+      m.body = createBody(s.x, s.y, s.z, s.yaw);
+    } else m.body = createBody(saved.x, Math.max(saved.y, ground), saved.z, saved.yaw);
   }
 
   humans() {
     let n = 0;
-    for (const m of this.members.values()) if (!m.bot && !m.spectator) n++;
+    for (const m of this.members.values()) if (!m.spectator) n++;
     return n;
   }
 
@@ -148,50 +326,78 @@ export class Room {
       peer.send({ t: "full" });
       return -1;
     }
-
     const id = this.nextId++;
-    const member = this.createMember(id, randomName(Math.random), false, peer);
-    member.spectator = spectator;
+    const h = this.terrain.home;
+    const member: Member = {
+      id,
+      name: randomName(Math.random),
+      peer,
+      spectator,
+      body: createBody(h.x, h.y, h.z, h.yaw),
+      pitch: 0,
+      flags: 0,
+      breath: BREATH_MAX,
+      health: HEALTH_MAX,
+      lastHurtAt: -1e9,
+      airVy: 0,
+      respawnAt: null,
+      attackReadyAt: 0,
+      shoveFlagUntil: 0,
+      inv: emptyInventory(),
+      line: null,
+      boat: null,
+      invDirty: true,
+      stagger: 0,
+      lastHitAt: 0,
+      combo: 0,
+      lastSwingAt: 0,
+      blocking: false,
+      blockSince: 0,
+      charging: false,
+    };
+    if (!spectator && this.returning) {
+      this.welcomeBack(member, this.returning);
+      this.returning = null;
+    } else if (!spectator) this.giveTool(member, "rod", 2);
     this.members.set(id, member);
     peer.send({ t: "welcome", id, name: member.name, online: this.opts.online });
-
-    if (this.phase === "idle") {
-      if (!spectator) this.startCountdown();
-    } else if (this.phase === "countdown" && !spectator) {
-      this.enlist(member);
-      this.broadcastRound();
-    } else {
-      this.sendRound(member);
+    peer.send({ t: "world", ...this.worldInfo(member) });
+    if (member.boat !== null) peer.send({ t: "aboard", boat: member.boat });
+    if (!spectator) {
+      this.broadcastRoster();
+      if (this.opts.online) this.feed(`${member.name} washed ashore`);
     }
-    if (!spectator && this.opts.online) this.feed(`${member.name} washed ashore`);
+    this.flush(member);
     return id;
   }
 
   leave(id: number) {
     const m = this.members.get(id);
     if (!m) return;
-    if (m.player && m.alive && this.phase === "playing") this.eliminate(m, null);
+    m.boat = null;
     this.members.delete(id);
-    if (!m.spectator && this.opts.online) this.feed(`${m.name} left`);
-    if (this.humans() === 0 && !this.opts.attract) {
-      this.phase = "idle";
-      for (const other of [...this.members.values()]) if (other.bot) this.members.delete(other.id);
-    } else if (this.phase === "countdown" && m.player) {
-      this.fillBots();
-      this.broadcastRound();
+    if (!m.spectator) {
+      this.broadcastRoster();
+      if (this.opts.online) this.feed(`${m.name} left`);
     }
   }
 
   handle(id: number, msg: ClientMsg) {
     const m = this.members.get(id);
-    if (!m) return;
+    if (!m || m.spectator || m.respawnAt !== null) return;
+    this.apply(m, msg);
+    this.flush(m);
+  }
+
+  private apply(m: Member, msg: ClientMsg) {
     switch (msg.t) {
       case "move": {
+        this.landing(m, msg.vy, msg.flags);
+        if (m.boat !== null) this.row(m, msg.x, msg.z, msg.boat);
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
-        if (!m.player || !m.alive || this.phase !== "playing") return;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
-        m.body.y = clamp(msg.y, SEA_FLOOR - 20, (this.terrain?.peak ?? 60) + 30);
+        m.body.y = clamp(msg.y, SEA_FLOOR - 20, this.terrain.peak + 30);
         m.body.z = clamp(msg.z, -BOUNDARY, BOUNDARY);
         m.body.vx = msg.vx;
         m.body.vy = msg.vy;
@@ -203,214 +409,471 @@ export class Room {
         this.attack(m, msg.charge, msg.climb);
         return;
       case "stance": {
-        const block = msg.block && m.weapon?.kind === "shield";
+        const weapon = this.weaponOf(m);
+        const block = msg.block && weapon === "shield";
         if (block && !m.blocking) m.blockSince = this.now();
         m.blocking = block;
-        m.charging = msg.charge && !!m.weapon && !!weaponDef(m.weapon.kind).charge;
+        m.charging = msg.charge && !!weapon && !!weaponDef(weapon).charge;
         return;
       }
-      case "pick":
-        this.pickNearest(m);
+      case "buy":
+        this.buy(m, msg.item);
         return;
-      case "stone":
-        this.placeStone(m);
+      case "place":
+        this.place(m, msg.kind, msg.x, msg.z, msg.rot);
+        return;
+      case "pickup":
+        this.pickupPrefab(m, msg.id);
+        return;
+      case "stash":
+        this.stash(m, msg.chest, msg.item, msg.n);
+        return;
+      case "accept":
+        this.accept(m, msg.id);
+        return;
+      case "turnin":
+        this.turnIn(m);
+        return;
+      case "abandon":
+        if (m.inv.bounty) {
+          m.inv.bounty = null;
+          m.invDirty = true;
+        }
+        return;
+      case "cast":
+        this.cast(m, msg.x, msg.z);
+        return;
+      case "reel":
+        this.reel(m, msg.at);
+        return;
+      case "slot":
+        if (m.inv.slot !== msg.i) {
+          this.reelIn(m);
+          m.inv.slot = msg.i;
+          m.blocking = false;
+          m.charging = false;
+          m.invDirty = true;
+        }
+        return;
+      case "equip":
+        this.equip(m, msg.tool, msg.slot);
+        return;
+      case "drop":
+        this.drop(m, msg.tool);
+        return;
+      case "interact":
+        if (msg.kind === "weapon") this.pickUp(m, msg.id);
+        else this.usePrefab(m, msg.id);
         return;
       default:
         return;
     }
   }
 
+  /* ---------- inventory ---------- */
+
+  private weaponOf(m: Member) {
+    const tool = heldTool(m.inv);
+    return tool ? TOOLS[tool.kind].weapon : null;
+  }
+
+  /*
+   * Add a tool to your pack: into the preferred hotbar slot if it's free,
+   * otherwise the first free one, otherwise the pack. Null when you're full.
+   */
+  private giveTool(m: Member, kind: ToolKind, prefer: number, uses?: number): Tool | null {
+    if (m.inv.tools.length >= MAX_TOOLS) return null;
+    const def = TOOLS[kind];
+    const max = def.weapon && !def.fine ? weaponDef(def.weapon).uses : -1;
+    const tool: Tool = { id: this.toolId++, kind, uses: uses ?? max };
+    m.inv.tools.push(tool);
+    const bar = m.inv.hotbar;
+    let slot = bar[prefer] == null ? prefer : -1;
+    for (let i = 1; i < HOTBAR && slot < 0; i++) if (bar[i] == null) slot = i;
+    if (slot > 0) bar[slot] = tool.id;
+    m.invDirty = true;
+    return tool;
+  }
+
+  private removeTool(m: Member, id: number) {
+    if (heldTool(m.inv)?.id === id) this.reelIn(m);
+    m.inv.tools = m.inv.tools.filter((t) => t.id !== id);
+    m.inv.hotbar = m.inv.hotbar.map((t) => (t === id ? null : t));
+    m.blocking = false;
+    m.charging = false;
+    m.invDirty = true;
+  }
+
+  private equip(m: Member, toolId: number, slot: number) {
+    const inv = m.inv;
+    if (!inv.tools.some((t) => t.id === toolId) || slot === 0) return;
+    const held = heldTool(inv)?.id;
+    const from = inv.hotbar.indexOf(toolId);
+    if (slot < 0) {
+      if (from > 0) inv.hotbar[from] = null;
+    } else {
+      /* Swap with whatever's there (into our old slot, or back to the pack). */
+      const there = inv.hotbar[slot];
+      if (from > 0) inv.hotbar[from] = there;
+      inv.hotbar[slot] = toolId;
+    }
+    if (heldTool(inv)?.id !== held) this.reelIn(m);
+    m.blocking = false;
+    m.charging = false;
+    m.invDirty = true;
+  }
+
+  /* Put a found weapon back on the ground. Bought gear and rods stay with you. */
+  private drop(m: Member, toolId: number) {
+    const tool = m.inv.tools.find((t) => t.id === toolId);
+    const weapon = tool && TOOLS[tool.kind].droppable ? TOOLS[tool.kind].weapon : null;
+    if (!tool || !weapon) return;
+    this.removeTool(m, tool.id);
+    const dropped: GroundWeapon = {
+      id: this.weaponId++,
+      kind: weapon,
+      x: round2(m.body.x - Math.sin(m.body.yaw) * 0.8),
+      y: round2(m.body.y),
+      z: round2(m.body.z - Math.cos(m.body.yaw) * 0.8),
+      uses: tool.uses,
+    };
+    this.weapons.push(dropped);
+    this.broadcast({ t: "wspawn", weapon: dropped });
+  }
+
+  addItem(m: Member, id: ItemId, n = 1) {
+    m.inv.items[id] = Math.max(0, (m.inv.items[id] ?? 0) + n);
+    if (!m.inv.items[id]) delete m.inv.items[id];
+    m.invDirty = true;
+  }
+
+  /* ---------- shop and building ---------- */
+
+  private buy(m: Member, id: string) {
+    const entry = shopEntry(id);
+    const s = this.terrain.shop;
+    const near =
+      Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH && Math.abs(s.y - m.body.y) < 3;
+    if (!FEATURES.shop || !entry || !near || m.inv.coins < entry.price) return;
+    if ("tool" in entry.give) {
+      if (!this.giveTool(m, entry.give.tool, 1)) {
+        m.peer.send({ t: "feed", text: "Your pack is full" });
+        return;
+      }
+    } else this.addItem(m, entry.give.kit);
+    m.inv.coins -= entry.price;
+    m.invDirty = true;
+    this.saveSoon = true;
+  }
+
+  private build(p: Prefab) {
+    this.prefabs.set(p.id, p);
+    const solids = prefabBlocks(p)
+      .filter((b) => b.solid)
+      .map(blockSolid);
+    if (solids.length) this.terrain.addSolids(p.id, solids);
+  }
+
+  private place(m: Member, kind: Prefab["kind"], x: number, z: number, rot: number) {
+    if (!isKitId(kind) || (m.inv.items[kind] ?? 0) < 1) return;
+    if (this.prefabs.size >= MAX_PREFABS) {
+      m.peer.send({ t: "feed", text: "The island can't hold any more" });
+      return;
+    }
+    const v = checkPlacement(this.terrain, kind, x, z, rot, m.body);
+    if (!v.ok) return;
+    const p: Prefab = {
+      id: this.prefabId++,
+      kind,
+      x: round2(x),
+      y: round2(v.y),
+      z: round2(z),
+      rot: round2(rot),
+    };
+    if (kind === "chest") p.store = {};
+    this.build(p);
+    this.addItem(m, kind, -1);
+    if (kind === "bed") m.inv.bed = p.id;
+    this.saveSoon = true;
+    this.broadcast({ t: "prefab", prefab: p });
+  }
+
+  /* Take something you built back into your pack, with whatever was in it. */
+  private pickupPrefab(m: Member, id: number) {
+    const p = this.prefabs.get(id);
+    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
+    this.prefabs.delete(id);
+    this.terrain.removeSolids(id);
+    this.addItem(m, p.kind, 1);
+    for (const [item, n] of Object.entries(p.store ?? {}) as [ItemId, number][])
+      this.addItem(m, item, n);
+    for (const o of this.members.values()) {
+      if (o.inv.bed === id) {
+        o.inv.bed = null;
+        o.invDirty = true;
+      }
+    }
+    this.saveSoon = true;
+    this.broadcast({ t: "unprefab", id });
+  }
+
+  private usePrefab(m: Member, id: number) {
+    const p = this.prefabs.get(id);
+    if (!p) return;
+    if (p.kind === "rowboat") {
+      this.boatInteract(m, p);
+      return;
+    }
+    if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > 4) return;
+    if (p.kind === "bed") this.sleep(m, p);
+  }
+
+  /* ---------- boats ---------- */
+
+  private aboard(id: number) {
+    for (const o of this.members.values()) if (o.boat === id) return o;
+    return null;
+  }
+
+  private boatInteract(m: Member, p: Prefab) {
+    if (m.boat === p.id) {
+      m.boat = null;
+      m.peer.send({ t: "aboard", boat: null });
+      return;
+    }
+    if (m.boat !== null || this.aboard(p.id)) return;
+    if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > BOAT_REACH + 1) return;
+    this.reelIn(m);
+    m.boat = p.id;
+    m.peer.send({ t: "aboard", boat: p.id });
+  }
+
+  /*
+   * The rower says where they are; the boat goes with them, as long as that's
+   * a plausible step over water.
+   */
+  private row(m: Member, x: number, z: number, b: { rot: number; speed: number } | undefined) {
+    const p = m.boat === null ? null : this.prefabs.get(m.boat);
+    if (!p || !b) return;
+    /* They sit aft of the middle. */
+    const cx = x - SEAT.lz * Math.sin(b.rot);
+    const cz = z - SEAT.lz * Math.cos(b.rot);
+    const step = Math.hypot(cx - p.x, cz - p.z);
+    if (step > 4 || this.terrain.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
+    p.x = round2(cx);
+    p.z = round2(cz);
+    p.rot = round2(b.rot);
+    this.boatSpeed.set(p.id, b.speed);
+  }
+
+  /*
+   * A bed is where you wake from now on. At night, if you're the only one
+   * here, you sleep straight through to the morning.
+   */
+  private sleep(m: Member, bed: Prefab) {
+    m.inv.bed = bed.id;
+    m.invDirty = true;
+    if (isNight(this.time) && this.humans() === 1) {
+      this.time += untilDawn(this.time);
+      m.health = HEALTH_MAX;
+      m.peer.send({ t: "feed", text: "You sleep until morning" });
+      this.broadcastWorld();
+    } else {
+      m.peer.send({ t: "feed", text: "You'll wake here from now on" });
+    }
+  }
+
+  private stash(m: Member, chestId: number, item: ItemId, n: number) {
+    const chest = this.prefabs.get(chestId);
+    if (!chest?.store || Math.hypot(chest.x - m.body.x, chest.z - m.body.z) > 4) return;
+    const store = chest.store;
+    const amount = n > 0 ? Math.min(n, m.inv.items[item] ?? 0) : -Math.min(-n, store[item] ?? 0);
+    if (!amount) return;
+    this.addItem(m, item, -amount);
+    store[item] = (store[item] ?? 0) + amount;
+    if (!store[item]) delete store[item];
+    this.broadcast({ t: "prefab", prefab: chest });
+  }
+
+  private nearCampfire(m: Member) {
+    for (const p of this.prefabs.values()) {
+      if (p.kind !== "campfire") continue;
+      if (
+        Math.hypot(p.x - m.body.x, p.z - m.body.z) < CAMPFIRE_WARMTH &&
+        Math.abs(p.y - m.body.y) < 3
+      )
+        return true;
+    }
+    return false;
+  }
+
+  /* ---------- bounties ---------- */
+
+  private nearBoard(m: Member) {
+    const b = this.terrain.board;
+    return Math.hypot(b.x - m.body.x, b.z - m.body.z) < BOARD_REACH && Math.abs(b.y - m.body.y) < 3;
+  }
+
+  /* Top the board up to its full set of offers. Returns true if anything changed. */
+  private fillBoard() {
+    if (!FEATURES.bounties) return false;
+    let changed = false;
+    while (this.board.length < BOARD_SIZE) {
+      const held = [...this.members.values()].map((m) => m.inv.bounty).filter((b) => !!b);
+      const easy = !this.board.some(isEasy);
+      const b = makeBounty(this.rng, this.bountyId++, [...this.board, ...held], easy);
+      this.board.push(b);
+      this.posted.set(b.id, this.time);
+      changed = true;
+    }
+    return changed;
+  }
+
+  private postBoard() {
+    this.broadcast({ t: "board", offers: this.board });
+  }
+
+  /* Offers nobody takes come down after a while, and new ones go up. */
+  private refreshBoard() {
+    const stale = this.board.find((b) => this.time - (this.posted.get(b.id) ?? 0) > BOARD_REFRESH);
+    if (!stale) return;
+    this.board = this.board.filter((b) => b !== stale);
+    this.posted.delete(stale.id);
+    this.fillBoard();
+    this.postBoard();
+  }
+
+  private accept(m: Member, id: number) {
+    const offer = this.board.find((b) => b.id === id);
+    if (!FEATURES.bounties || !offer || m.inv.bounty || !this.nearBoard(m)) return;
+    this.board = this.board.filter((b) => b !== offer);
+    this.posted.delete(offer.id);
+    m.inv.bounty = offer;
+    m.invDirty = true;
+    this.fillBoard();
+    this.postBoard();
+  }
+
+  private turnIn(m: Member) {
+    const b = m.inv.bounty;
+    if (!FEATURES.bounties || !b || !this.nearBoard(m) || progress(m.inv, b) < b.count) return;
+    consume(m.inv, b);
+    m.inv.coins += b.reward;
+    m.inv.bounty = null;
+    m.invDirty = true;
+    this.saveSoon = true;
+    m.peer.send({ t: "paid", bounty: b });
+  }
+
+  /* ---------- fishing ---------- */
+
+  private rodOf(m: Member) {
+    const tool = heldTool(m.inv);
+    return tool ? (TOOLS[tool.kind].rod ?? null) : null;
+  }
+
+  private cast(m: Member, x: number, z: number) {
+    const rod = this.rodOf(m);
+    if (!rod || m.line) return;
+    const reach = Math.hypot(x - m.body.x, z - m.body.z);
+    const depth = depthAt(this.terrain.heightAt(x, z));
+    /* Standing (or sitting) above the water, casting a fair distance into enough of it. */
+    if (reach > rod.cast + 1.5 || reach < 1.5 || depth < MIN_CAST_DEPTH) return;
+    if (SEA_LEVEL - m.body.y > 1.2) return;
+    const [lo, hi] = rod.bite;
+    m.line = {
+      x,
+      z,
+      depth,
+      biteAt: this.now() + lo + this.rng() * (hi - lo),
+      fish: null,
+      strike: null,
+    };
+    this.broadcast({ t: "line", by: m.id, x: round2(x), z: round2(z), state: "cast" });
+  }
+
+  /* Pull the line out without a fish. */
+  private reelIn(m: Member) {
+    if (!m.line) return;
+    const { x, z } = m.line;
+    m.line = null;
+    this.broadcast({ t: "line", by: m.id, x: round2(x), z: round2(z), state: "none" });
+  }
+
+  /* Strike. A miss, or striking before anything bites, loses the fish. */
+  private reel(m: Member, at: number) {
+    const line = m.line;
+    if (!line) return;
+    if (!line.fish || !line.strike) {
+      this.reelIn(m);
+      return;
+    }
+    /*
+     * Trust the angler's own timing, within reason: not earlier than we've
+     * seen, and inside the window. (A throttled tab can leave our clock behind.)
+     */
+    const elapsed = this.now() - line.biteAt;
+    const t = at >= elapsed - 0.5 && at <= BITE_WINDOW ? at : elapsed;
+    const fish = struck(line.strike, t) ? line.fish : null;
+    this.land(m, fish);
+  }
+
+  private land(m: Member, fish: FishId | null) {
+    const line = m.line;
+    if (!line) return;
+    m.line = null;
+    if (fish) {
+      this.addItem(m, fish);
+      this.saveSoon = true;
+    }
+    this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "none" });
+    this.broadcast({ t: "catch", by: m.id, fish });
+  }
+
+  private tickLine(m: Member, now: number) {
+    const line = m.line;
+    if (!line) return;
+    const rod = this.rodOf(m);
+    const far = Math.hypot(line.x - m.body.x, line.z - m.body.z) > (rod?.cast ?? 0) + 5;
+    if (!rod || far) {
+      this.reelIn(m);
+      return;
+    }
+    if (!line.fish && now >= line.biteAt) {
+      line.fish = pickFish(this.rng, line.depth, rod, isNight(this.time));
+      line.strike = strikeFor(this.rng, line.fish, rod);
+      line.biteAt = now;
+      m.peer.send({ t: "bite", ...line.strike });
+      this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "bite" });
+    } else if (line.fish && now - line.biteAt > BITE_WINDOW) {
+      this.land(m, null);
+    }
+  }
+
+  private flush(m: Member) {
+    if (!m.invDirty) return;
+    m.invDirty = false;
+    m.peer.send({ t: "inv", inv: structuredClone(m.inv) });
+  }
+
   /* Drive the room; hosts call this TICK_HZ times a second. */
   tick() {
     const now = this.now();
-    if (this.phase === "idle") return;
-
-    if (this.phase === "countdown" && now >= this.phaseEndsAt) {
-      this.phase = "playing";
-      this.startAt = now;
-      this.phaseEndsAt = Number.POSITIVE_INFINITY;
-      this.broadcastRound();
-    } else if (this.phase === "results" && now >= this.phaseEndsAt) {
-      if (this.humans() > 0 || this.opts.attract) this.startCountdown();
-      else this.phase = "idle";
-      return;
-    }
-
-    if (this.phase === "playing") this.simulate(now);
+    const dt = this.lastTick === null ? 1 / TICK_HZ : clamp(now - this.lastTick, 0, 0.25);
+    this.lastTick = now;
+    this.time += dt;
+    this.simulate(now, dt);
+    for (const m of this.members.values()) this.flush(m);
     this.broadcastSnap(now);
   }
 
-  private roundTime(now: number) {
-    if (this.phase === "countdown") return now - this.phaseEndsAt;
-    if (this.phase === "results") return this.endTime;
-    return now - this.startAt;
-  }
-
-  private tide(t: number) {
-    return tideAt(t, this.hurryFrom ?? Number.POSITIVE_INFINITY, HURRY_RATE);
-  }
-
-  private createMember(id: number, name: string, bot: boolean, peer: Peer | null): Member {
-    return {
-      id,
-      name,
-      bot,
-      peer,
-      spectator: false,
-      player: false,
-      alive: false,
-      body: createBody(0, 0, 0, 0),
-      pitch: 0,
-      flags: 0,
-      breath: BREATH_MAX,
-      stones: STONES_START,
-      attackReadyAt: 0,
-      shoveFlagUntil: 0,
-      shovedBy: null,
-      weapon: null,
-      stagger: 0,
-      lastHitAt: 0,
-      combo: 0,
-      lastSwingAt: 0,
-      blocking: false,
-      blockSince: 0,
-      charging: false,
-      brain: bot ? createBrain(this.rng) : null,
-    };
-  }
-
-  private startCountdown() {
-    const now = this.now();
-    this.seed = (this.rng() * 2 ** 32) >>> 0;
-    this.terrain = new Terrain(this.seed);
-    this.pillars = [];
-    this.weapons = [];
-    this.pending = [];
-    this.cairnsTaken.clear();
-    this.results = [];
-    this.hurryFrom = null;
-    this.phase = "countdown";
-    this.phaseEndsAt =
-      now + (this.opts.attract ? 2 : this.opts.online ? COUNTDOWN_ONLINE : COUNTDOWN_SOLO);
-
-    for (const m of [...this.members.values()]) {
-      if (m.bot) this.members.delete(m.id);
-      else {
-        m.player = false;
-        m.alive = false;
-      }
-    }
-    for (const m of this.members.values()) {
-      if (!m.spectator && this.playerCount() < MAX_PLAYERS) this.enlist(m);
-    }
-    this.fillBots();
-    /* One weapon per player, scattered over the island. */
-    for (let i = 0; i < this.playerCount(); i++) {
-      const kind = WEAPON_KINDS[i % WEAPON_KINDS.length];
-      this.spawnWeapon(kind, null, 3, false);
-    }
-    this.broadcastRound();
-  }
-
-  private playerCount() {
-    let n = 0;
-    for (const m of this.members.values()) if (m.player) n++;
-    return n;
-  }
-
-  private freeSpawn() {
-    const terrain = this.terrain!;
-    const used = new Set<number>();
-    for (const m of this.members.values()) {
-      if (!m.player) continue;
-      terrain.spawns.forEach((s, i) => {
-        if (Math.hypot(s.x - m.body.x, s.z - m.body.z) < 1) used.add(i);
-      });
-    }
-    const open = terrain.spawns.map((_, i) => i).filter((i) => !used.has(i));
-    return terrain.spawns[open[Math.floor(this.rng() * open.length)] ?? 0];
-  }
-
-  /* Put a member into the round at a free spawn; a human bumps a bot if the room is full. */
-  private enlist(m: Member) {
-    if (this.playerCount() >= MAX_PLAYERS) {
-      const bot = [...this.members.values()].find((b) => b.bot);
-      if (!bot) return;
-      this.members.delete(bot.id);
-    }
-    const spawn = this.freeSpawn();
-    m.player = true;
-    m.alive = true;
-    m.body = createBody(spawn.x, spawn.y, spawn.z, spawn.yaw);
-    m.pitch = 0;
-    m.breath = BREATH_MAX;
-    m.stones = STONES_START;
-    m.attackReadyAt = 0;
-    m.shovedBy = null;
-    m.weapon = null;
-    m.stagger = 0;
-    m.combo = 0;
-    m.blocking = false;
-    m.charging = false;
-  }
-
-  private fillBots() {
-    while (this.playerCount() < MAX_PLAYERS) {
-      const bot = this.createMember(this.nextId++, randomName(this.rng), true, null);
-      this.members.set(bot.id, bot);
-      this.enlist(bot);
-    }
-  }
-
-  private simulate(now: number) {
-    const terrain = this.terrain!;
-    const t = now - this.startAt;
-    const tide = this.tide(t);
-    const dt = 1 / TICK_HZ;
-    const alive = [...this.members.values()].filter((m) => m.player && m.alive);
-
-    /* Once every human is out, hurry the sea so the next round comes sooner. */
-    if (this.hurryFrom === null && !this.opts.attract && !alive.some((m) => !m.bot)) {
-      this.hurryFrom = t;
-      this.broadcastRound();
-    }
-
-    const view = {
-      terrain,
-      pillars: this.pillars,
-      tide,
-      tideSoon: Math.max(tide, nextTide(t)),
-      time: t,
-      cairnsTaken: this.cairnsTaken,
-      weapons: this.weapons,
-      others: [] as { id: number; x: number; y: number; z: number; yaw: number }[],
-    };
-
+  private simulate(now: number, dt: number) {
     this.resolveHits(now);
+    this.herd?.tick(now, dt, this.preyList());
 
-    for (const m of alive) {
-      if (!m.bot || !m.brain) continue;
-      view.others = alive
-        .filter((o) => o !== m)
-        .map((o) => ({ id: o.id, x: o.body.x, y: o.body.y, z: o.body.z, yaw: o.body.yaw }));
-      const act = think(m, m.brain, view, now, this.rng);
-      const turn = wrapAngle(act.yaw - m.body.yaw);
-      m.body.yaw = wrapAngle(m.body.yaw + clamp(turn, -7 * dt, 7 * dt));
-      m.pitch = 0;
-      act.intent.speedScale = weaponDef(m.weapon?.kind ?? null).speed ?? 1;
-      const world = { terrain, pillars: this.pillars, tide };
-      stepBody(m.body, act.intent, dt / 2, world);
-      stepBody(m.body, { ...act.intent, jump: false }, dt / 2, world);
-      m.flags =
-        (m.body.sprinting ? FLAG.sprint : 0) |
-        (m.body.grounded ? FLAG.grounded : 0) |
-        (m.body.y < tide ? FLAG.wet : 0);
-      if (act.attack) this.attack(m, act.charge, false);
-      if (act.stone) this.placeStone(m);
-    }
-
-    for (const m of alive) {
-      const depth = tide - m.body.y;
+    for (const m of this.members.values()) {
+      if (m.spectator) continue;
+      const depth = SEA_LEVEL - m.body.y;
       /* Under: drowning. Swimming: the cold. Paddling: a slow chill. Dry: recovering. */
       const rate =
         depth > PLAYER_HEIGHT - 0.25
@@ -421,80 +884,151 @@ export class Room {
               ? -BREATH_WADE * 0.35
               : BREATH_REGEN;
       m.breath = clamp(m.breath + rate * dt, 0, BREATH_MAX);
-
-      if (m.stones < STONES_MAX) {
-        for (const c of terrain.cairns) {
-          if (this.cairnsTaken.has(c.id)) continue;
-          if (
-            Math.hypot(c.x - m.body.x, c.z - m.body.z) < CAIRN_REACH &&
-            Math.abs(c.y - m.body.y) < 2.5
-          ) {
-            this.cairnsTaken.add(c.id);
-            m.stones++;
-            this.broadcast({ t: "cairn", id: c.id, by: m.id });
-            break;
-          }
-        }
+      if (m.respawnAt !== null) {
+        if (now >= m.respawnAt) this.respawn(m);
+        continue;
       }
+
+      if (m.breath <= 0) this.hurt(m, DROWN_DAMAGE * dt, "drowned");
+      else if (m.health < HEALTH_MAX) {
+        /* A campfire warms you back quickly; otherwise it takes a while. */
+        const warm = this.nearCampfire(m);
+        const quiet = now - m.lastHurtAt;
+        if (warm && quiet > 2) m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * 4 * dt);
+        else if (quiet > REGEN_DELAY) m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * dt);
+      }
+
+      this.tickLine(m, now);
 
       /* Stagger wears off a few seconds after the last hit. */
       if (now - m.lastHitAt > STAGGER_GRACE)
         m.stagger = Math.max(0, m.stagger - STAGGER_RECOVER * dt);
 
-      if (!m.weapon) {
-        const w = this.weapons.find(
-          (w) => Math.hypot(w.x - m.body.x, w.z - m.body.z) < 1.4 && Math.abs(w.y - m.body.y) < 1.9,
-        );
-        if (w) this.take(m, w);
+      if (m.body.y < SEA_FLOOR - 8) this.hurt(m, HEALTH_MAX, "drowned");
+    }
+
+    this.refreshBoard();
+
+    if (
+      FEATURES.weapons &&
+      this.weapons.length < GROUND_WEAPONS &&
+      this.time >= this.nextWeaponAt
+    ) {
+      this.nextWeaponAt = this.time + WEAPON_RESPAWN;
+      this.spawnWeapon(null, true);
+    }
+  }
+
+  /* Everyone the animals can see, in the shape they need. */
+  private preyList() {
+    this.prey.length = 0;
+    for (const m of this.members.values()) {
+      if (m.spectator) continue;
+      this.prey.push(this.asPrey(m));
+    }
+    return this.prey;
+  }
+
+  private asPrey(m: Member): Prey {
+    return {
+      id: m.id,
+      x: m.body.x,
+      y: m.body.y,
+      z: m.body.z,
+      yaw: m.body.yaw,
+      running: (m.flags & FLAG.sprint) !== 0,
+      blocking: m.blocking && this.weaponOf(m) === "shield",
+      away: m.respawnAt !== null || m.boat !== null,
+    };
+  }
+
+  /* A boar's tusks: damage, and a shove off your feet. */
+  private gored(id: number, damage: number, dx: number, dz: number) {
+    const m = this.members.get(id);
+    if (!m) return;
+    this.push(m, dx, dz, 9, 4.5);
+    this.hurt(m, damage, "boar");
+  }
+
+  /* Beside your bed if you have one, otherwise where everyone first wakes up. */
+  private spawnPoint(m: Member): Spawn {
+    const bed = m.inv.bed === null ? null : this.prefabs.get(m.inv.bed);
+    if (bed) {
+      const c = Math.cos(bed.rot);
+      const s = Math.sin(bed.rot);
+      for (const side of [1, -1]) {
+        const x = bed.x + side * 0.95 * c;
+        const z = bed.z - side * 0.95 * s;
+        const { ground } = this.terrain.groundAt(x, z, bed.y + 0.3);
+        const blocked = this.terrain
+          .solidsNear(x, z)
+          .some(
+            (o) =>
+              o.top > ground + 0.6 &&
+              o.bottom < ground + 1.7 &&
+              PROBES.some(([px, pz]) => overSolid(o, x + px, z + pz)),
+          );
+        if (!blocked) return { x, y: ground, z, yaw: bed.rot };
       }
-
-      if (m.breath <= 0 || m.body.y < SEA_FLOOR - 8) this.eliminate(m, now);
+      return { x: bed.x, y: bed.y + 0.45, z: bed.z, yaw: bed.rot };
     }
-
-    const remaining = [...this.members.values()].filter((m) => m.player && m.alive);
-    if (remaining.length <= 1) this.finish(now, remaining[0] ?? null);
+    const h = this.terrain.home;
+    return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
   }
 
-  private eliminate(m: Member, now: number | null) {
-    const before = [...this.members.values()].filter((o) => o.player && o.alive).length;
-    m.alive = false;
-    /* The sea takes the weapon too; it washes up somewhere dry. */
-    if (m.weapon) {
-      this.spawnWeapon(
-        m.weapon.kind,
-        m.weapon.uses,
-        this.tide(now === null ? 0 : now - this.startAt) + 6,
-      );
-      m.weapon = null;
+  /* Damage from any source. At zero you black out, and wake up somewhere safe. */
+  private hurt(m: Member, amount: number, cause: HurtCause) {
+    if (m.respawnAt !== null || amount <= 0) return;
+    m.health = Math.max(0, m.health - amount);
+    m.lastHurtAt = this.now();
+    /* Drowning ticks every frame; only report the bigger knocks. */
+    if (cause !== "drowned") m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
+    if (m.health > 0) return;
+    m.respawnAt = this.now() + RESPAWN_DELAY;
+    this.reelIn(m);
+    if (m.boat !== null) {
+      m.boat = null;
+      m.peer.send({ t: "aboard", boat: null });
     }
-    const credit =
-      m.shovedBy && now !== null && now - m.shovedBy.at < SHOVE_CREDIT
-        ? this.members.get(m.shovedBy.id)
-        : undefined;
-    this.results.push({ id: m.id, name: m.name, bot: m.bot, place: before, by: credit?.name });
-    this.broadcast({ t: "out", id: m.id, by: credit?.id ?? null, place: before });
+    m.blocking = false;
+    m.charging = false;
+    m.peer.send({ t: "died", cause });
   }
 
-  private finish(now: number, winner: Member | null) {
-    if (winner) {
-      winner.alive = false;
-      this.results.push({ id: winner.id, name: winner.name, bot: winner.bot, place: 1 });
+  /* Hitting the ground hard hurts; landing in water doesn't. */
+  private landing(m: Member, vy: number, flags: number) {
+    const grounded = (flags & FLAG.grounded) !== 0;
+    if (!grounded) {
+      m.airVy = vy;
+      return;
     }
-    this.results.sort((a, b) => a.place - b.place);
-    this.endTime = now - this.startAt;
-    this.phase = "results";
-    this.phaseEndsAt = now + RESULTS_TIME;
-    this.broadcastRound();
+    const impact = -m.airVy;
+    m.airVy = 0;
+    if (impact > FALL_SAFE_SPEED && !(flags & FLAG.wet))
+      this.hurt(m, (impact - FALL_SAFE_SPEED) * FALL_DAMAGE, "fall");
+  }
+
+  private respawn(m: Member) {
+    const s = this.spawnPoint(m);
+    m.body = createBody(s.x, s.y, s.z, s.yaw);
+    m.respawnAt = null;
+    m.health = HEALTH_MAX;
+    m.airVy = 0;
+    m.breath = BREATH_MAX;
+    m.stagger = 0;
+    m.blocking = false;
+    m.charging = false;
+    m.peer.send({ t: "respawn", ...s });
   }
 
   /* ---------- weapons ---------- */
 
   /* Somewhere dry and open for a weapon: on the ground, or up on a structure. */
-  private weaponSpot(minY: number) {
-    const terrain = this.terrain!;
+  private weaponSpot() {
+    const terrain = this.terrain;
     const far = (x: number, z: number) =>
       this.weapons.every((w) => Math.hypot(w.x - x, w.z - z) > 22);
-    const perches = terrain.highSpots.filter((s) => s.route && s.y > minY);
+    const perches = terrain.perches;
     for (let tries = 0; tries < 300; tries++) {
       if (perches.length && this.rng() < 0.3) {
         const p = perches[Math.floor(this.rng() * perches.length)];
@@ -506,8 +1040,8 @@ export class Room {
       const x = Math.cos(a) * d;
       const z = Math.sin(a) * d;
       const h = terrain.heightAt(x, z);
-      if (h < minY || !far(x, z)) continue;
-      const { ground } = terrain.groundAt(x, z, h + 0.1, this.pillars);
+      if (h < 3 || !far(x, z)) continue;
+      const { ground } = terrain.groundAt(x, z, h + 0.1);
       if (ground > h + 0.05) continue;
       const blocked = terrain
         .solidsNear(x, z)
@@ -517,13 +1051,13 @@ export class Room {
       if (blocked) continue;
       return { x, y: h, z };
     }
-    const best = terrain.highSpots[0];
+    const best = perches[0];
     return best ? { x: best.x, y: best.y, z: best.z } : null;
   }
 
-  private spawnWeapon(kind: WeaponKind | null, uses: number | null, minY: number, announce = true) {
+  private spawnWeapon(kind: WeaponKind | null, announce: boolean) {
     const k = kind ?? WEAPON_KINDS[Math.floor(this.rng() * WEAPON_KINDS.length)];
-    const spot = this.weaponSpot(minY);
+    const spot = this.weaponSpot();
     if (!spot) return;
     const weapon: GroundWeapon = {
       id: this.weaponId++,
@@ -531,64 +1065,49 @@ export class Room {
       x: round2(spot.x),
       y: round2(spot.y),
       z: round2(spot.z),
-      uses: uses ?? weaponDef(k).uses,
+      uses: weaponDef(k).uses,
     };
     this.weapons.push(weapon);
     if (announce) this.broadcast({ t: "wspawn", weapon });
   }
 
-  /* Pick a weapon up; whatever you held drops at your feet. */
-  private take(m: Member, w: GroundWeapon) {
+  /* Pick a weapon up off the ground, into your hotbar if there's room. */
+  private pickUp(m: Member, id: number) {
+    const w = this.weapons.find((o) => o.id === id);
+    if (!w) return;
+    if (Math.hypot(w.x - m.body.x, w.z - m.body.z) > 3 || Math.abs(w.y - m.body.y) > 2.5) return;
+    const tool = this.giveTool(m, w.kind, 1, w.uses);
+    if (!tool) {
+      m.peer.send({ t: "feed", text: "Your pack is full" });
+      return;
+    }
     this.weapons = this.weapons.filter((o) => o !== w);
-    if (m.weapon) {
-      const dropped: GroundWeapon = {
-        id: this.weaponId++,
-        kind: m.weapon.kind,
-        x: round2(m.body.x),
-        y: round2(m.body.y),
-        z: round2(m.body.z),
-        uses: m.weapon.uses,
-      };
-      this.weapons.push(dropped);
-      this.broadcast({ t: "wspawn", weapon: dropped });
-    }
-    m.weapon = { kind: w.kind, uses: w.uses };
+    /* Picking something up puts it in your hand. */
+    const slot = m.inv.hotbar.indexOf(tool.id);
+    if (slot > 0) m.inv.slot = slot;
     m.blocking = false;
     m.charging = false;
-    this.broadcast({ t: "wtake", id: w.id, by: m.id });
+    this.broadcast({ t: "wtake", id: w.id, by: m.id, kind: w.kind });
   }
 
-  private pickNearest(m: Member) {
-    if (!m.player || !m.alive || this.phase !== "playing") return;
-    let best: GroundWeapon | null = null;
-    let bestD = 2;
-    for (const w of this.weapons) {
-      const d = Math.hypot(w.x - m.body.x, w.z - m.body.z);
-      if (d < bestD && Math.abs(w.y - m.body.y) < 2) {
-        best = w;
-        bestD = d;
-      }
-    }
-    if (best) this.take(m, best);
-  }
-
-  /* One use off the weapon; when it's spent it breaks and a fresh one washes up. */
+  /* One use off the held weapon; when it's spent it breaks. Bought gear never does. */
   private wear(m: Member) {
-    if (!m.weapon) return;
-    m.weapon.uses--;
-    if (m.weapon.uses > 0) return;
-    this.broadcast({ t: "wbreak", by: m.id, kind: m.weapon.kind });
-    m.weapon = null;
-    m.blocking = false;
-    m.charging = false;
-    this.spawnWeapon(null, null, this.tide(this.roundTime(this.now())) + 6);
+    const tool = heldTool(m.inv);
+    const weapon = tool && TOOLS[tool.kind].weapon;
+    if (!tool || !weapon || tool.uses < 0) return;
+    tool.uses--;
+    m.invDirty = true;
+    if (tool.uses > 0) return;
+    this.removeTool(m, tool.id);
+    this.broadcast({ t: "wbreak", by: m.id, kind: weapon });
   }
 
   private attack(m: Member, charge: number, climb: boolean) {
     const now = this.now();
-    if (!m.player || !m.alive || this.phase !== "playing" || now < m.attackReadyAt) return;
-    if (m.blocking) return;
-    const kind = m.weapon?.kind ?? null;
+    if (now < m.attackReadyAt || m.blocking) return;
+    const tool = heldTool(m.inv);
+    if (tool && TOOLS[tool.kind].rod) return;
+    const kind = this.weaponOf(m);
     const def = weaponDef(kind);
     m.attackReadyAt = now + def.cooldown;
     m.shoveFlagUntil = now + 0.35;
@@ -611,35 +1130,37 @@ export class Room {
     this.broadcast({ t: "swing", by: m.id, kind, heavy });
     /* A pickaxe swung at a wall is a climb, not an attack. */
     if (climb && kind === "pickaxe") return;
-    this.pending.push({ at: now + def.windup, by: m.id, kind, heavy, power, yaw: m.body.yaw });
+    const fine = !!tool && !!TOOLS[tool.kind].fine;
+    this.pending.push({
+      at: now + def.windup,
+      by: m.id,
+      kind,
+      fine,
+      heavy,
+      power,
+      yaw: m.body.yaw,
+    });
     this.wear(m);
   }
 
-  /* Knock a member about: bots directly, humans by telling their client. */
   private push(o: Member, ix: number, iz: number, speed: number, lift: number) {
-    if (o.bot) {
-      o.body.vx += ix * speed;
-      o.body.vz += iz * speed;
-      o.body.vy = Math.max(o.body.vy, lift);
-      o.body.grounded = false;
-      o.body.ladderCooldown = 0.6;
-    } else {
-      o.peer?.send({ t: "impulse", vx: ix * speed, vy: lift, vz: iz * speed });
-    }
+    o.peer.send({ t: "impulse", vx: ix * speed, vy: lift, vz: iz * speed });
   }
 
   private resolveHits(now: number) {
+    if (!this.pending.length) return;
     const due = this.pending.filter((p) => p.at <= now);
     if (!due.length) return;
     this.pending = this.pending.filter((p) => p.at > now);
     for (const p of due) {
       const m = this.members.get(p.by);
-      if (!m?.alive) continue;
+      if (!m) continue;
       const def = weaponDef(p.kind);
       const fx = -Math.sin(p.yaw);
       const fz = -Math.cos(p.yaw);
+      this.hitAnimals(m, p, now);
       for (const o of this.members.values()) {
-        if (o === m || !o.player || !o.alive) continue;
+        if (o === m || o.spectator || o.respawnAt !== null) continue;
         const dx = o.body.x - m.body.x;
         const dz = o.body.z - m.body.z;
         const d = Math.hypot(dx, dz);
@@ -669,7 +1190,7 @@ export class Room {
 
         let blocked = false;
         let parry = false;
-        if (o.blocking && o.weapon?.kind === "shield" && -facingAway > 0.2) {
+        if (o.blocking && this.weaponOf(o) === "shield" && -facingAway > 0.2) {
           blocked = true;
           parry = now - o.blockSince < PARRY_WINDOW;
           if (p.kind === "axe") {
@@ -685,7 +1206,6 @@ export class Room {
           if (parry) {
             m.stagger = Math.min(STAGGER_MAX, m.stagger + 15);
             m.lastHitAt = now;
-            m.shovedBy = { id: o.id, at: now };
             this.push(m, -nx, -nz, 8 * knockScale(m.stagger), 3);
             this.broadcast({
               t: "hit",
@@ -713,7 +1233,6 @@ export class Room {
           iz /= il;
         }
         this.push(o, ix, iz, knock * knockScale(o.stagger), lift * (1 + o.stagger / 200));
-        o.shovedBy = { id: m.id, at: now };
         this.broadcast({
           t: "hit",
           by: m.id,
@@ -729,76 +1248,71 @@ export class Room {
     }
   }
 
-  private placeStone(m: Member) {
-    if (!m.player || !m.alive || this.phase !== "playing" || m.stones <= 0) return;
-    if (this.pillars.length >= MAX_PILLARS) return;
-    const terrain = this.terrain!;
-    const { ground } = terrain.groundAt(m.body.x, m.body.z, m.body.y + 0.05, this.pillars);
-    const bottom = Math.min(ground, m.body.y) - 0.3;
-    const pillar: Pillar = {
-      id: this.pillarId++,
-      x: m.body.x,
-      z: m.body.z,
-      r: PILLAR_RADIUS,
-      bottom,
-      top: bottom + 0.3 + PILLAR_HEIGHT,
-      standable: true,
-      at: this.roundTime(this.now()),
-    };
-    m.stones--;
-    this.pillars.push(pillar);
-    this.broadcast({ t: "pillar", pillar });
-
-    for (const o of this.members.values()) {
-      if (!o.player || !o.alive) continue;
-      if (Math.hypot(o.body.x - pillar.x, o.body.z - pillar.z) > pillar.r + 0.2) continue;
-      if (o.body.y > pillar.top || o.body.y + PLAYER_HEIGHT < pillar.bottom) continue;
-      if (o.bot) {
-        o.body.y = pillar.top;
-        o.body.vy = 0;
-        o.body.grounded = true;
-      } else {
-        o.peer?.send({ t: "lift", y: pillar.top });
+  private hitAnimals(m: Member, p: PendingHit, now: number) {
+    const def = weaponDef(p.kind);
+    const fx = -Math.sin(p.yaw);
+    const fz = -Math.cos(p.yaw);
+    if (!this.herd) return;
+    for (const a of this.herd.animals) {
+      if (a.respawnAt !== null || a.state === "dead") continue;
+      const dx = a.x - m.body.x;
+      const dz = a.z - m.body.z;
+      const d = Math.hypot(dx, dz);
+      if (d > def.reach + 0.7 || Math.abs(a.y + 0.6 - m.body.y) > 2.4) continue;
+      if (def.arc > -1 && d > 0.9 && (dx * fx + dz * fz) / d < def.arc - 0.15) continue;
+      let damage = def.damage * (p.fine ? FINE_DAMAGE : 1) * (p.heavy ? 1.6 : 1);
+      if (p.kind === "flail") damage = 10 + 18 * p.power;
+      /* Daggers from behind. */
+      const afx = -Math.sin(a.yaw);
+      const afz = -Math.cos(a.yaw);
+      if (p.kind === "daggers" && (afx * dx + afz * dz) / (d || 1) > 0.4) damage *= 2.5;
+      const dead = this.herd.strike(a, this.asPrey(m), damage, now);
+      if (dead) {
+        this.addItem(m, a.kind);
+        this.saveSoon = true;
       }
+      this.broadcast({
+        t: "ahit",
+        id: a.id,
+        kind: a.kind,
+        by: m.id,
+        damage: Math.round(damage),
+        dead,
+      });
     }
   }
 
-  private roundInfo(m: Member): RoundInfo {
-    const now = this.now();
-    const ends = this.phaseEndsAt - now;
+  /* ---------- messages ---------- */
+
+  private roster() {
+    return [...this.members.values()]
+      .filter((o) => !o.spectator)
+      .map((o) => ({ id: o.id, name: o.name }));
+  }
+
+  private worldInfo(m: Member): WorldInfo {
     return {
-      phase: this.phase,
       seed: this.seed,
-      time: this.roundTime(now),
-      phaseEndsIn: Number.isFinite(ends) ? ends : -1,
-      hurryFrom: this.hurryFrom,
-      roster: [...this.members.values()]
-        .filter((o) => o.player)
-        .map((o) => ({ id: o.id, name: o.name, bot: o.bot })),
-      cairnsTaken: [...this.cairnsTaken],
-      pillars: this.pillars,
+      time: this.time,
+      roster: this.roster(),
       weapons: this.weapons,
-      results: this.results,
-      you: {
-        player: m.player,
-        spawn:
-          m.player && this.phase === "countdown"
-            ? { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw }
-            : null,
-      },
+      board: this.board,
+      prefabs: [...this.prefabs.values()],
+      you: m.spectator ? null : { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw },
     };
   }
 
-  private sendRound(m: Member) {
-    m.peer?.send({ t: "round", ...this.roundInfo(m) });
+  /* Everyone gets the world afresh: after a jump in time, say. */
+  private broadcastWorld() {
+    for (const o of this.members.values()) o.peer.send({ t: "world", ...this.worldInfo(o) });
   }
 
-  private broadcastRound() {
-    for (const m of this.members.values()) this.sendRound(m);
+  private broadcastRoster() {
+    this.broadcast({ t: "roster", roster: this.roster() });
   }
 
   private broadcast(msg: ServerMsg) {
-    for (const m of this.members.values()) m.peer?.send(msg);
+    for (const m of this.members.values()) m.peer.send(msg);
   }
 
   private feed(text: string) {
@@ -806,11 +1320,9 @@ export class Room {
   }
 
   private broadcastSnap(now: number) {
-    const t = this.roundTime(now);
-    const tide = this.phase === "playing" || this.phase === "results" ? this.tide(t) : this.tide(0);
     const p: PlayerSnap[] = [];
     for (const m of this.members.values()) {
-      if (!m.player) continue;
+      if (m.spectator) continue;
       p.push([
         m.id,
         round2(m.body.x),
@@ -819,49 +1331,53 @@ export class Room {
         round2(m.body.yaw),
         round2(m.pitch),
         m.flags |
-          (m.alive ? FLAG.alive : 0) |
-          FLAG.player |
+          (m.respawnAt === null ? FLAG.alive : 0) |
           (now < m.shoveFlagUntil ? FLAG.shove : 0) |
           (m.blocking ? FLAG.block : 0) |
           (m.charging ? FLAG.charge : 0),
         Math.round(m.breath),
-        weaponIndex(m.weapon?.kind ?? null),
+        weaponIndex(this.weaponOf(m)),
         Math.round(m.stagger),
       ]);
     }
+    const time = round2(this.time);
+    const a = this.herd?.snapshot() ?? [];
+    const b: BoatSnap[] = [];
+    for (const p of this.prefabs.values()) {
+      if (p.kind === "rowboat")
+        b.push([
+          p.id,
+          p.x,
+          p.z,
+          p.rot,
+          round2(this.aboard(p.id) ? (this.boatSpeed.get(p.id) ?? 0) : 0),
+        ]);
+    }
     for (const m of this.members.values()) {
-      if (!m.peer) continue;
       m.peer.send({
         t: "snap",
-        time: round2(t),
-        tide: round2(tide),
+        time,
         p,
-        me: m.player
-          ? {
+        a,
+        b,
+        me: m.spectator
+          ? null
+          : {
+              health: Math.ceil(m.health),
               breath: Math.round(m.breath),
-              stones: m.stones,
-              alive: m.alive,
-              weapon: m.weapon ? { ...m.weapon } : null,
               stagger: Math.round(m.stagger),
-            }
-          : null,
+              dead: m.respawnAt !== null,
+            },
       });
     }
   }
 
-  /* Used by hosts to tell whether the round is worth ticking at all. */
+  /* Hosts use this to tell whether the room is worth ticking at all. */
   active() {
-    return this.phase !== "idle";
+    return this.members.size > 0;
   }
 
   status() {
-    return { humans: this.humans(), phase: this.phase };
-  }
-
-  /* Test hook: freeze-frame of who is alive. */
-  debugAlive() {
-    return [...this.members.values()]
-      .filter((m) => m.player && m.alive)
-      .map((m) => ({ name: m.name, bot: m.bot, y: m.body.y }));
+    return { humans: this.humans() };
   }
 }

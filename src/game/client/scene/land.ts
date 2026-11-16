@@ -25,7 +25,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
   varying vec3 vNormal;
   void main() {
     vec3 n = normalize(vNormal);
-    float diff = max(dot(n, uMoon), 0.0);
+    float diff = moonlight(n);
     float h = vWorld.y;
 
     float minor = isoLine(h / uContour, 1.1);
@@ -42,14 +42,14 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     float dotMask = 1.0 - smoothstep(0.05, 0.09, length(cellPos));
     float dots = step(0.94, grain) * dotMask * 0.12 * (1.0 - steep);
 
-    float c = 0.022 + 0.11 * diff + (lines + hatch) * (0.55 + 0.45 * diff) + dots;
+    float c = dayLift(0.022 + 0.11 * diff) + (lines + hatch) * (0.55 + 0.45 * diff) + dots;
 
     /* Wet sand: a dark band just above the waterline. */
-    float above = h - uTide;
+    float above = h - SEA_LEVEL;
     c *= mix(0.5, 1.0, smoothstep(0.0, 1.2, above));
     c *= mix(1.0, 0.4, step(above, 0.0));
 
-    gl_FragColor = vec4(vec3(c * (1.0 - fogFactor(vWorld))), 1.0);
+    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), 1.0);
   }
 `;
 
@@ -78,7 +78,7 @@ const WATER_FRAGMENT = /* glsl */ `
     float ground = texture2D(uHeights, clamp(uv, 0.0, 1.0)).r;
     float outside = step(1.0, max(abs(vWorld.x), abs(vWorld.z)) / uHalf);
     ground = mix(ground, -30.0, outside);
-    float depth = uTide - ground;
+    float depth = SEA_LEVEL - ground;
 
     float lap = 0.28 + 0.14 * sin(uTime * 1.4 + vWorld.x * 0.21 + vWorld.z * 0.17);
     float foam = 1.0 - smoothstep(0.0, lap, depth);
@@ -92,18 +92,18 @@ const WATER_FRAGMENT = /* glsl */ `
     /* The moon's path on the water, broken up by the swell. */
     vec3 view = normalize(vWorld - cameraPosition);
     vec3 r = reflect(view, vec3(0.0, 1.0, 0.0));
-    float glint = pow(max(dot(r, uMoon), 0.0), 60.0);
+    float glint = pow(max(dot(r, uMoon), 0.0), 60.0) * uLight;
     float sparkle = 0.5 + 0.5 * sin(vWorld.x * 2.7 + sin(vWorld.z * 1.9 + uTime * 1.3) * 2.0 + uTime * 2.2);
     glint *= 0.3 + 0.7 * sparkle * sparkle;
 
-    float c = 0.075 + ripples * 0.32 + swell * 0.16 + foam2 * 0.4 + glint * 0.9;
+    float c = dayLift(0.075) + ripples * 0.32 + swell * 0.16 + foam2 * 0.4 + glint * 0.9;
     c = max(c, foam * 0.95);
     float alpha = mix(0.55, 0.95, smoothstep(0.0, 5.0, depth));
     alpha = max(alpha, foam);
 
     if (!gl_FrontFacing) { c = 0.12 + ripples * 0.2; alpha = 0.85; }
 
-    gl_FragColor = vec4(vec3(c * (1.0 - fogFactor(vWorld))), alpha);
+    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), alpha);
   }
 `;
 

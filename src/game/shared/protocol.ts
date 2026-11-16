@@ -1,13 +1,19 @@
-import type { Solid } from "./terrain";
-import { WEAPON_KINDS, type WeaponKind } from "./weapons";
+import type { Bounty } from "./bounties";
+import type { Strike } from "./fishing";
+import {
+  type AnimalKind,
+  type FishId,
+  HOTBAR,
+  type Inventory,
+  isItemId,
+  isKitId,
+  type ItemId,
+  type KitId,
+} from "./items";
+import type { Prefab } from "./prefabs";
+import type { WeaponKind } from "./weapons";
 
-export type Phase = "idle" | "countdown" | "playing" | "results";
-
-export type Pillar = Solid & { id: number; at: number };
-
-export type RosterEntry = { id: number; name: string; bot: boolean };
-
-export type Placement = { id: number; name: string; bot: boolean; place: number; by?: string };
+export type RosterEntry = { id: number; name: string };
 
 /* A weapon lying on the ground, waiting for someone to pick it up. */
 export type GroundWeapon = {
@@ -18,8 +24,6 @@ export type GroundWeapon = {
   z: number;
   uses: number;
 };
-
-export type Held = { kind: WeaponKind; uses: number };
 
 /* Compact per-player state: [id, x, y, z, yaw, pitch, flags, breath, weapon, stagger]. */
 export type PlayerSnap = [
@@ -35,52 +39,85 @@ export type PlayerSnap = [
   number,
 ];
 
+/* Compact per-animal state: [id, kind, x, y, z, yaw, state, health 0..100]. */
+export type AnimalSnap = [number, number, number, number, number, number, number, number];
+
+/* Compact per-boat state: [id, x, z, heading, speed]. */
+export type BoatSnap = [number, number, number, number, number];
+
+export const ANIMAL_STATE = {
+  graze: 0,
+  walk: 1,
+  run: 2,
+  charge: 3,
+  dead: 4,
+  alert: 5,
+} as const;
+
 export const FLAG = {
   alive: 1,
   sprint: 2,
   grounded: 4,
   wet: 8,
   shove: 16, // mid-swing
-  player: 32, // taking part in this round (not a spectator)
   block: 64, // shield raised
   charge: 128, // winding up a hammer or flail
 } as const;
 
-export type RoundInfo = {
-  phase: Phase;
+export type Spawn = { x: number; y: number; z: number; yaw: number };
+
+export type LineState = "cast" | "bite" | "none";
+
+export type HurtCause = "drowned" | "fall" | "boar" | "hit";
+
+export type WorldInfo = {
   seed: number;
-  /* Round clock (seconds since play began; negative during the countdown). */
+  /* World clock: seconds the island has been running. */
   time: number;
-  phaseEndsIn: number;
-  hurryFrom: number | null;
   roster: RosterEntry[];
-  cairnsTaken: number[];
-  pillars: Pillar[];
   weapons: GroundWeapon[];
-  results: Placement[];
-  you: { player: boolean; spawn: { x: number; y: number; z: number; yaw: number } | null };
+  board: Bounty[];
+  prefabs: Prefab[];
+  /* Where you stand right now; null when only watching. */
+  you: Spawn | null;
 };
 
 export type ServerMsg =
   | { t: "welcome"; id: number; name: string; online: boolean }
-  | ({ t: "round" } & RoundInfo)
+  | ({ t: "world" } & WorldInfo)
+  | { t: "roster"; roster: RosterEntry[] }
   | {
       t: "snap";
       time: number;
-      tide: number;
       p: PlayerSnap[];
+      a: AnimalSnap[];
+      b: BoatSnap[];
       me: {
+        health: number;
         breath: number;
-        stones: number;
-        alive: boolean;
-        weapon: Held | null;
         stagger: number;
+        dead: boolean;
       } | null;
     }
+  | { t: "inv"; inv: Inventory }
+  | { t: "board"; offers: Bounty[] }
+  /* Something built, or changed (a chest's contents). */
+  | { t: "prefab"; prefab: Prefab }
+  /* You're in this boat now (or out of it, with null). */
+  | { t: "aboard"; boat: number | null }
+  | { t: "unprefab"; id: number }
+  | { t: "paid"; bounty: Bounty }
+  /* Someone's fishing line: where the float sits, and whether something's biting. */
+  | { t: "line"; by: number; x: number; z: number; state: LineState }
+  /* To the angler alone: strike while the needle is in the window. */
+  | ({ t: "bite" } & Strike)
+  | { t: "catch"; by: number; fish: FishId | null }
+  /* An animal struck; `dead` when that was the end of it. */
+  | { t: "ahit"; id: number; kind: AnimalKind; by: number; damage: number; dead: boolean }
+  | { t: "hurt"; amount: number; cause: HurtCause }
+  | { t: "died"; cause: HurtCause }
   | { t: "impulse"; vx: number; vy: number; vz: number }
-  | { t: "lift"; y: number }
-  | { t: "pillar"; pillar: Pillar }
-  | { t: "cairn"; id: number; by: number }
+  | ({ t: "respawn" } & Spawn)
   | { t: "swing"; by: number; kind: WeaponKind | null; heavy: boolean }
   | {
       t: "hit";
@@ -95,9 +132,8 @@ export type ServerMsg =
       heavy: boolean;
     }
   | { t: "wspawn"; weapon: GroundWeapon }
-  | { t: "wtake"; id: number; by: number }
+  | { t: "wtake"; id: number; by: number; kind: WeaponKind }
   | { t: "wbreak"; by: number; kind: WeaponKind }
-  | { t: "out"; id: number; by: number | null; place: number }
   | { t: "feed"; text: string }
   | { t: "full" };
 
@@ -114,16 +150,45 @@ export type ClientMsg =
       vy: number;
       vz: number;
       flags: number;
+      /* Rowing: the boat's heading and speed (its position is yours). */
+      boat?: { rot: number; speed: number };
     }
   | { t: "attack"; charge: number; climb: boolean }
   | { t: "stance"; block: boolean; charge: boolean }
-  | { t: "pick" }
-  | { t: "stone" };
+  | { t: "interact"; kind: InteractKind; id: number }
+  | { t: "slot"; i: number }
+  /* Move a tool into a hotbar slot (1-4), or back to the pack with -1. */
+  | { t: "equip"; tool: number; slot: number }
+  | { t: "drop"; tool: number }
+  | { t: "buy"; item: string }
+  | { t: "place"; kind: KitId; x: number; z: number; rot: number }
+  | { t: "pickup"; id: number }
+  /* Move `n` of an item into a chest (or out of it, with a negative n). */
+  | { t: "stash"; chest: number; item: ItemId; n: number }
+  | { t: "accept"; id: number }
+  | { t: "turnin" }
+  | { t: "abandon" }
+  | { t: "cast"; x: number; z: number }
+  /* Strike, `at` seconds after the bite as the angler saw it. */
+  | { t: "reel"; at: number };
+
+export type InteractKind = "weapon" | "prefab";
+const INTERACT_KINDS: readonly InteractKind[] = ["weapon", "prefab"];
 
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 
 const finite = (v: unknown, limit: number): v is number =>
   typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= limit;
+
+function boatOf(v: unknown) {
+  if (!v || typeof v !== "object") return undefined;
+  const b = v as Record<string, unknown>;
+  return finite(b.rot, 100) && finite(b.speed, 20) ? { rot: b.rot, speed: b.speed } : undefined;
+}
+
+const isInt = (v: unknown, min: number, max: number): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
+const isId = (v: unknown): v is number => isInt(v, 0, 2 ** 31);
 
 /* Servers never trust a frame: anything malformed is dropped. */
 export function parseClientMsg(raw: unknown): ClientMsg | null {
@@ -146,10 +211,40 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       };
     case "stance":
       return { t: "stance", block: m.block === true, charge: m.charge === true };
-    case "pick":
-      return { t: "pick" };
-    case "stone":
-      return { t: "stone" };
+    case "interact":
+      if (!INTERACT_KINDS.includes(m.kind as InteractKind) || !isId(m.id)) return null;
+      return { t: "interact", kind: m.kind as InteractKind, id: m.id };
+    case "slot":
+      if (!isInt(m.i, 0, HOTBAR - 1)) return null;
+      return { t: "slot", i: m.i };
+    case "equip":
+      if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
+      return { t: "equip", tool: m.tool, slot: m.slot };
+    case "buy":
+      return typeof m.item === "string" && m.item.length < 32 ? { t: "buy", item: m.item } : null;
+    case "place":
+      if (!isKitId(m.kind) || !finite(m.x, 1000) || !finite(m.z, 1000) || !finite(m.rot, 100))
+        return null;
+      return { t: "place", kind: m.kind, x: m.x, z: m.z, rot: m.rot };
+    case "pickup":
+      return isId(m.id) ? { t: "pickup", id: m.id } : null;
+    case "stash":
+      if (!isId(m.chest) || !isItemId(m.item) || !isInt(m.n, -9999, 9999) || m.n === 0) return null;
+      return { t: "stash", chest: m.chest, item: m.item, n: m.n };
+    case "accept":
+      return isId(m.id) ? { t: "accept", id: m.id } : null;
+    case "turnin":
+      return { t: "turnin" };
+    case "abandon":
+      return { t: "abandon" };
+    case "cast":
+      if (!finite(m.x, 1000) || !finite(m.z, 1000)) return null;
+      return { t: "cast", x: m.x, z: m.z };
+    case "reel":
+      return { t: "reel", at: finite(m.at, 60) ? m.at : -1 };
+    case "drop":
+      if (!isId(m.tool)) return null;
+      return { t: "drop", tool: m.tool };
     case "move": {
       const nums = ["x", "y", "z", "yaw", "pitch", "vx", "vy", "vz"] as const;
       for (const k of nums) if (!finite(m[k], 1000)) return null;
@@ -165,12 +260,10 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         vy: m.vy as number,
         vz: m.vz as number,
         flags: (m.flags as number) | 0,
+        boat: boatOf(m.boat),
       };
     }
     default:
       return null;
   }
 }
-
-export const isWeaponKind = (v: unknown): v is WeaponKind =>
-  typeof v === "string" && (WEAPON_KINDS as readonly string[]).includes(v);

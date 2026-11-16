@@ -1,40 +1,74 @@
-import { For, Index, Show } from "solid-js";
+import { For, Index, onCleanup, onMount, Show } from "solid-js";
 import type { HudState } from "../../game/client/game";
+import { needleAt, type Strike } from "../../game/shared/fishing";
 
-const ordinal = (n: number) => {
-  const s = ["th", "st", "nd", "rd"];
-  const v = n % 100;
-  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
+const DOWN_TEXT: Record<string, string> = {
+  drowned: "The sea took your breath",
+  fall: "You fell too far",
+  boar: "The boar got the better of you",
+  hit: "You were struck down",
 };
 
-const clock = (seconds: number) => {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-};
-
-function SurgeBanner(props: { hud: HudState }) {
-  const label = () => {
-    const s = props.hud.surge;
-    if (s.hurry) return "The sea hurries";
-    if (s.surging && !s.grace) return "The sea rises";
-    if (s.grace) return `First surge in ${Math.ceil(s.nextIn)}`;
-    return `Next surge in ${Math.ceil(s.nextIn)}`;
-  };
-  const urgent = () =>
-    props.hud.surge.warning || (props.hud.surge.surging && !props.hud.surge.grace);
+function Clock(props: { hud: HudState }) {
+  const c = () => props.hud.clock;
   return (
-    <div class="pointer-events-none absolute top-24 left-1/2 flex -translate-x-1/2 flex-col items-center gap-1.5 sm:top-5">
-      <div
-        class="border px-3 py-1 font-mono text-[11px] tracking-[0.25em] uppercase"
-        classList={{
-          "border-white bg-white text-black animate-pulse": urgent(),
-          "border-white/30 bg-black/50 text-white/80": !urgent(),
-        }}
-      >
-        {label()}
+    <div class="space-y-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+      <div class="flex items-baseline gap-2">
+        <span class="text-[15px] font-medium tracking-[0.12em] tabular-nums">{c().time}</span>
+        <span class="text-white/55">{c().part}</span>
       </div>
-      <div class="font-mono text-[10px] tracking-[0.2em] text-white/50 uppercase">
-        Sea level {props.hud.tide.toFixed(1)} m
+      <div class="text-white/40">
+        Day {c().day}
+        {props.hud.mode === "online" ? ` · ${props.hud.humans} on the island` : ""}
+      </div>
+    </div>
+  );
+}
+
+/* The bounty you've taken, and how far along it is. */
+function ActiveBounty(props: { hud: HudState }) {
+  return (
+    <div class="flex flex-col items-center gap-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+      <Show
+        when={props.hud.bounty}
+        fallback={<div class="text-white/40">No bounty · the board is at the lighthouse</div>}
+      >
+        {(b) => (
+          <>
+            <div class="flex items-baseline gap-3">
+              <span class="text-white/45">Bounty</span>
+              <span>{b().title}</span>
+              <span class="tabular-nums">
+                {b().have}/{b().need}
+              </span>
+            </div>
+            <div class="h-px w-56 bg-white/20">
+              <div class="h-px bg-white" style={{ width: `${(b().have / b().need) * 100}%` }} />
+            </div>
+            <Show when={b().have >= b().need}>
+              <div class="text-[10px] text-white/70">Done · hand it in at the board</div>
+            </Show>
+          </>
+        )}
+      </Show>
+    </div>
+  );
+}
+
+function Health(props: { hud: HudState }) {
+  const pct = () => Math.max(0, Math.min(100, props.hud.health));
+  return (
+    <div class="w-48">
+      <div class="flex items-baseline justify-between font-mono text-[10px] tracking-[0.25em] text-white/50 uppercase">
+        <span>Health</span>
+        <span class="text-[13px] tracking-[0.1em] text-white tabular-nums">{Math.ceil(pct())}</span>
+      </div>
+      <div class="mt-1.5 h-1.5 w-full border border-white/40 p-px">
+        <div
+          class="h-full bg-white transition-[width] duration-200"
+          classList={{ "animate-pulse": pct() < 25 }}
+          style={{ width: `${pct()}%` }}
+        />
       </div>
     </div>
   );
@@ -113,7 +147,8 @@ function Crosshair(props: { hud: HudState }) {
       <Show when={props.hud.target}>
         {(t) => (
           <div class="absolute top-full left-1/2 mt-8 -translate-x-1/2 font-mono text-[10px] tracking-[0.2em] whitespace-nowrap text-white/80 uppercase">
-            {t().name} · {t().stagger}%
+            {t().name}
+            {t().health !== null ? ` · ${t().health}%` : ""}
           </div>
         )}
       </Show>
@@ -156,126 +191,169 @@ function Markers(props: { hud: HudState }) {
   );
 }
 
-function Weapon(props: { hud: HudState; touch: boolean }) {
+/* The strike: a needle sweeps the bar; click while it's inside the mark. */
+function StrikeBar(props: { strike: Strike; at: number }) {
+  let needle!: HTMLDivElement;
+  onMount(() => {
+    let raf = 0;
+    const frame = () => {
+      const t = performance.now() / 1000 - props.at;
+      needle.style.left = `${needleAt(t, props.strike.speed) * 100}%`;
+      raf = requestAnimationFrame(frame);
+    };
+    frame();
+    onCleanup(() => cancelAnimationFrame(raf));
+  });
   return (
-    <Show
-      when={props.hud.weapon}
-      fallback={
-        <div class="font-mono text-[10px] tracking-[0.2em] text-white/45 uppercase">
-          Fists · find a weapon ◇
-        </div>
-      }
-    >
-      {(w) => (
-        <div class="flex flex-col items-end gap-1.5">
-          <div class="font-mono text-[12px] tracking-[0.25em] uppercase">{w().name}</div>
-          <div class="flex max-w-40 flex-wrap justify-end gap-[3px]">
-            <Index each={Array.from({ length: w().max })}>
-              {(_, i) => (
-                <span
-                  class="h-1.5 w-1"
-                  classList={{ "bg-white": i < w().uses, "bg-white/20": i >= w().uses }}
-                />
-              )}
-            </Index>
-          </div>
-          <Show when={!props.touch}>
-            <div class="max-w-56 text-right font-mono text-[10px] leading-relaxed tracking-[0.1em] text-white/50">
-              {w().hint}
-            </div>
-          </Show>
-        </div>
-      )}
-    </Show>
+    <div class="relative h-5 w-64 border border-white/50 bg-black/50">
+      <div
+        class="absolute inset-y-0 bg-white/30"
+        style={{
+          left: `${(props.strike.c - props.strike.w / 2) * 100}%`,
+          width: `${props.strike.w * 100}%`,
+        }}
+      />
+      <div ref={needle} class="absolute -inset-y-1 w-0.5 -translate-x-1/2 bg-white" />
+    </div>
   );
 }
 
-function Stones(props: { count: number; touch: boolean }) {
+function Fishing(props: { hud: HudState }) {
   return (
-    <div class="flex flex-col items-end gap-2">
+    <>
+      <Show when={props.hud.fishing}>
+        {(f) => (
+          <div class="absolute top-[58%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-2.5">
+            <Show when={f().strike}>{(strike) => <StrikeBar strike={strike()} at={f().at} />}</Show>
+            <div
+              class="font-mono text-[10px] tracking-[0.2em] whitespace-nowrap uppercase"
+              classList={{ "text-white/55": !f().strike, "text-white": !!f().strike }}
+            >
+              {f().text}
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={props.hud.banner}>
+        {(c) => (
+          <div class="absolute top-[30%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-1 text-center">
+            <div class="text-2xl font-semibold tracking-tight">{c().title}</div>
+            <Show when={c().sub}>
+              <div class="font-mono text-[10px] tracking-[0.3em] text-white/55 uppercase">
+                {c().sub}
+              </div>
+            </Show>
+          </div>
+        )}
+      </Show>
+    </>
+  );
+}
+
+/* Build mode: the kits you own, which one's chosen, and whether it fits here. */
+function BuildBar(props: { hud: HudState; touch: boolean }) {
+  const b = () => props.hud.build!;
+  return (
+    <div class="flex flex-col items-center gap-2">
+      <div
+        class="font-mono text-[11px] tracking-[0.18em] uppercase"
+        classList={{
+          "text-white": b().ok || !!b().target,
+          "text-white/60": !b().ok && !b().target,
+        }}
+      >
+        {b().target
+          ? `Right-click · take back the ${b().target!.toLowerCase()}`
+          : b().ok
+            ? "Click to place"
+            : (b().reason ?? "Look at the ground")}
+      </div>
       <div class="flex gap-1.5">
-        <Index each={[0, 1, 2, 3, 4]}>
-          {(i) => (
-            <svg viewBox="0 0 20 22" class="h-[22px] w-5" aria-hidden="true">
-              <polygon
-                points="10,1 19,6 19,16 10,21 1,16 1,6"
-                fill={i() < props.count ? "white" : "none"}
-                stroke="white"
-                stroke-opacity={i() < props.count ? 1 : 0.3}
-                stroke-width="1.2"
-              />
-            </svg>
+        <Index each={b().kits}>
+          {(kit, i) => (
+            <div
+              class="flex h-14 w-20 flex-col justify-between border p-1.5 font-mono"
+              classList={{
+                "border-white bg-white/10": b().index === i,
+                "border-white/25 bg-black/40": b().index !== i,
+              }}
+            >
+              <span class="flex justify-between text-[9px] text-white/45">
+                <span>{i + 1}</span>
+                <span>×{kit().count}</span>
+              </span>
+              <span class="truncate text-[9px] tracking-[0.08em] uppercase">{kit().name}</span>
+            </div>
           )}
         </Index>
       </div>
-      <div class="font-mono text-[10px] tracking-[0.2em] text-white/50 uppercase">
-        {props.touch ? "Stone" : "E"} · raise basalt
-      </div>
+      <Show when={!props.touch}>
+        <div class="font-mono text-[10px] tracking-[0.12em] text-white/45">
+          1–{b().kits.length} / wheel choose · R turn · click place · right-click take back · B done
+        </div>
+      </Show>
     </div>
   );
 }
 
-function Results(props: { hud: HudState }) {
+function Hotbar(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   return (
-    <div class="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60">
-      <div class="w-[min(92%,360px)] border border-white/25 bg-black/85 p-6">
-        <div class="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
-          Round over · {clock(props.hud.time)}
-        </div>
-        <Show when={props.hud.place !== null}>
-          <div class="mt-3 text-3xl font-semibold tracking-tight text-white">
-            {props.hud.place === 1
-              ? "Last one standing."
-              : `You placed ${ordinal(props.hud.place!)}.`}
-          </div>
-        </Show>
-        <ol class="mt-5 space-y-1.5 font-mono text-[12px]">
-          <For each={props.hud.results}>
-            {(r) => (
-              <li
-                class="flex justify-between gap-4"
-                classList={{
-                  "text-white": r.id === props.hud.me,
-                  "text-white/60": r.id !== props.hud.me,
-                }}
+    <div class="flex flex-col items-center gap-2">
+      <Show when={props.hud.hint && !props.touch}>
+        <div class="font-mono text-[10px] tracking-[0.12em] text-white/50">{props.hud.hint}</div>
+      </Show>
+      <div class="pointer-events-auto flex gap-1.5">
+        <Index each={props.hud.inv.hotbar}>
+          {(tool, i) => (
+            <button
+              type="button"
+              class="relative flex h-14 w-16 flex-col justify-between border p-1.5 text-left font-mono"
+              classList={{
+                "border-white bg-white/10": props.hud.inv.slot === i,
+                "border-white/25 bg-black/40": props.hud.inv.slot !== i,
+              }}
+              onClick={() => props.onSelect(i)}
+            >
+              <span class="text-[9px] text-white/45">{i + 1}</span>
+              <span
+                class="truncate text-[9px] leading-tight tracking-[0.08em] uppercase"
+                classList={{ "text-white/40": !tool() && i !== 0 }}
               >
-                <span>
-                  {String(r.place).padStart(2, "0")}&nbsp;&nbsp;{r.name}
-                  {r.id === props.hud.me ? " (you)" : ""}
+                {i === 0 ? "Fists" : (tool()?.name ?? "—")}
+              </span>
+              <Show when={tool()?.wear != null}>
+                <span class="absolute right-1.5 bottom-1 left-1.5 h-px bg-white/20">
+                  <span
+                    class="block h-px bg-white"
+                    style={{ width: `${(tool()?.wear ?? 0) * 100}%` }}
+                  />
                 </span>
-                <span class="text-white/35">{r.by ? `by ${r.by}` : ""}</span>
-              </li>
-            )}
-          </For>
-        </ol>
-        <div class="mt-5 font-mono text-[11px] tracking-[0.2em] text-white/50 uppercase">
-          Next tide in {Math.ceil(props.hud.resultsIn)}
-        </div>
+              </Show>
+            </button>
+          )}
+        </Index>
       </div>
     </div>
   );
 }
 
-export function Hud(props: { hud: HudState; touch: boolean }) {
+export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   const h = () => props.hud;
   return (
     <div class="pointer-events-none absolute inset-0 select-none text-white">
-      <Show when={h().phase === "playing" || h().phase === "countdown"}>
-        <div class="absolute top-5 left-5 space-y-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-          <div>
-            {h().alive}/{h().total} above water
+      <div class="absolute top-5 left-5 space-y-3">
+        <Clock hud={h()} />
+        <Show when={h().player && h().economy}>
+          <div class="font-mono text-[13px] tracking-[0.12em] tabular-nums">
+            <span class="mr-1.5 text-white/45">◎</span>
+            {h().inv.coins}
           </div>
-          <div class="text-white/45">
-            {h().mode === "online"
-              ? `Online · ${h().humans} human${h().humans === 1 ? "" : "s"}`
-              : "Solo"}{" "}
-            · {clock(h().time)}
-          </div>
+        </Show>
+      </div>
+      <Show when={h().player && h().economy}>
+        <div class="absolute top-5 left-1/2 -translate-x-1/2" classList={{ "top-24": props.touch }}>
+          <ActiveBounty hud={h()} />
         </div>
-      </Show>
-
-      <Show when={h().phase === "playing"}>
-        <SurgeBanner hud={h()} />
       </Show>
 
       <div class="absolute top-40 right-5 flex flex-col items-end gap-1 font-mono text-[11px] sm:top-16">
@@ -284,90 +362,51 @@ export function Hud(props: { hud: HudState; touch: boolean }) {
         </For>
       </div>
 
-      <Show when={h().phase === "playing" && h().player && !h().dead}>
+      <Show when={h().player}>
         <Markers hud={h()} />
         <Crosshair hud={h()} />
-        {/* Stagger: the more you've been hit, the further the next hit throws you. */}
-        <div
-          class="absolute bottom-10 left-1/2 flex -translate-x-1/2 flex-col items-center"
-          classList={{ "bottom-[13rem]": props.touch }}
-        >
-          <div
-            class="font-mono font-medium tabular-nums"
-            classList={{
-              "text-3xl": h().stagger >= 100,
-              "text-2xl": h().stagger < 100,
-              "text-white/40": h().stagger === 0,
-              "animate-pulse": h().stagger >= 120,
-            }}
-          >
-            {h().stagger}%
-          </div>
-          <div class="font-mono text-[9px] tracking-[0.3em] text-white/45 uppercase">Stagger</div>
-        </div>
+        <Fishing hud={h()} />
         <Show when={h().prompt}>
-          <div class="absolute bottom-28 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-            {props.touch ? h().prompt?.replace("R · ", "Swap · ") : h().prompt}
+          <div class="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+            {props.touch ? h().prompt?.replace("E · ", "") : h().prompt}
           </div>
         </Show>
-        <div class={props.touch ? "absolute top-40 left-5" : "absolute bottom-6 left-6"}>
-          <div class="font-mono text-[10px] tracking-[0.25em] text-white/50 uppercase">
-            Above the sea
-          </div>
-          <div
-            class="mt-1 font-mono font-medium tabular-nums"
-            classList={{ "text-4xl": !props.touch, "text-2xl": props.touch }}
-          >
-            {h().above >= 0 ? "+" : "−"}
-            {Math.abs(h().above).toFixed(1)}
-            <span class="ml-1 text-base text-white/50">m</span>
-          </div>
+        <div class={props.touch ? "absolute top-24 left-5" : "absolute bottom-6 left-6"}>
+          <Health hud={h()} />
         </div>
+        <Show when={h().hurt > 0}>
+          <div
+            class="absolute inset-0 shadow-[inset_0_0_120px_40px_rgba(255,255,255,0.35)]"
+            style={{ opacity: h().hurt }}
+          />
+        </Show>
         <Show when={h().stamina < 0.99}>
-          <div class="absolute bottom-6 left-1/2 h-px w-40 -translate-x-1/2 bg-white/15">
+          <div class="absolute bottom-[6.5rem] left-1/2 h-px w-40 -translate-x-1/2 bg-white/15">
             <div class="h-px bg-white/80" style={{ width: `${h().stamina * 100}%` }} />
           </div>
         </Show>
         <div
-          class="absolute right-6 bottom-6 flex flex-col items-end gap-5"
-          classList={{ "bottom-auto top-56": props.touch }}
+          class="absolute bottom-6 left-1/2 -translate-x-1/2"
+          classList={{ "bottom-auto top-5": props.touch }}
         >
-          <Weapon hud={h()} touch={props.touch} />
-          <Stones count={h().stones} touch={props.touch} />
+          <Show
+            when={h().build}
+            fallback={<Hotbar hud={h()} touch={props.touch} onSelect={props.onSelect} />}
+          >
+            <BuildBar hud={h()} touch={props.touch} />
+          </Show>
         </div>
       </Show>
 
-      <Show when={h().phase === "countdown" && h().player}>
-        <div class="absolute inset-0 flex flex-col items-center justify-center gap-3">
-          <div class="font-mono text-[11px] tracking-[0.3em] text-white/60 uppercase">
-            The tide turns in
+      <Show when={h().down}>
+        {(cause) => (
+          <div class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
+            <div class="text-2xl font-semibold tracking-tight">You blacked out.</div>
+            <div class="font-mono text-[11px] tracking-[0.2em] text-white/55 uppercase">
+              {DOWN_TEXT[cause()] ?? ""}
+            </div>
           </div>
-          <div class="font-mono text-7xl font-medium tabular-nums">{Math.ceil(h().countdown)}</div>
-          <div class="max-w-xs text-center text-sm text-white/60">
-            Get high. Grab a weapon. Knock them into the sea.
-          </div>
-        </div>
-      </Show>
-
-      <Show when={h().phase === "playing" && h().dead}>
-        <div class="absolute inset-x-0 top-24 flex flex-col items-center gap-2 text-center">
-          <div class="text-2xl font-semibold tracking-tight">
-            Drowned{h().place ? `, ${ordinal(h().place!)}` : ""}.
-          </div>
-          <div class="font-mono text-[11px] tracking-[0.2em] text-white/50 uppercase">
-            {props.touch ? "Drag to look · stick to drift" : "Drift with WASD · Space up · C down"}
-          </div>
-        </div>
-      </Show>
-
-      <Show when={h().phase === "playing" && !h().player && h().mode === "online"}>
-        <div class="absolute inset-x-0 top-24 text-center font-mono text-[11px] tracking-[0.2em] text-white/60 uppercase">
-          Round in progress · you'll wash ashore next tide
-        </div>
-      </Show>
-
-      <Show when={h().phase === "results"}>
-        <Results hud={h()} />
+        )}
       </Show>
 
       <Show when={h().notice}>

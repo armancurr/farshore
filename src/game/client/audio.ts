@@ -2,8 +2,8 @@ import type { WeaponKind } from "../shared/weapons";
 import { Score } from "./music";
 
 /*
- * Every sound is synthesized: noise through filters for the sea, detuned saws
- * for the horn, enveloped sines for thumps, and a generated score on top.
+ * Every sound is synthesized: noise through filters for the sea and wind,
+ * enveloped sines for thumps, and a generated score on top.
  * Nothing to download.
  */
 export class TideAudio {
@@ -97,13 +97,9 @@ export class TideAudio {
     this.score?.setEnabled(on);
   }
 
-  /* 0..1: how close the end feels. */
+  /* 0..1: how tense things are. */
   intensity(v: number) {
     this.score?.setIntensity(v);
-  }
-
-  stinger(kind: "win" | "drowned" | "final") {
-    this.score?.stinger(kind);
   }
 
   setMuted(muted: boolean) {
@@ -195,46 +191,6 @@ export class TideAudio {
     osc.stop(t + attack + decay + 0.05);
   }
 
-  /* A foghorn: the warning before each surge. */
-  horn() {
-    const ctx = this.ctx;
-    if (!ctx) return;
-    const t = ctx.currentTime;
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(240, t);
-    filter.frequency.linearRampToValueAtTime(700, t + 0.6);
-    filter.frequency.linearRampToValueAtTime(260, t + 2.2);
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(0.22, t + 0.35);
-    gain.gain.setValueAtTime(0.22, t + 1.5);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
-    filter.connect(gain).connect(this.muffle);
-    for (const f of [73.4, 73.9, 110.2]) {
-      const osc = ctx.createOscillator();
-      osc.type = "sawtooth";
-      osc.frequency.value = f;
-      osc.connect(filter);
-      osc.start(t);
-      osc.stop(t + 2.5);
-    }
-  }
-
-  surge() {
-    this.score?.surge();
-    this.noiseBurst({
-      type: "lowpass",
-      freq: 160,
-      to: 1100,
-      peak: 0.5,
-      attack: 2.2,
-      decay: 2.4,
-      rate: 0.6,
-    });
-    this.tone(48, 38, 0.25, 1.4, 2.6);
-  }
-
   splash(strength = 1) {
     this.noiseBurst({
       type: "bandpass",
@@ -304,7 +260,8 @@ export class TideAudio {
     this.noiseBurst({ type: "lowpass", freq: 900, to: 200, peak: 0.3, attack: 0.005, decay: 0.3 });
   }
 
-  pillar() {
+  /* Something heavy set down: a placed prefab. */
+  thud() {
     this.noiseBurst({
       type: "lowpass",
       freq: 120,
@@ -317,9 +274,39 @@ export class TideAudio {
     this.tone(55, 82, 0.3, 0.02, 0.5, "triangle");
   }
 
-  cairn() {
+  /* A bright little bell: coins, a catch, a bounty. */
+  chime() {
     this.tone(660, 650, 0.12, 0.005, 1.1);
     this.tone(990, 985, 0.07, 0.005, 1.3);
+  }
+
+  /* Something takes the bait: two quick ticks on the line and a plop. */
+  bite() {
+    this.tone(880, 700, 0.07, 0.002, 0.06, "triangle");
+    setTimeout(() => this.tone(880, 700, 0.07, 0.002, 0.06, "triangle"), 110);
+    this.splash(0.35);
+  }
+
+  /* A boar squaring up: a low, rough grunt. */
+  snort(near = 1) {
+    const k = Math.max(0.15, near);
+    this.noiseBurst({
+      type: "bandpass",
+      freq: 260,
+      to: 140,
+      q: 2.5,
+      peak: 0.4 * k,
+      attack: 0.02,
+      decay: 0.28,
+      rate: 0.7,
+    });
+    this.tone(95, 70, 0.18 * k, 0.01, 0.25, "sawtooth");
+  }
+
+  /* A fish slipping the hook. */
+  slip() {
+    this.tone(330, 160, 0.1, 0.005, 0.35, "triangle");
+    this.splash(0.4);
   }
 
   heartbeat(rate: number) {
@@ -406,14 +393,11 @@ export class TideAudio {
     }
   }
 
-  win() {
+  /* A bounty paid out. */
+  reward() {
     this.score?.stinger("win");
     for (const [i, f] of [392, 523.3, 659.3, 784].entries()) {
       setTimeout(() => this.tone(f, f, 0.12, 0.01, 1.4), i * 140);
     }
-  }
-
-  tick() {
-    this.tone(1200, 1200, 0.05, 0.002, 0.05, "square");
   }
 }

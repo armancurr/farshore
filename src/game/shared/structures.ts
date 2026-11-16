@@ -376,11 +376,20 @@ function arcRoute(
 
 export type Plan = { structures: Structure[]; perches: Perch[]; footprints: Footprint[] };
 
-export function planStructures(site: Site, seed: number): Plan {
+/* Which buildings to raise: the lighthouse, and/or everything else. */
+export type PlanOptions = { lighthouse: boolean; landmarks: boolean };
+
+export function planStructures(
+  site: Site,
+  seed: number,
+  only: PlanOptions = { lighthouse: true, landmarks: true },
+): Plan {
   const rng = mulberry32(seed ^ 0x7f4a7c15);
   const structures: Structure[] = [];
   const perches: Perch[] = [];
-  const footprints: Footprint[] = [{ x: site.lighthouse.x, z: site.lighthouse.z, r: 14 }];
+  const footprints: Footprint[] = only.lighthouse
+    ? [{ x: site.lighthouse.x, z: site.lighthouse.z, r: 14 }]
+    : [];
   let id = 0;
 
   const free = (x: number, z: number, r: number) =>
@@ -432,7 +441,9 @@ export function planStructures(site: Site, seed: number): Plan {
 
   /* ---------- the lighthouse on the summit ---------- */
   const lh = site.lighthouse;
-  build(site, add("lighthouse", lh.x, lh.y, lh.z, rng() * Math.PI * 2), perches, rng);
+  const lhRot = rng() * Math.PI * 2;
+  if (only.lighthouse) build(site, add("lighthouse", lh.x, lh.y, lh.z, lhRot), perches, rng);
+  if (!only.landmarks) return { structures, perches, footprints };
 
   /* ---------- landmarks on the secondary summits ---------- */
   const summits = findSummits(site).filter(
