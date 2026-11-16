@@ -1,13 +1,6 @@
-import type { Solid } from "./terrain";
 import { WEAPON_KINDS, type WeaponKind } from "./weapons";
 
-export type Phase = "idle" | "countdown" | "playing" | "results";
-
-export type Pillar = Solid & { id: number; at: number };
-
-export type RosterEntry = { id: number; name: string; bot: boolean };
-
-export type Placement = { id: number; name: string; bot: boolean; place: number; by?: string };
+export type RosterEntry = { id: number; name: string };
 
 /* A weapon lying on the ground, waiting for someone to pick it up. */
 export type GroundWeapon = {
@@ -41,46 +34,38 @@ export const FLAG = {
   grounded: 4,
   wet: 8,
   shove: 16, // mid-swing
-  player: 32, // taking part in this round (not a spectator)
   block: 64, // shield raised
   charge: 128, // winding up a hammer or flail
 } as const;
 
-export type RoundInfo = {
-  phase: Phase;
+export type Spawn = { x: number; y: number; z: number; yaw: number };
+
+export type WorldInfo = {
   seed: number;
-  /* Round clock (seconds since play began; negative during the countdown). */
+  /* World clock: seconds the island has been running. */
   time: number;
-  phaseEndsIn: number;
-  hurryFrom: number | null;
   roster: RosterEntry[];
-  cairnsTaken: number[];
-  pillars: Pillar[];
   weapons: GroundWeapon[];
-  results: Placement[];
-  you: { player: boolean; spawn: { x: number; y: number; z: number; yaw: number } | null };
+  /* Where you stand right now; null when only watching. */
+  you: Spawn | null;
 };
 
 export type ServerMsg =
   | { t: "welcome"; id: number; name: string; online: boolean }
-  | ({ t: "round" } & RoundInfo)
+  | ({ t: "world" } & WorldInfo)
+  | { t: "roster"; roster: RosterEntry[] }
   | {
       t: "snap";
       time: number;
-      tide: number;
       p: PlayerSnap[];
       me: {
         breath: number;
-        stones: number;
-        alive: boolean;
         weapon: Held | null;
         stagger: number;
       } | null;
     }
   | { t: "impulse"; vx: number; vy: number; vz: number }
-  | { t: "lift"; y: number }
-  | { t: "pillar"; pillar: Pillar }
-  | { t: "cairn"; id: number; by: number }
+  | ({ t: "respawn" } & Spawn)
   | { t: "swing"; by: number; kind: WeaponKind | null; heavy: boolean }
   | {
       t: "hit";
@@ -97,7 +82,6 @@ export type ServerMsg =
   | { t: "wspawn"; weapon: GroundWeapon }
   | { t: "wtake"; id: number; by: number }
   | { t: "wbreak"; by: number; kind: WeaponKind }
-  | { t: "out"; id: number; by: number | null; place: number }
   | { t: "feed"; text: string }
   | { t: "full" };
 
@@ -117,8 +101,7 @@ export type ClientMsg =
     }
   | { t: "attack"; charge: number; climb: boolean }
   | { t: "stance"; block: boolean; charge: boolean }
-  | { t: "pick" }
-  | { t: "stone" };
+  | { t: "pick" };
 
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 
@@ -148,8 +131,6 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       return { t: "stance", block: m.block === true, charge: m.charge === true };
     case "pick":
       return { t: "pick" };
-    case "stone":
-      return { t: "stone" };
     case "move": {
       const nums = ["x", "y", "z", "yaw", "pitch", "vx", "vy", "vz"] as const;
       for (const k of nums) if (!finite(m[k], 1000)) return null;

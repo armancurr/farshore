@@ -5,7 +5,7 @@ import type { Input } from "../../game/client/input";
  * Phones get a stick on the left, look-by-dragging on the right, and three
  * buttons. All of it feeds the same Input the keyboard does.
  */
-export function TouchControls(props: { input: Input; shield: boolean }) {
+export function TouchControls(props: { input: Input }) {
   const [knob, setKnob] = createSignal<{ x: number; y: number; ox: number; oy: number } | null>(
     null,
   );
@@ -100,7 +100,7 @@ export function TouchControls(props: { input: Input; shield: boolean }) {
           onPointerCancel={() => props.input.setAlt(false)}
           onPointerLeave={() => props.input.setAlt(false)}
         >
-          {props.shield ? "Block" : "Stone"}
+          Block
         </button>
         <button
           type="button"

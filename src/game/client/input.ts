@@ -1,5 +1,5 @@
 /* One-shot actions; "Up" ones fire on release, so held attacks can charge. */
-export type Action = "jump" | "attack" | "attackUp" | "alt" | "altUp" | "stone" | "pick" | "music";
+export type Action = "jump" | "attack" | "attackUp" | "alt" | "altUp" | "pick" | "music";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -33,7 +33,6 @@ export class Input {
       this.keys.add(e.code);
       if (e.repeat) return;
       if (e.code === "KeyF") this.setAttack(true);
-      if (e.code === "KeyE" || e.code === "KeyQ") this.queued.add("stone");
       if (e.code === "KeyR") this.queued.add("pick");
       if (e.code === "KeyN") this.queued.add("music");
       if (e.code === "Space") this.queued.add("jump");
@@ -110,7 +109,7 @@ export class Input {
     this.queued.add(down ? "attack" : "attackUp");
   }
 
-  /* Secondary: block with a shield, otherwise raise a stone. */
+  /* Secondary: block with a shield. */
   setAlt(down: boolean) {
     if (down === this.holdAlt) return;
     this.holdAlt = down;

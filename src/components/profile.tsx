@@ -77,10 +77,10 @@ export function Profile(props: { onPress?: () => void }) {
           <span class="lg:hidden">Above</span>
         </h2>
         <p class="text-[14px] leading-6 text-white/60">
-          <span class="text-white">Rising Tide</span>, a small multiplayer game I built for this
-          page. Everyone here shares one island; bots fill the empty places. The sea climbs, you
-          climb faster. Written from scratch with three.js and SolidJS, with a Cloudflare Durable
-          Object keeping the tide.
+          <span class="text-white">Rising Tide</span>, a small survival game I built for this page.
+          Wake on a moonlit island, fish and hunt for bounties at the lighthouse, and build yourself
+          somewhere to sleep. Written from scratch with three.js and SolidJS; the island keeps
+          itself in your browser.
         </p>
       </section>
     </div>

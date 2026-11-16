@@ -7,14 +7,13 @@ export const shared = {
   uFog: { value: 0.0033 },
   uMoon: { value: MOON_DIR },
   uTime: { value: 0 },
-  uTide: { value: 0 },
 };
 
 export const GLSL_COMMON = /* glsl */ `
   uniform float uFog;
   uniform vec3 uMoon;
   uniform float uTime;
-  uniform float uTide;
+  const float SEA_LEVEL = 0.0;
 
   float fogFactor(vec3 world) {
     float d = length(cameraPosition - world);
@@ -59,8 +58,8 @@ const INK_FRAGMENT = /* glsl */ `
     float diff = max(dot(n, uMoon), 0.0);
     float rim = pow(1.0 - abs(dot(n, normalize(cameraPosition - vWorld))), 3.0);
     float c = uTone * (0.35 + 0.65 * diff) + rim * 0.05 + uLit;
-    /* Anything below the tide line reads as submerged. */
-    c *= mix(1.0, 0.45, step(vWorld.y, uTide));
+    /* Anything below the waterline reads as submerged. */
+    c *= mix(1.0, 0.45, step(vWorld.y, SEA_LEVEL));
     gl_FragColor = vec4(vec3(c * (1.0 - fogFactor(vWorld))), uOpacity);
   }
 `;
@@ -95,7 +94,7 @@ const LINE_FRAGMENT = /* glsl */ `
   uniform float uOpacity;
   varying vec3 vWorld;
   void main() {
-    float c = uTone * mix(1.0, 0.35, step(vWorld.y, uTide));
+    float c = uTone * mix(1.0, 0.35, step(vWorld.y, SEA_LEVEL));
     gl_FragColor = vec4(vec3(c * (1.0 - fogFactor(vWorld))), uOpacity);
   }
 `;

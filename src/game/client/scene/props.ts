@@ -1,9 +1,9 @@
 import * as THREE from "three";
+import { SEA_LEVEL } from "../../shared/constants";
 import { hash3, mulberry32, range } from "../../shared/math";
-import type { Pillar } from "../../shared/protocol";
 import type { Prop, Terrain } from "../../shared/terrain";
 import { Batch, compose } from "./batch";
-import { edges, flatten, inkMaterial, lineMaterial, shared } from "./materials";
+import { inkMaterial, lineMaterial } from "./materials";
 import { Structures } from "./structures";
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -123,29 +123,19 @@ function addRock(batch: Batch, p: Prop) {
   );
 }
 
-export type Cairn = { id: number; group: THREE.Group; x: number; y: number; z: number };
-
-function buildCairn(p: Prop, fill: THREE.Material, line: THREE.Material, glow: THREE.Material) {
-  const batch = new Batch();
+/* A cairn: a few flat stones stacked by whoever was here before. */
+function addCairn(batch: Batch, p: Prop) {
   let y = 0;
   const sizes = [0.62, 0.48, 0.36, 0.24].slice(0, 3 + (p.variant % 2));
   sizes.forEach((r, i) => {
     const h = r * 0.55;
     batch.add(
       rockGeometry(p.id * 31 + i, 0, 0.6),
-      compose(0, y + h * 0.6, 0, i * 1.3, r, h, r * 0.9),
+      compose(p.x, p.y + y + h * 0.6, p.z, p.rot + i * 1.3, r, h, r * 0.9),
       25,
     );
     y += h * 1.15;
   });
-  const group = batch.build(fill, line);
-  /* A faint shaft of light so you can find them from a distance. */
-  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 9, 6, 1, true), glow);
-  shaft.position.y = 4.5 + y;
-  group.add(shaft);
-  group.position.set(p.x, p.y, p.z);
-  group.rotation.y = p.rot;
-  return group;
 }
 
 function buildBuoy(fill: THREE.Material, line: THREE.Material) {
@@ -169,14 +159,7 @@ function buildBuoy(fill: THREE.Material, line: THREE.Material) {
 export class WorldProps {
   readonly group = new THREE.Group();
   private structures: Structures;
-  private cairns = new Map<number, Cairn>();
   private buoys: { group: THREE.Group; phase: number; lamp: THREE.Object3D }[] = [];
-  private pillars = new Map<number, { mesh: THREE.Group; born: number; height: number }>();
-  private pillarFill = inkMaterial(0.07);
-  private pillarLine = lineMaterial(0.9);
-  private pillarGeo: THREE.BufferGeometry | null = null;
-  private pillarEdges: THREE.BufferGeometry | null = null;
-  private glow: THREE.Material;
   private disposables: { dispose(): void }[] = [];
 
   constructor(terrain: Terrain) {
@@ -187,24 +170,12 @@ export class WorldProps {
       else if (p.kind === "column") addColumn(statics, p);
     }
     this.group.add(statics.build(inkMaterial(0.055), lineMaterial(0.78)));
+    const cairns = new Batch();
+    for (const p of terrain.props) if (p.kind === "cairn") addCairn(cairns, p);
+    this.group.add(cairns.build(inkMaterial(0.1), lineMaterial(0.9)));
 
     this.structures = new Structures(terrain.structures);
     this.group.add(this.structures.group);
-
-    this.glow = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.22,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    const cairnFill = inkMaterial(0.1);
-    const cairnLine = lineMaterial(1);
-    for (const p of terrain.cairns) {
-      const group = buildCairn(p, cairnFill, cairnLine, this.glow);
-      this.group.add(group);
-      this.cairns.set(p.id, { id: p.id, group, x: p.x, y: p.y, z: p.z });
-    }
 
     const buoyFill = inkMaterial(0.08);
     const buoyLine = lineMaterial(0.85);
@@ -216,72 +187,26 @@ export class WorldProps {
       this.group.add(group);
       this.buoys.push({ group, phase: p.variant * 1.7, lamp: group.getObjectByName("lamp")! });
     }
-    this.disposables.push(
-      cairnFill,
-      cairnLine,
-      buoyFill,
-      buoyLine,
-      this.glow,
-      this.pillarFill,
-      this.pillarLine,
-    );
+    this.disposables.push(buoyFill, buoyLine);
   }
 
-  setCairnTaken(id: number, taken: boolean) {
-    const c = this.cairns.get(id);
-    if (c) c.group.visible = !taken;
-  }
-
-  /* Basalt: a hexagonal column that grinds up out of the ground. */
-  addPillar(p: Pillar, animate: boolean) {
-    if (this.pillars.has(p.id)) return;
-    if (!this.pillarGeo) {
-      const geo = new THREE.CylinderGeometry(1, 1.06, 1, 6, 1);
-      geo.translate(0, 0.5, 0);
-      this.pillarGeo = flatten(geo);
-      this.pillarEdges = edges(geo, 20);
-      geo.dispose();
-    }
-    const h = p.top - p.bottom;
-    const mesh = new THREE.Group();
-    const fill = new THREE.Mesh(this.pillarGeo, this.pillarFill);
-    const line = new THREE.LineSegments(this.pillarEdges!, this.pillarLine);
-    mesh.add(fill, line);
-    mesh.position.set(p.x, p.bottom, p.z);
-    mesh.rotation.y = (p.id * 0.7) % Math.PI;
-    mesh.scale.set(p.r, animate ? 0.01 : h, p.r);
-    this.group.add(mesh);
-    this.pillars.set(p.id, { mesh, born: animate ? performance.now() : 0, height: h });
-  }
-
-  update(time: number, tide: number) {
+  update(time: number) {
     this.structures.update(time);
     for (const b of this.buoys) {
-      b.group.position.y = tide - 0.25 + Math.sin(time * 1.3 + b.phase) * 0.18;
+      b.group.position.y = SEA_LEVEL - 0.25 + Math.sin(time * 1.3 + b.phase) * 0.18;
       b.group.rotation.z = Math.sin(time * 0.9 + b.phase) * 0.08;
       b.group.rotation.x = Math.cos(time * 0.7 + b.phase) * 0.08;
       b.lamp.visible = Math.sin(time * 2.2 + b.phase) > 0.6;
-    }
-    const now = performance.now();
-    for (const p of this.pillars.values()) {
-      if (!p.born) continue;
-      const k = Math.min(1, (now - p.born) / 380);
-      const ease = 1 - (1 - k) ** 3;
-      p.mesh.scale.y = Math.max(0.01, p.height * ease);
-      if (k >= 1) p.born = 0;
     }
   }
 
   dispose() {
     this.group.traverse((o) => {
       const m = o as THREE.Mesh;
-      if (m.geometry && m.geometry !== this.pillarGeo && m.geometry !== this.pillarEdges)
-        m.geometry.dispose();
+      m.geometry?.dispose();
       const mat = m.material as THREE.Material | undefined;
       if (mat && "dispose" in mat) mat.dispose();
     });
-    this.pillarGeo?.dispose();
-    this.pillarEdges?.dispose();
     for (const d of this.disposables) d.dispose();
   }
 }

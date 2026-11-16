@@ -296,7 +296,7 @@ const ease = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 /*
  * The weapon in your hands, drawn in its own little scene after the world so
  * it never clips into walls. It sits far above the sea (y = 1000) so the
- * shaders' below-the-tide darkening never touches it.
+ * shaders' below-the-waterline darkening never touches it.
  */
 export class ViewModel {
   readonly scene = new THREE.Scene();

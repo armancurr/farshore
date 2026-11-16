@@ -5,6 +5,8 @@ import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
 
+const ONLINE_ENABLED = false;
+
 const pill = "px-3.5 py-2 font-mono text-[11px] tracking-[0.2em] uppercase transition-colors";
 
 const CONTROLS = [
@@ -12,8 +14,7 @@ const CONTROLS = [
   ["Space", "Jump"],
   ["Shift", "Sprint"],
   ["Click / F", "Attack · hold to charge"],
-  ["Right-click", "Block (shield) / raise stone"],
-  ["E", "Raise stone"],
+  ["Right-click", "Block (shield)"],
   ["R", "Swap weapon"],
   ["N", "Music"],
   ["M", "Mute"],
@@ -21,9 +22,9 @@ const CONTROLS = [
 ] as const;
 
 /*
- * The left two thirds of the site. While nobody is playing, bots play on their
- * own under a slow orbiting camera; pressing play drops you onto the beach and
- * the panel takes over the screen.
+ * The left two thirds of the site. While nobody is playing, the island idles
+ * under a slow orbiting camera; pressing play wakes you up on it and the panel
+ * takes over the screen.
  */
 export function GamePanel(props: { onPress?: () => void }) {
   let host!: HTMLDivElement;
@@ -156,7 +157,8 @@ export function GamePanel(props: { onPress?: () => void }) {
           >
             Play
           </button>
-          <Show when={onlineAvailable()}>
+          {/* Multiplayer is parked for now; the online path still builds. */}
+          <Show when={ONLINE_ENABLED && onlineAvailable()}>
             <button
               type="button"
               class={`border border-white/40 bg-black/60 text-white hover:bg-white hover:text-black ${pill}`}
@@ -199,7 +201,7 @@ export function GamePanel(props: { onPress?: () => void }) {
       </Show>
 
       <Show when={playing() && touch() && game}>
-        <TouchControls input={game!.input} shield={hud()?.weapon?.kind === "shield"} />
+        <TouchControls input={game!.input} />
       </Show>
 
       <Show when={playing()}>
@@ -234,7 +236,7 @@ export function GamePanel(props: { onPress?: () => void }) {
         <div class="absolute inset-0 flex items-center justify-center bg-black/70">
           <div class="flex w-[min(90%,320px)] flex-col gap-3">
             <div class="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
-              {mode() === "solo" ? "Paused" : "The tide waits for no one"}
+              {mode() === "solo" ? "Paused" : "The island carries on without you"}
             </div>
             <button
               type="button"
@@ -253,8 +255,8 @@ export function GamePanel(props: { onPress?: () => void }) {
             <div class="mt-2 font-mono text-[10px] leading-5 tracking-[0.12em] text-white/40 uppercase">
               WASD move · Space jump · Shift sprint
               <br />
-              Click / F attack, hold to charge · right-click block / stone
-              <br />E stone · R swap weapon · N music · M mute
+              Click / F attack, hold to charge · right-click block
+              <br />R swap weapon · N music · M mute
             </div>
           </div>
         </div>

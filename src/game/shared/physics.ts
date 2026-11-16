@@ -13,6 +13,7 @@ import {
   STAMINA_MAX,
   STAMINA_REGEN,
   STEEP_NY,
+  SEA_LEVEL,
   STEP_HEIGHT,
   WALK_SPEED,
   WATER_SPEED,
@@ -49,8 +50,6 @@ export type Intent = {
 
 export type StepWorld = {
   terrain: Terrain;
-  pillars: readonly Solid[];
-  tide: number;
 };
 
 export type StepEvents = {
@@ -132,9 +131,8 @@ function climb(
   body.x = clamp(body.x + body.vx * dt, -BOUNDARY, BOUNDARY);
   body.z = clamp(body.z + body.vz * dt, -BOUNDARY, BOUNDARY);
   resolveSolids(body, world.terrain.solidsNear(body.x, body.z));
-  resolveSolids(body, world.pillars);
   body.y = Math.min(body.y + body.vy * dt, lad.top);
-  const { ground } = world.terrain.groundAt(body.x, body.z, body.y, world.pillars);
+  const { ground } = world.terrain.groundAt(body.x, body.z, body.y);
   if (body.y <= ground) {
     body.y = ground;
     body.vy = Math.max(0, body.vy);
@@ -226,8 +224,8 @@ function resolveSolids(body: Body, solids: readonly Solid[]) {
  */
 export function stepBody(body: Body, intent: Intent, dt: number, world: StepWorld): StepEvents {
   const events: StepEvents = { jumped: false, landed: 0, enteredWater: false, moved: 0 };
-  const wasWet = body.y < world.tide;
-  const depth = world.tide - body.y;
+  const wasWet = body.y < SEA_LEVEL;
+  const depth = SEA_LEVEL - body.y;
   const wade = clamp(depth / 1.1, 0, 1);
 
   /* Wish direction in world space. Yaw 0 looks down -Z. */
@@ -324,10 +322,9 @@ export function stepBody(body: Body, intent: Intent, dt: number, world: StepWorl
   body.x = clamp(body.x, -BOUNDARY, BOUNDARY);
   body.z = clamp(body.z, -BOUNDARY, BOUNDARY);
   resolveSolids(body, world.terrain.solidsNear(body.x, body.z));
-  resolveSolids(body, world.pillars);
   body.y += body.vy * dt;
 
-  const { ground } = world.terrain.groundAt(body.x, body.z, Math.max(prevY, body.y), world.pillars);
+  const { ground } = world.terrain.groundAt(body.x, body.z, Math.max(prevY, body.y));
   if (body.y <= ground) {
     if (!body.grounded && body.vy < -2) events.landed = -body.vy;
     body.y = ground;
@@ -348,6 +345,6 @@ export function stepBody(body: Body, intent: Intent, dt: number, world: StepWorl
   }
 
   events.moved = Math.hypot(body.x - px, body.z - pz);
-  events.enteredWater = !wasWet && body.y < world.tide;
+  events.enteredWater = !wasWet && body.y < SEA_LEVEL;
   return events;
 }

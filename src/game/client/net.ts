@@ -33,13 +33,14 @@ export class LocalConnection implements Connection {
   constructor(
     readonly kind: "attract" | "solo",
     private handlers: Handlers,
+    seed?: number,
   ) {
     /* The room runs on its own clock so that pausing solo really stops time. */
     this.room = new Room({
       online: false,
-      attract: kind === "attract",
       now: () => this.clock,
       maxHumans: 1,
+      seed,
     });
     const peer = {
       send: (msg: ServerMsg) => {

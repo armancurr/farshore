@@ -45,7 +45,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     float c = 0.022 + 0.11 * diff + (lines + hatch) * (0.55 + 0.45 * diff) + dots;
 
     /* Wet sand: a dark band just above the waterline. */
-    float above = h - uTide;
+    float above = h - SEA_LEVEL;
     c *= mix(0.5, 1.0, smoothstep(0.0, 1.2, above));
     c *= mix(1.0, 0.4, step(above, 0.0));
 
@@ -78,7 +78,7 @@ const WATER_FRAGMENT = /* glsl */ `
     float ground = texture2D(uHeights, clamp(uv, 0.0, 1.0)).r;
     float outside = step(1.0, max(abs(vWorld.x), abs(vWorld.z)) / uHalf);
     ground = mix(ground, -30.0, outside);
-    float depth = uTide - ground;
+    float depth = SEA_LEVEL - ground;
 
     float lap = 0.28 + 0.14 * sin(uTime * 1.4 + vWorld.x * 0.21 + vWorld.z * 0.17);
     float foam = 1.0 - smoothstep(0.0, lap, depth);

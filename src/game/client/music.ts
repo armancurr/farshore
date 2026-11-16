@@ -90,7 +90,6 @@ export class Score {
 
   private target = 0;
   private level = 0;
-  private floor = 0;
   private lastNow = 0;
   private lastMix = -1;
 
@@ -229,7 +228,6 @@ export class Score {
     this.longLived = [];
     this.padVoices = [];
     this.drone = null;
-    this.floor = 0;
   }
 
   setEnabled(on: boolean) {
@@ -242,49 +240,11 @@ export class Score {
     if (Number.isFinite(v)) this.target = clamp01(v);
   }
 
-  /* The sea is surging: the current chord swells up through an opening filter,
-   * with a low root underneath, then falls back over about four seconds. */
-  surge() {
-    if (!this.audible()) return;
-    const ctx = this.ctx;
-    const t = ctx.currentTime + 0.02;
-    const amt = 0.55 + 0.45 * this.level;
-    const sweep = ctx.createBiquadFilter();
-    sweep.type = "lowpass";
-    sweep.Q.value = 3;
-    sweep.frequency.setValueAtTime(220, t);
-    sweep.frequency.exponentialRampToValueAtTime(2800, t + 2.2);
-    sweep.frequency.exponentialRampToValueAtTime(300, t + 4.2);
-    const swell = ctx.createGain();
-    swell.gain.setValueAtTime(0.0001, t);
-    swell.gain.exponentialRampToValueAtTime(0.09 * amt, t + 2);
-    swell.gain.exponentialRampToValueAtTime(0.0001, t + 4.3);
-    sweep.connect(swell);
-    swell.connect(this.musicBus);
-    swell.connect(this.musicRev);
-    for (const [k, m] of this.chord.pad.entries()) {
-      this.osc("sawtooth", mtof(m), t, t + 4.3, sweep, k % 2 ? 6 : -6);
-    }
-    this.osc("sawtooth", mtof(this.chord.root + 12), t, t + 4.3, sweep);
-    this.voice({
-      type: "sine",
-      freq: mtof(this.chord.root),
-      t,
-      peak: 0.4 * amt,
-      attack: 1.9,
-      decay: 2.45,
-      dest: this.musicBus,
-      force: true,
-      release: [sweep, swell],
-    });
-  }
-
-  stinger(kind: "win" | "drowned" | "final") {
+  stinger(kind: "win" | "drowned") {
     if (!this.audible()) return;
     const t = this.ctx.currentTime + 0.02;
     if (kind === "win") this.win(t);
-    else if (kind === "drowned") this.drowned(t);
-    else this.final(t);
+    else this.drowned(t);
   }
 
   dispose() {
@@ -329,7 +289,7 @@ export class Score {
   private smooth(now: number) {
     const dt = Math.min(0.5, Math.max(0, now - this.lastNow));
     this.lastNow = now;
-    const target = Math.max(this.target, this.floor);
+    const target = this.target;
     const tc = target > this.level ? 2.5 : 6;
     this.level += (target - this.level) * (1 - Math.exp(-dt / tc));
     if (Math.abs(this.level - this.lastMix) > 0.004) this.applyMix(now, 0.4);
@@ -530,7 +490,6 @@ export class Score {
   }
 
   private win(t: number) {
-    this.floor = 0;
     this.duckFor(t, 0.3, 2, 1.5);
     /* D major with an added ninth: the minor home key, finally resolved. */
     for (const [k, m] of [50, 57, 62, 66, 69, 76].entries()) {
@@ -569,7 +528,6 @@ export class Score {
   }
 
   private drowned(t: number) {
-    this.floor = 0;
     this.duckFor(t, 0.2, 1.4, 1.2);
     /* Falling through A, F, D to a low A, heard as if from under the water. */
     const muffle = this.ctx.createBiquadFilter();
@@ -593,53 +551,6 @@ export class Score {
         release: k === 3 ? [muffle] : [],
       });
     }
-  }
-
-  /* Two left: a hit, then the score holds near full intensity. */
-  private final(t: number) {
-    this.floor = 0.9;
-    this.level = Math.max(this.level, 0.8);
-    this.applyMix(this.ctx.currentTime, 0.2);
-    this.voice({
-      type: "sine",
-      freq: 92,
-      to: 32,
-      glide: 1.2,
-      t,
-      peak: 0.6,
-      attack: 0.005,
-      decay: 1.8,
-      dest: this.stingerBus,
-      force: true,
-    });
-    const stab = this.ctx.createBiquadFilter();
-    stab.type = "lowpass";
-    stab.Q.value = 2;
-    stab.frequency.setValueAtTime(4200, t);
-    stab.frequency.exponentialRampToValueAtTime(260, t + 1.6);
-    stab.connect(this.stingerBus);
-    for (const [k, m] of [38, 50, 57, 62, 65].entries()) {
-      this.voice({
-        type: "sawtooth",
-        freq: mtof(m),
-        t,
-        peak: 0.09,
-        attack: 0.006,
-        decay: 2.2,
-        dest: stab,
-        detune: k % 2 ? 8 : -8,
-        force: true,
-        release: k === 4 ? [stab] : [],
-      });
-    }
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noise;
-    const g = this.ctx.createGain();
-    this.env(g.gain, t, 0.25, 0.003, 0.7);
-    src.connect(g).connect(stab);
-    this.track(src, g);
-    src.start(t);
-    src.stop(t + 0.8);
   }
 
   /* --- plumbing --- */
