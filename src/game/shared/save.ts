@@ -12,6 +12,7 @@ import {
   type Rarity,
   type Tool,
 } from "./items";
+import { isSkinId, type SkinId } from "./skins";
 
 /*
  * What an online host stores: the grand map, and everyone who's been on it.
@@ -119,6 +120,8 @@ export type SavedProfile = {
   name: string;
   island: number | null;
   saved: SavedPlayer | null;
+  /* What they wear; older saves have none and get the default. */
+  skin?: SkinId;
 };
 
 /*
@@ -159,7 +162,13 @@ export function parseWorldSave(raw: unknown): WorldSave | null {
     if (players.some((p) => p.token === v.token)) continue;
     const isl = id(v.island) && islands.some((o) => o.id === v.island) ? v.island : null;
     const saved = v.saved === null || v.saved === undefined ? null : player(v.saved);
-    players.push({ token: v.token, name: v.name, island: isl, saved: isl === null ? null : saved });
+    players.push({
+      token: v.token,
+      name: v.name,
+      island: isl,
+      saved: isl === null ? null : saved,
+      skin: isSkinId(v.skin) ? v.skin : undefined,
+    });
   }
   const tools = players.flatMap((p) => p.saved?.inv.tools.map((t) => t.id + 1) ?? []);
   return {

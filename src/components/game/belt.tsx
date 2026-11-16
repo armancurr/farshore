@@ -97,22 +97,28 @@ function Vitals(props: { hud: HudState }) {
 }
 
 /*
+ * What the keys and mouse do right now: building, flying, rowing, or the
+ * thing in hand. Phones only get the building line; they have their own buttons.
+ */
+export function controlHint(hud: HudState, touch: boolean) {
+  const build = hud.build;
+  if (build) {
+    if (build.target) return `Right-click to take back the ${build.target.toLowerCase()}`;
+    return build.ok ? "Click to place" : (build.reason ?? "Look at the ground");
+  }
+  return touch ? null : hud.hint;
+}
+
+/*
  * The bottom bar: one dark card with your health and the nine things you can
  * hold. The one in hand is the bright slot. In build mode the slots become
- * the kits you own.
+ * the kits you own. On a desktop the control hints sit top left (see Hud);
+ * on phones the belt is up top, so the building line stays with it.
  */
 export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   const { hud, touch } = props;
   const build = hud.build;
-  const status = build
-    ? build.target
-      ? `Right-click to take back the ${build.target.toLowerCase()}`
-      : build.ok
-        ? "Click to place"
-        : (build.reason ?? "Look at the ground")
-    : touch
-      ? null
-      : hud.hint;
+  const status = touch ? controlHint(hud, touch) : null;
 
   return (
     <div className="flex flex-col items-center gap-2">
