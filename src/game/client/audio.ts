@@ -104,8 +104,9 @@ export class TideAudio {
     if (!ctx) return;
     const t = ctx.currentTime;
     const near = Math.max(0, 1 - Math.max(0, aboveTide) / 16);
-    this.seaGain.gain.setTargetAtTime(0.05 + near * 0.32, t, 0.3);
-    this.seaFilter.frequency.setTargetAtTime(300 + near * 700, t, 0.3);
+    /* A bed under everything else: faint inland, never more than a soft wash at the shore. */
+    this.seaGain.gain.setTargetAtTime(0.025 + near * 0.12, t, 0.3);
+    this.seaFilter.frequency.setTargetAtTime(260 + near * 440, t, 0.3);
     this.windGain.gain.setTargetAtTime(Math.min(0.12, Math.max(0, height - 8) / 260), t, 0.5);
     this.muffle.frequency.setTargetAtTime(underwater ? 420 : 18000, t, 0.08);
   }
