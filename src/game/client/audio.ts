@@ -287,6 +287,22 @@ export class TideAudio {
     this.splash(0.35);
   }
 
+  /* A boar squaring up: a low, rough grunt. */
+  snort(near = 1) {
+    const k = Math.max(0.15, near);
+    this.noiseBurst({
+      type: "bandpass",
+      freq: 260,
+      to: 140,
+      q: 2.5,
+      peak: 0.4 * k,
+      attack: 0.02,
+      decay: 0.28,
+      rate: 0.7,
+    });
+    this.tone(95, 70, 0.18 * k, 0.01, 0.25, "sawtooth");
+  }
+
   /* A fish slipping the hook. */
   slip() {
     this.tone(330, 160, 0.1, 0.005, 0.35, "triangle");

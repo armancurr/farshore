@@ -118,6 +118,7 @@ function Crosshair(props: { hud: HudState }) {
         {(t) => (
           <div class="absolute top-full left-1/2 mt-8 -translate-x-1/2 font-mono text-[10px] tracking-[0.2em] whitespace-nowrap text-white/80 uppercase">
             {t().name}
+            {t().health !== null ? ` · ${t().health}%` : ""}
           </div>
         )}
       </Show>

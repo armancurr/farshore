@@ -44,6 +44,7 @@ import {
 } from "../shared/protocol";
 import {
   emptyInventory,
+  FINE_DAMAGE,
   type FishId,
   HOTBAR,
   heldTool,
@@ -67,6 +68,8 @@ import {
   weaponDef,
   weaponIndex,
 } from "../shared/weapons";
+
+import { Herd, type Prey } from "./animals";
 
 export interface Peer {
   send(msg: ServerMsg): void;
@@ -117,6 +120,8 @@ type PendingHit = {
   at: number;
   by: number;
   kind: WeaponKind | null;
+  /* Bought gear hits harder. */
+  fine: boolean;
   heavy: boolean;
   /* 0..1: how far a flail was spun up. */
   power: number;
@@ -153,6 +158,8 @@ export class Room {
   private toolId = 1;
   private nextWeaponAt = 0;
   private pending: PendingHit[] = [];
+  private herd: Herd;
+  private prey: Prey[] = [];
   private rng: Rng;
   private readonly now: () => number;
 
@@ -161,6 +168,24 @@ export class Room {
     this.rng = mulberry32((Math.random() * 2 ** 32) >>> 0);
     this.seed = opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
     this.terrain = new Terrain(this.seed);
+    const t = this.terrain;
+    this.herd = new Herd(
+      {
+        terrain: t,
+        rng: this.rng,
+        gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
+        blocked: (id) => {
+          const m = this.members.get(id);
+          if (!m) return;
+          this.wear(m);
+          m.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
+        },
+      },
+      [
+        { x: t.home.x, z: t.home.z, r: 45 },
+        { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
+      ],
+    );
     for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
   }
 
@@ -466,6 +491,7 @@ export class Room {
 
   private simulate(now: number, dt: number) {
     this.resolveHits(now);
+    this.herd.tick(now, dt, this.preyList());
 
     for (const m of this.members.values()) {
       if (m.spectator) continue;
@@ -502,6 +528,37 @@ export class Room {
       this.nextWeaponAt = this.time + WEAPON_RESPAWN;
       this.spawnWeapon(null, true);
     }
+  }
+
+  /* Everyone the animals can see, in the shape they need. */
+  private preyList() {
+    this.prey.length = 0;
+    for (const m of this.members.values()) {
+      if (m.spectator) continue;
+      this.prey.push(this.asPrey(m));
+    }
+    return this.prey;
+  }
+
+  private asPrey(m: Member): Prey {
+    return {
+      id: m.id,
+      x: m.body.x,
+      y: m.body.y,
+      z: m.body.z,
+      yaw: m.body.yaw,
+      running: (m.flags & FLAG.sprint) !== 0,
+      blocking: m.blocking && this.weaponOf(m) === "shield",
+      away: m.respawnAt !== null,
+    };
+  }
+
+  /* A boar's tusks: damage, and a shove off your feet. */
+  private gored(id: number, damage: number, dx: number, dz: number) {
+    const m = this.members.get(id);
+    if (!m) return;
+    this.push(m, dx, dz, 9, 4.5);
+    this.hurt(m, damage, "boar");
   }
 
   private spawnPoint(_m: Member): Spawn {
@@ -659,7 +716,16 @@ export class Room {
     this.broadcast({ t: "swing", by: m.id, kind, heavy });
     /* A pickaxe swung at a wall is a climb, not an attack. */
     if (climb && kind === "pickaxe") return;
-    this.pending.push({ at: now + def.windup, by: m.id, kind, heavy, power, yaw: m.body.yaw });
+    const fine = !!tool && !!TOOLS[tool.kind].fine;
+    this.pending.push({
+      at: now + def.windup,
+      by: m.id,
+      kind,
+      fine,
+      heavy,
+      power,
+      yaw: m.body.yaw,
+    });
     this.wear(m);
   }
 
@@ -678,6 +744,7 @@ export class Room {
       const def = weaponDef(p.kind);
       const fx = -Math.sin(p.yaw);
       const fz = -Math.cos(p.yaw);
+      this.hitAnimals(m, p, now);
       for (const o of this.members.values()) {
         if (o === m || o.spectator || o.respawnAt !== null) continue;
         const dx = o.body.x - m.body.x;
@@ -767,6 +834,36 @@ export class Room {
     }
   }
 
+  private hitAnimals(m: Member, p: PendingHit, now: number) {
+    const def = weaponDef(p.kind);
+    const fx = -Math.sin(p.yaw);
+    const fz = -Math.cos(p.yaw);
+    for (const a of this.herd.animals) {
+      if (a.respawnAt !== null || a.state === "dead") continue;
+      const dx = a.x - m.body.x;
+      const dz = a.z - m.body.z;
+      const d = Math.hypot(dx, dz);
+      if (d > def.reach + 0.7 || Math.abs(a.y + 0.6 - m.body.y) > 2.4) continue;
+      if (def.arc > -1 && d > 0.9 && (dx * fx + dz * fz) / d < def.arc - 0.15) continue;
+      let damage = def.damage * (p.fine ? FINE_DAMAGE : 1) * (p.heavy ? 1.6 : 1);
+      if (p.kind === "flail") damage = 10 + 18 * p.power;
+      /* Daggers from behind. */
+      const afx = -Math.sin(a.yaw);
+      const afz = -Math.cos(a.yaw);
+      if (p.kind === "daggers" && (afx * dx + afz * dz) / (d || 1) > 0.4) damage *= 2.5;
+      const dead = this.herd.strike(a, this.asPrey(m), damage, now);
+      if (dead) this.addItem(m, a.kind);
+      this.broadcast({
+        t: "ahit",
+        id: a.id,
+        kind: a.kind,
+        by: m.id,
+        damage: Math.round(damage),
+        dead,
+      });
+    }
+  }
+
   /* ---------- messages ---------- */
 
   private roster() {
@@ -819,11 +916,13 @@ export class Room {
       ]);
     }
     const time = round2(this.time);
+    const a = this.herd.snapshot();
     for (const m of this.members.values()) {
       m.peer.send({
         t: "snap",
         time,
         p,
+        a,
         me: m.spectator
           ? null
           : {

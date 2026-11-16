@@ -69,7 +69,7 @@ const INK_VERTEX = /* glsl */ `
   }
 `;
 
-const INK_FRAGMENT = /* glsl */ `
+export const INK_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
   uniform float uTone;
   uniform float uLit;
@@ -112,7 +112,7 @@ const LINE_VERTEX = /* glsl */ `
   }
 `;
 
-const LINE_FRAGMENT = /* glsl */ `
+export const LINE_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
   uniform float uTone;
   uniform float uOpacity;

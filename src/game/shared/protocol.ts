@@ -1,5 +1,5 @@
 import type { Strike } from "./fishing";
-import { type FishId, HOTBAR, type Inventory } from "./items";
+import { type AnimalKind, type FishId, HOTBAR, type Inventory } from "./items";
 import { WEAPON_KINDS, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string };
@@ -27,6 +27,18 @@ export type PlayerSnap = [
   number,
   number,
 ];
+
+/* Compact per-animal state: [id, kind, x, y, z, yaw, state, health 0..100]. */
+export type AnimalSnap = [number, number, number, number, number, number, number, number];
+
+export const ANIMAL_STATE = {
+  graze: 0,
+  walk: 1,
+  run: 2,
+  charge: 3,
+  dead: 4,
+  alert: 5,
+} as const;
 
 export const FLAG = {
   alive: 1,
@@ -62,6 +74,7 @@ export type ServerMsg =
       t: "snap";
       time: number;
       p: PlayerSnap[];
+      a: AnimalSnap[];
       me: {
         health: number;
         breath: number;
@@ -75,6 +88,8 @@ export type ServerMsg =
   /* To the angler alone: strike while the needle is in the window. */
   | ({ t: "bite" } & Strike)
   | { t: "catch"; by: number; fish: FishId | null }
+  /* An animal struck; `dead` when that was the end of it. */
+  | { t: "ahit"; id: number; kind: AnimalKind; by: number; damage: number; dead: boolean }
   | { t: "hurt"; amount: number; cause: HurtCause }
   | { t: "died"; cause: HurtCause }
   | { t: "impulse"; vx: number; vy: number; vz: number }

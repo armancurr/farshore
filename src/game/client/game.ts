@@ -12,6 +12,7 @@ import {
 import { clamp, lerp } from "../shared/math";
 import { type Body, createBody, FLOAT_DEPTH, stepBody } from "../shared/physics";
 import {
+  ANIMAL_STATE,
   FLAG,
   type HurtCause,
   type InteractKind,
@@ -40,6 +41,7 @@ import { Input } from "./input";
 import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
+import { HerdView } from "./scene/herd";
 import { createTerrainMesh, createWater } from "./scene/land";
 import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
@@ -109,7 +111,7 @@ export type HudState = {
   prompt: string | null;
   /* Weapons on the ground, as screen positions (0..1) or edge arrows. */
   markers: { id: number; x: number; y: number; d: number; off: boolean; angle: number }[];
-  target: { name: string } | null;
+  target: { name: string; health: number | null } | null;
   music: boolean;
 };
 
@@ -176,6 +178,8 @@ export class Game {
   private panel: PanelKind | null = null;
   private focus: Focus | null = null;
   private lines = new FishingLines();
+  private herd = new HerdView();
+  private boarStates = new Map<number, number>();
   private myLine: { state: LineState; depth: number } | null = null;
   private bite: { strike: Strike; at: number } | null = null;
   private caught: HudState["caught"] = null;
@@ -243,6 +247,7 @@ export class Game {
     this.input = new Input(canvas);
     this.scene.add(this.sky.group);
     this.scene.add(this.lines.group);
+    this.scene.add(this.herd.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -327,6 +332,8 @@ export class Game {
     this.panel = null;
     this.focus = null;
     this.lines.clear();
+    this.herd.clear();
+    this.boarStates.clear();
     this.myLine = null;
     this.bite = null;
     this.caught = null;
@@ -395,6 +402,8 @@ export class Game {
     this.input.dispose();
     this.audio.close();
     this.viewmodel.dispose();
+    this.lines.dispose();
+    this.herd.dispose();
     this.dropWorld();
     this.sky.dispose();
     this.post.dispose();
@@ -532,6 +541,9 @@ export class Game {
         this.audio.bite();
         navigator.vibrate?.(40);
         break;
+      case "ahit":
+        this.onAnimalHit(msg);
+        break;
       case "catch":
         if (msg.by !== this.myId) break;
         this.bite = null;
@@ -558,6 +570,22 @@ export class Game {
       case "feed":
         this.pushFeed(msg.text);
         break;
+    }
+  }
+
+  private onAnimalHit(msg: Extract<ServerMsg, { t: "ahit" }>) {
+    const a = this.herd.list().get(msg.id);
+    if (msg.by === this.myId) {
+      this.hitMarker = 1;
+      this.hitText = msg.dead ? "Down" : `-${msg.damage}`;
+      this.audio.hit(this.weapon, false);
+      if (msg.dead) {
+        this.audio.chime();
+        this.pushFeed(`You brought down a ${msg.kind} · carcass in your pack`);
+      }
+    } else if (a) {
+      const near = 1 - this.distanceTo(a.x, a.z) / 30;
+      if (near > 0) this.audio.hit(null, false, near);
     }
   }
 
@@ -687,6 +715,16 @@ export class Game {
       r.avatar.setGear(weaponFromIndex(weapon ?? 0), stagger ?? 0);
       r.buf.push({ t: msg.time, x, y, z, yaw, pitch, flags });
       if (r.buf.length > 12) r.buf.shift();
+    }
+
+    this.herd.set(msg.a);
+    /* A boar squaring up nearby snorts before it charges. */
+    for (const [id, kind, x, , z, , state] of msg.a) {
+      if (kind !== 1) continue;
+      const was = this.boarStates.get(id);
+      if (state === ANIMAL_STATE.alert && was !== state && this.distanceTo(x, z) < 26)
+        this.audio.snort(1 - this.distanceTo(x, z) / 26);
+      this.boarStates.set(id, state);
     }
 
     if (msg.me) {
@@ -825,6 +863,7 @@ export class Game {
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
     this.lines.update(t, this.tipOf);
+    this.herd.update(dt);
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
@@ -1248,7 +1287,19 @@ export class Game {
         const dot = to.normalize().dot(fwd);
         if (dot > best) {
           best = dot;
-          target = { name: r.name };
+          target = { name: r.name, health: null };
+        }
+      }
+      for (const a of this.herd.list().values()) {
+        if (a.state === ANIMAL_STATE.dead) continue;
+        const to = this.tmpV.set(a.x, a.y + (a.kind === "deer" ? 1.1 : 0.6), a.z);
+        to.sub(this.camera.position);
+        const d = to.length();
+        if (d > 12) continue;
+        const dot = to.normalize().dot(fwd);
+        if (dot > best - 0.02) {
+          best = dot;
+          target = { name: a.kind === "deer" ? "Deer" : "Boar", health: a.health };
         }
       }
     }
@@ -1305,8 +1356,13 @@ export class Game {
     if (this.mode === "attract") return 0.05;
     if (!this.body || this.down) return 0.15;
     const night = this.haveClock ? 1 - daylight(this.worldTime()) : 0;
+    let danger = 0;
+    for (const a of this.herd.list().values()) {
+      if (a.state !== ANIMAL_STATE.charge && a.state !== ANIMAL_STATE.alert) continue;
+      if (a.kind === "boar" && this.distanceTo(a.x, a.z) < 22) danger = 1;
+    }
     const breath = clamp(1 - this.breath / 100, 0, 1);
     const hurt = clamp(1 - this.health / HEALTH_MAX, 0, 1);
-    return clamp(0.12 + night * 0.12 + breath * 0.4 + hurt * 0.45, 0, 1);
+    return clamp(0.12 + night * 0.12 + breath * 0.4 + hurt * 0.45 + danger * 0.4, 0, 1);
   }
 }
