@@ -1,10 +1,10 @@
-import { BOARD_SIZE, type Bounty, type BountyTarget } from "./bounties";
-import { BOUNDARY, HEALTH_MAX } from "./constants";
+import type { Bounty, BountyTarget } from "./bounties";
+import { BOUNDARY, HEALTH_MAX, MAX_ISLANDS } from "./constants";
+import { type IslandInfo, isShapeId, PLACE_LIMIT, tilesOverlap } from "./islands";
 import {
   HOTBAR,
   type Inventory,
   isItemId,
-  isKitId,
   isToolKind,
   type ItemId,
   MAX_TOOLS,
@@ -12,15 +12,12 @@ import {
   type Rarity,
   type Tool,
 } from "./items";
-import { MAX_PREFABS, type Prefab } from "./prefabs";
 
 /*
- * A saved island: the world (seed, clock, what's built, the board) and the
- * one player's state. Versioned; anything that doesn't parse as the current
- * version is treated as no save at all, and the game starts fresh.
+ * What an online host stores: the grand map, and everyone who's been on it.
+ * Anything that doesn't parse as the current version is treated as nothing
+ * saved, and the map starts empty.
  */
-
-export const SAVE_VERSION = 1;
 
 export type SavedPlayer = {
   x: number;
@@ -31,17 +28,6 @@ export type SavedPlayer = {
   inv: Inventory;
   /* The rowboat you were sitting in. */
   boat: number | null;
-};
-
-export type SaveData = {
-  v: typeof SAVE_VERSION;
-  seed: number;
-  time: number;
-  prefabs: Prefab[];
-  board: Bounty[];
-  player: SavedPlayer | null;
-  /* Next ids to hand out, so new things never collide with saved ones. */
-  ids: { tool: number; prefab: number; bounty: number };
 };
 
 type Obj = Record<string, unknown>;
@@ -75,25 +61,6 @@ function bounty(v: unknown): Bounty | null {
   if (!isObj(v) || !id(v.id) || !int(v.count, 1, 20) || !int(v.reward, 0, 1e5)) return null;
   const t = target(v.target);
   return t ? { id: v.id, target: t, count: v.count, reward: v.reward } : null;
-}
-
-function prefab(v: unknown): Prefab | null {
-  if (!isObj(v) || !id(v.id) || !isKitId(v.kind)) return null;
-  const lim = BOUNDARY + 50;
-  if (
-    !num(v.x, -lim, lim) ||
-    !num(v.y, -100, 200) ||
-    !num(v.z, -lim, lim) ||
-    !num(v.rot, -100, 100)
-  )
-    return null;
-  const p: Prefab = { id: v.id, kind: v.kind, x: v.x, y: v.y, z: v.z, rot: v.rot };
-  if (v.kind === "chest") {
-    const store = v.store === undefined ? {} : items(v.store);
-    if (!store) return null;
-    p.store = store;
-  }
-  return p;
 }
 
 function inventory(v: unknown): Inventory | null {
@@ -142,48 +109,66 @@ function player(v: unknown): SavedPlayer | null {
   };
 }
 
-/* A save, or null if it's missing, from another version, or damaged in any way that matters. */
-export function parseSave(raw: unknown): SaveData | null {
-  if (!isObj(raw) || raw.v !== SAVE_VERSION) return null;
-  if (!int(raw.seed, 0, 2 ** 32 - 1) || !num(raw.time, 0, 1e9)) return null;
-  if (!Array.isArray(raw.prefabs) || !Array.isArray(raw.board) || !isObj(raw.ids)) return null;
-  const prefabs: Prefab[] = [];
-  for (const v of raw.prefabs.slice(0, MAX_PREFABS)) {
-    const p = prefab(v);
-    if (!p) return null;
-    if (!prefabs.some((o) => o.id === p.id)) prefabs.push(p);
+/* ---------- the online grand map ---------- */
+
+export const WORLD_SAVE_VERSION = 1;
+
+/* Someone who's been here: who they are, their island, and where they left off. */
+export type SavedProfile = {
+  token: string;
+  name: string;
+  island: number | null;
+  saved: SavedPlayer | null;
+};
+
+/*
+ * The shared grand map, as an online host stores it: the islands, who owns
+ * each, and every player's things. Built pieces aren't kept yet.
+ */
+export type WorldSave = {
+  v: typeof WORLD_SAVE_VERSION;
+  islands: IslandInfo[];
+  players: SavedProfile[];
+  ids: { island: number; tool: number };
+};
+
+function island(v: unknown): IslandInfo | null {
+  if (!isObj(v) || !id(v.id) || !isShapeId(v.shape) || !int(v.seed, 0, 2 ** 32 - 1)) return null;
+  if (!num(v.x, -PLACE_LIMIT - 1, PLACE_LIMIT + 1) || !num(v.z, -PLACE_LIMIT - 1, PLACE_LIMIT + 1))
+    return null;
+  if (typeof v.name !== "string" || v.name.length > 40) return null;
+  return { id: v.id, shape: v.shape, seed: v.seed, x: v.x, z: v.z, name: v.name };
+}
+
+/* A stored grand map, or null if it's missing or damaged. Bad entries are dropped, not fatal. */
+export function parseWorldSave(raw: unknown): WorldSave | null {
+  if (!isObj(raw) || raw.v !== WORLD_SAVE_VERSION || !Array.isArray(raw.islands)) return null;
+  if (!Array.isArray(raw.players) || !isObj(raw.ids)) return null;
+  const islands: IslandInfo[] = [];
+  for (const v of raw.islands) {
+    const o = island(v);
+    if (!o || islands.length >= MAX_ISLANDS) continue;
+    if (islands.some((p) => p.id === o.id || tilesOverlap(p.x, p.z, o.x, o.z))) continue;
+    islands.push(o);
   }
-  const board: Bounty[] = [];
-  for (const v of raw.board.slice(0, BOARD_SIZE)) {
-    const b = bounty(v);
-    if (!b) return null;
-    board.push(b);
+  const players: SavedProfile[] = [];
+  for (const v of raw.players) {
+    if (!isObj(v) || typeof v.token !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(v.token))
+      continue;
+    if (typeof v.name !== "string" || v.name.length > 40) continue;
+    if (players.some((p) => p.token === v.token)) continue;
+    const isl = id(v.island) && islands.some((o) => o.id === v.island) ? v.island : null;
+    const saved = v.saved === null || v.saved === undefined ? null : player(v.saved);
+    players.push({ token: v.token, name: v.name, island: isl, saved: isl === null ? null : saved });
   }
-  const pl = raw.player === null ? null : player(raw.player);
-  if (raw.player !== null && !pl) return null;
-  if (pl?.inv.bed !== null && pl && !prefabs.some((p) => p.id === pl.inv.bed && p.kind === "bed"))
-    pl.inv.bed = null;
-  /* Ids carry on past anything already in the save. */
-  const ids = raw.ids;
-  const next = (saved: unknown, used: number[]) =>
-    Math.max(id(saved) ? saved : 1, ...used.map((u) => u + 1), 1);
+  const tools = players.flatMap((p) => p.saved?.inv.tools.map((t) => t.id + 1) ?? []);
   return {
-    v: SAVE_VERSION,
-    seed: raw.seed,
-    time: raw.time,
-    prefabs,
-    board,
-    player: pl,
+    v: WORLD_SAVE_VERSION,
+    islands,
+    players,
     ids: {
-      tool: next(ids.tool, pl?.inv.tools.map((t) => t.id) ?? []),
-      prefab: next(
-        ids.prefab,
-        prefabs.map((p) => p.id),
-      ),
-      bounty: next(ids.bounty, [
-        ...board.map((b) => b.id),
-        ...(pl?.inv.bounty ? [pl.inv.bounty.id] : []),
-      ]),
+      island: Math.max(id(raw.ids.island) ? raw.ids.island : 1, ...islands.map((o) => o.id + 1), 1),
+      tool: Math.max(id(raw.ids.tool) ? raw.ids.tool : 1, ...tools, 1),
     },
   };
 }

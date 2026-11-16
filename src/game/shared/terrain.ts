@@ -1,6 +1,7 @@
-import { GRID, ISLAND_RADIUS, MAX_HEIGHT, SEA_FLOOR, STEP_HEIGHT, WORLD_SIZE } from "./constants";
+import { GRID, ISLAND_RADIUS, STEP_HEIGHT, TILE_SIZE } from "./constants";
 import { FEATURES } from "./features";
-import { angleTo, clamp, createNoise2D, fbm, mulberry32, range, smoothstep } from "./math";
+import { islandHeights, type ShapeId } from "./islands";
+import { angleTo, clamp, mulberry32, range, smoothstep } from "./math";
 import {
   type Block,
   type Ladder,
@@ -103,14 +104,35 @@ export function overSolid(s: Solid, x: number, z: number) {
 }
 
 /*
- * The island. Everything here is a pure function of the seed, so the server
- * (or the in-browser room) and every client build the same world.
+ * What the body, the boats and the builder need to know about the ground.
+ * One island (Terrain) answers it, and so does the whole grand map
+ * (Archipelago), which hands each question to the island underneath.
  */
-export class Terrain {
+export interface Ground {
+  readonly ladders: readonly Ladder[];
+  heightAt(x: number, z: number): number;
+  normalAt(x: number, z: number): [number, number, number];
+  groundAt(x: number, z: number, feetY: number): { ground: number; onSolid: boolean };
+  solidsNear(x: number, z: number): readonly Solid[];
+  addSolids(key: number, solids: readonly Solid[]): void;
+  removeSolids(key: number): void;
+}
+
+/*
+ * One island. Everything here is a pure function of its shape and seed, so
+ * the server (or the in-browser room) and every client build the same land.
+ * It's generated round the origin, then moved to its place on the grand map:
+ * after that every position it holds or takes is in world coordinates.
+ */
+export class Terrain implements Ground {
   readonly seed: number;
-  readonly heights = new Float32Array(GRID * GRID);
-  readonly cell = WORLD_SIZE / (GRID - 1);
-  readonly half = WORLD_SIZE / 2;
+  readonly shape: ShapeId;
+  readonly heights: Float32Array;
+  readonly cell = TILE_SIZE / (GRID - 1);
+  readonly half = TILE_SIZE / 2;
+  /* The centre of the island's tile on the grand map. */
+  ox = 0;
+  oz = 0;
   readonly props: Prop[] = [];
   readonly solids: Solid[] = [];
   readonly structures: Structure[] = [];
@@ -126,78 +148,63 @@ export class Terrain {
   peak = 0;
   private taken: { x: number; z: number; r: number }[] = [];
   private buckets: Solid[][] = [];
-  private bucketsPerSide = Math.ceil(WORLD_SIZE / BUCKET);
+  private bucketsPerSide = Math.ceil(TILE_SIZE / BUCKET);
   /* Solids added after generation (placed prefabs), by owner key. */
   private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
 
-  constructor(seed: number) {
+  constructor(seed: number, shape: ShapeId = "headland", origin = { x: 0, z: 0 }) {
     this.seed = seed >>> 0;
-    this.generateHeights();
+    this.shape = shape;
+    this.heights = islandHeights(shape, this.seed, GRID);
     this.raiseLighthouse();
     this.raiseStructures();
     this.scatterProps();
-    this.indexSolids();
     this.findHome();
+    this.moveTo(origin.x, origin.z);
+    this.indexSolids();
   }
 
-  private generateHeights() {
-    const rng = mulberry32(this.seed);
-    const rolling = createNoise2D(rng);
-    const warp = createNoise2D(rng);
-    const ridges = createNoise2D(rng);
+  /* Is (x, z) on this island's tile? */
+  contains(x: number, z: number, margin = 0) {
+    return (
+      Math.abs(x - this.ox) <= this.half + margin && Math.abs(z - this.oz) <= this.half + margin
+    );
+  }
 
-    /*
-     * One main massif for the lighthouse, a ring of secondary peaks for the
-     * other landmarks, and smaller knolls in between so the rising sea breaks
-     * the island into separate hills.
-     */
-    const hills: { x: number; z: number; r: number; h: number }[] = [];
-    const at = (angle: number, dist: number, r: number, h: number) =>
-      hills.push({ x: Math.cos(angle) * dist, z: Math.sin(angle) * dist, r, h });
-    at(rng() * Math.PI * 2, rng() * 50, range(rng, 58, 72), 1);
-    const peaks = 5 + Math.floor(rng() * 2);
-    const turn = rng() * Math.PI * 2;
-    for (let p = 0; p < peaks; p++) {
-      const angle = turn + ((p + range(rng, -0.25, 0.25)) / peaks) * Math.PI * 2;
-      at(angle, range(rng, 125, 195), range(rng, 34, 52), range(rng, 0.5, 0.78));
+  /* Carry everything generated round the origin out to (x, z). */
+  private moveTo(x: number, z: number) {
+    this.ox = x;
+    this.oz = z;
+    if (!x && !z) return;
+    /* Some things are shared between lists (a structure's ladders, say): move each once. */
+    const moved = new Set<object>();
+    const at = (p: { x: number; z: number }) => {
+      if (moved.has(p)) return;
+      moved.add(p);
+      p.x += x;
+      p.z += z;
+    };
+    for (const p of this.props) at(p);
+    for (const s of this.solids) {
+      at(s);
+      if (s.hole) at(s.hole);
     }
-    for (let k = 0; k < 9; k++)
-      at(rng() * Math.PI * 2, range(rng, 60, 240), range(rng, 18, 34), range(rng, 0.18, 0.42));
-
-    const raw = new Float32Array(GRID * GRID);
-    const masks = new Float32Array(GRID * GRID);
-    let maxRaw = 0;
-
-    for (let i = 0; i < GRID; i++) {
-      const z = -this.half + i * this.cell;
-      for (let j = 0; j < GRID; j++) {
-        const x = -this.half + j * this.cell;
-        const wx = x + warp(x * 0.005, z * 0.005) * 62;
-        const wz = z + warp(x * 0.005 + 31.7, z * 0.005 - 12.3) * 62;
-        const d = Math.hypot(wx, wz) / ISLAND_RADIUS;
-        const mask = 1 - smoothstep(0.55, 1.02, d);
-
-        let hill = 0;
-        for (const h of hills) {
-          const dx = x - h.x;
-          const dz = z - h.z;
-          hill += h.h * Math.exp(-(dx * dx + dz * dz) / (h.r * h.r));
-        }
-        const roll = fbm(rolling, x * 0.009, z * 0.009, 4);
-        const ridge = 1 - Math.abs(fbm(ridges, x * 0.014, z * 0.014, 3));
-
-        const v = mask * Math.max(0, 0.14 + hill * 0.8 + roll * 0.18 + ridge * ridge * 0.09);
-        const k = i * GRID + j;
-        raw[k] = v;
-        masks[k] = mask;
-        if (v > maxRaw) maxRaw = v;
-      }
+    for (const st of this.structures) {
+      at(st);
+      for (const b of st.blocks) at(b);
+      for (const l of st.ladders) at(l);
+      for (const l of st.lamps) at(l);
     }
-
-    for (let k = 0; k < raw.length; k++) {
-      const land = (raw[k] / maxRaw) * MAX_HEIGHT - 1.4;
-      this.heights[k] = land + (1 - masks[k]) * (SEA_FLOOR + 1.4);
+    /* Ladders are shared with the structures above; perches are their own. */
+    for (const p of this.perches) {
+      at(p);
+      for (const r of p.route) at(r);
     }
+    for (const t of this.taken) at(t);
+    at(this.lighthouse);
+    at(this.home);
+    at(this.board);
+    at(this.shop);
   }
 
   /* Find the summit and level a pad for the lighthouse. */
@@ -205,8 +212,8 @@ export class Terrain {
     let best = 0;
     for (let k = 1; k < this.heights.length; k++)
       if (this.heights[k] > this.heights[best]) best = k;
-    const x = -this.half + (best % GRID) * this.cell;
-    const z = -this.half + Math.floor(best / GRID) * this.cell;
+    const x = this.ox - this.half + (best % GRID) * this.cell;
+    const z = this.oz - this.half + Math.floor(best / GRID) * this.cell;
     const top = this.heights[best];
 
     if (FEATURES.lighthouse)
@@ -218,7 +225,9 @@ export class Terrain {
   }
 
   /* Blend the ground within `outer` of (x, z) toward height y, flat inside `inner`. */
-  levelPad(x: number, z: number, inner: number, outer: number, y: number) {
+  levelPad(wx: number, wz: number, inner: number, outer: number, y: number) {
+    const x = wx - this.ox;
+    const z = wz - this.oz;
     const j0 = Math.max(0, Math.floor((x - outer + this.half) / this.cell));
     const j1 = Math.min(GRID - 1, Math.ceil((x + outer + this.half) / this.cell));
     const i0 = Math.max(0, Math.floor((z - outer + this.half) / this.cell));
@@ -536,22 +545,26 @@ export class Terrain {
     this.buckets = Array.from({ length: n * n }, () => []);
     for (const s of this.solids) {
       const pad = s.r + 1;
-      const j0 = this.bucketOf(s.x - pad);
-      const j1 = this.bucketOf(s.x + pad);
-      const i0 = this.bucketOf(s.z - pad);
-      const i1 = this.bucketOf(s.z + pad);
+      const j0 = this.bucketX(s.x - pad);
+      const j1 = this.bucketX(s.x + pad);
+      const i0 = this.bucketZ(s.z - pad);
+      const i1 = this.bucketZ(s.z + pad);
       for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) this.buckets[i * n + j].push(s);
     }
   }
 
-  private bucketOf(v: number) {
-    return clamp(Math.floor((v + this.half) / BUCKET), 0, this.bucketsPerSide - 1);
+  private bucketX(x: number) {
+    return clamp(Math.floor((x - this.ox + this.half) / BUCKET), 0, this.bucketsPerSide - 1);
+  }
+
+  private bucketZ(z: number) {
+    return clamp(Math.floor((z - this.oz + this.half) / BUCKET), 0, this.bucketsPerSide - 1);
   }
 
   /* The solids a body standing at (x, z) could touch, placed prefabs included. */
   solidsNear(x: number, z: number): readonly Solid[] {
     if (!this.buckets.length) return this.solids;
-    return this.buckets[this.bucketOf(z) * this.bucketsPerSide + this.bucketOf(x)] ?? NO_SOLIDS;
+    return this.buckets[this.bucketZ(z) * this.bucketsPerSide + this.bucketX(x)] ?? NO_SOLIDS;
   }
 
   /* Add collision for something built after generation; `key` removes it again. */
@@ -561,10 +574,10 @@ export class Terrain {
     const cells: number[] = [];
     for (const s of solids) {
       const pad = s.r + 1;
-      const j0 = this.bucketOf(s.x - pad);
-      const j1 = this.bucketOf(s.x + pad);
-      const i0 = this.bucketOf(s.z - pad);
-      const i1 = this.bucketOf(s.z + pad);
+      const j0 = this.bucketX(s.x - pad);
+      const j1 = this.bucketX(s.x + pad);
+      const i0 = this.bucketZ(s.z - pad);
+      const i1 = this.bucketZ(s.z + pad);
       for (let i = i0; i <= i1; i++) {
         for (let j = j0; j <= j1; j++) {
           this.buckets[i * n + j].push(s);
@@ -633,8 +646,8 @@ export class Terrain {
   }
 
   heightAt(x: number, z: number) {
-    const gx = clamp((x + this.half) / this.cell, 0, GRID - 1.001);
-    const gz = clamp((z + this.half) / this.cell, 0, GRID - 1.001);
+    const gx = clamp((x - this.ox + this.half) / this.cell, 0, GRID - 1.001);
+    const gz = clamp((z - this.oz + this.half) / this.cell, 0, GRID - 1.001);
     const j = Math.floor(gx);
     const i = Math.floor(gz);
     const fx = gx - j;

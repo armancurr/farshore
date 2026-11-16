@@ -1,7 +1,7 @@
 import { ANIMAL_KINDS, type AnimalKind } from "../shared/items";
 import { angleTo, clamp, type Rng, wrapAngle } from "../shared/math";
 import { ANIMAL_STATE, type AnimalSnap, round2 } from "../shared/protocol";
-import { overSolid, type Terrain } from "../shared/terrain";
+import { type Ground, overSolid } from "../shared/terrain";
 
 /*
  * The island's animals, simulated by the room. Each is a small state machine
@@ -73,7 +73,7 @@ export type Prey = {
 };
 
 export interface HerdHost {
-  readonly terrain: Terrain;
+  readonly terrain: Ground;
   readonly rng: Rng;
   /* A boar has hit someone: hurt them and knock them back along (dx, dz). */
   gore(id: number, damage: number, dx: number, dz: number): void;

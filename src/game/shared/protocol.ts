@@ -1,5 +1,7 @@
 import type { Bounty } from "./bounties";
+import { GRAND_SIZE } from "./constants";
 import type { Strike } from "./fishing";
+import { type IslandInfo, isShapeId, type ShapeId } from "./islands";
 import {
   type AnimalKind,
   type FishId,
@@ -25,19 +27,8 @@ export type GroundWeapon = {
   uses: number;
 };
 
-/* Compact per-player state: [id, x, y, z, yaw, pitch, flags, breath, weapon, stagger]. */
-export type PlayerSnap = [
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-];
+/* Compact per-player state: [id, x, y, z, yaw, pitch, flags, weapon, stagger]. */
+export type PlayerSnap = [number, number, number, number, number, number, number, number, number];
 
 /* Compact per-animal state: [id, kind, x, y, z, yaw, state, health 0..100]. */
 export type AnimalSnap = [number, number, number, number, number, number, number, number];
@@ -60,18 +51,23 @@ export const FLAG = {
   grounded: 4,
   wet: 8,
   shove: 16, // mid-swing
+  fly: 32, // flying in creative
   block: 64, // shield raised
   charge: 128, // winding up a hammer or flail
+  creative: 256, // in creative: nothing hurts you
 } as const;
 
 export type Spawn = { x: number; y: number; z: number; yaw: number };
 
 export type LineState = "cast" | "bite" | "none";
 
-export type HurtCause = "drowned" | "fall" | "boar" | "hit";
+export type HurtCause = "fall" | "boar" | "hit";
 
 export type WorldInfo = {
-  seed: number;
+  /* Every island on the grand map. */
+  islands: IslandInfo[];
+  /* Yours, once you've settled; null while you're still choosing where (or only watching). */
+  mine: number | null;
   /* World clock: seconds the island has been running. */
   time: number;
   roster: RosterEntry[];
@@ -83,8 +79,13 @@ export type WorldInfo = {
 };
 
 export type ServerMsg =
-  | { t: "welcome"; id: number; name: string; online: boolean }
+  /* `token` is who you are here: send it back next time to come home to your island. */
+  | { t: "welcome"; id: number; name: string; online: boolean; token: string | null }
   | ({ t: "world" } & WorldInfo)
+  /* Someone (maybe you) settled a new island. */
+  | { t: "island"; island: IslandInfo }
+  /* Your island couldn't go where you asked. */
+  | { t: "unsettled"; reason: string }
   | { t: "roster"; roster: RosterEntry[] }
   | {
       t: "snap";
@@ -94,7 +95,6 @@ export type ServerMsg =
       b: BoatSnap[];
       me: {
         health: number;
-        breath: number;
         stagger: number;
         dead: boolean;
       } | null;
@@ -138,7 +138,14 @@ export type ServerMsg =
   | { t: "full" };
 
 export type ClientMsg =
-  | { t: "hello"; name?: string; spectate?: boolean }
+  /*
+   * `token` is who you were last time. `own` says it's this tab's own, rather
+   * than one borrowed from another tab: an own token takes over a connection
+   * still using it (a reload), a borrowed one already in use gets a new identity.
+   */
+  | { t: "hello"; name?: string; spectate?: boolean; token?: string; own?: boolean }
+  /* Put your island on the grand map, centred at (x, z). */
+  | { t: "settle"; shape: ShapeId; seed: number; x: number; z: number }
   | {
       t: "move";
       x: number;
@@ -177,6 +184,12 @@ const INTERACT_KINDS: readonly InteractKind[] = ["weapon", "prefab"];
 
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 
+/* No position on the grand map is further out than this. */
+const COORD = GRAND_SIZE / 2 + 100;
+
+const isToken = (v: unknown): v is string =>
+  typeof v === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(v);
+
 const finite = (v: unknown, limit: number): v is number =>
   typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= limit;
 
@@ -202,7 +215,16 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
   if (!m || typeof m !== "object") return null;
   switch (m.t) {
     case "hello":
-      return { t: "hello", spectate: m.spectate === true };
+      return {
+        t: "hello",
+        spectate: m.spectate === true,
+        token: isToken(m.token) ? m.token : undefined,
+        own: m.own === true,
+      };
+    case "settle":
+      if (!isShapeId(m.shape) || !isInt(m.seed, 0, 2 ** 32 - 1)) return null;
+      if (!finite(m.x, COORD) || !finite(m.z, COORD)) return null;
+      return { t: "settle", shape: m.shape, seed: m.seed, x: m.x, z: m.z };
     case "attack":
       return {
         t: "attack",
@@ -223,7 +245,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "buy":
       return typeof m.item === "string" && m.item.length < 32 ? { t: "buy", item: m.item } : null;
     case "place":
-      if (!isKitId(m.kind) || !finite(m.x, 1000) || !finite(m.z, 1000) || !finite(m.rot, 100))
+      if (!isKitId(m.kind) || !finite(m.x, COORD) || !finite(m.z, COORD) || !finite(m.rot, 100))
         return null;
       return { t: "place", kind: m.kind, x: m.x, z: m.z, rot: m.rot };
     case "pickup":
@@ -238,7 +260,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "abandon":
       return { t: "abandon" };
     case "cast":
-      if (!finite(m.x, 1000) || !finite(m.z, 1000)) return null;
+      if (!finite(m.x, COORD) || !finite(m.z, COORD)) return null;
       return { t: "cast", x: m.x, z: m.z };
     case "reel":
       return { t: "reel", at: finite(m.at, 60) ? m.at : -1 };
@@ -247,8 +269,8 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       return { t: "drop", tool: m.tool };
     case "move": {
       const nums = ["x", "y", "z", "yaw", "pitch", "vx", "vy", "vz"] as const;
-      for (const k of nums) if (!finite(m[k], 1000)) return null;
-      if (!finite(m.flags, 255)) return null;
+      for (const k of nums) if (!finite(m[k], COORD)) return null;
+      if (!finite(m.flags, 511)) return null;
       return {
         t: "move",
         x: m.x as number,

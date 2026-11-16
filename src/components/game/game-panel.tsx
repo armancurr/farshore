@@ -6,14 +6,14 @@ import { Kbd } from "@/components/ui/kbd";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Game, HudState, Mode } from "../../game/client/game";
+import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
 import { ControlsCard, MenuPointer, WaitlistCard } from "./menu-cards";
 import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
+import { SettleScreen } from "./settle-screen";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
-
-const ONLINE_ENABLED = false;
 
 /*
  * Where a menu card hangs: under its button, right edges lined up, then
@@ -21,6 +21,9 @@ const ONLINE_ENABLED = false;
  */
 /* The key badge after a title-bar link. */
 const menuKbd = "h-5 min-w-5 px-1.5 text-[10px]";
+/* Plain text in the title bar, set like its links. */
+const menuText =
+  "font-sans text-[15px] leading-none font-bold whitespace-nowrap text-white select-none";
 
 const menuCardPlacement = {
   side: "bottom",
@@ -44,11 +47,10 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [status, setStatus] = useState<Status>("loading");
   const [game, setGame] = useState<Game | null>(null);
   const [hud, setHud] = useState<HudState | null>(null);
-  const [online, setOnline] = useState<number | null>(null);
-  const [onlineAvailable, setOnlineAvailable] = useState(false);
   const [muted, setMuted] = useState(false);
   const [touch, setTouch] = useState(false);
-  const [confirmNew, setConfirmNew] = useState(false);
+  /* The grand map, over the game (N). */
+  const [mapOpen, setMapOpen] = useState(false);
   /*
    * Both menu cards open on hover. Keyboard focus opens Controls; the waitlist
    * opens on Enter or a tap, and stays up while focus is inside it (typing, or
@@ -68,12 +70,10 @@ export function GamePanel(props: { onPress?: () => void }) {
 
   useEffect(() => {
     let disposed = false;
-    let statusTimer: ReturnType<typeof setInterval> | undefined;
 
     const load = async () => {
       try {
         const mod = await import("../../game/client/game");
-        const net = await import("../../game/client/net");
         if (disposed || !host.current) return;
         const g = new mod.Game(host.current, setHud);
         gameRef.current = g;
@@ -81,15 +81,6 @@ export function GamePanel(props: { onPress?: () => void }) {
         setTouch(g.touch);
         if (import.meta.env.DEV) (window as unknown as { __tide: Game }).__tide = g;
         setStatus("ready");
-        setOnlineAvailable(net.serverBase() !== null);
-        const poll = async () => {
-          const s = await net.fetchStatus();
-          if (!disposed) setOnline(s ? s.humans : null);
-        };
-        void poll();
-        statusTimer = setInterval(() => {
-          if (latest.current.mode === "attract") void poll();
-        }, 15000);
       } catch (error) {
         console.error(error);
         if (!disposed) setStatus("failed");
@@ -106,11 +97,13 @@ export function GamePanel(props: { onPress?: () => void }) {
 
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "KeyM" && latest.current.playing) toggleMute();
+      if (e.code === "KeyN" && !e.repeat && latest.current.playing && !latest.current.hud?.settling)
+        setMapOpen((open) => !open);
       if (e.code === "Escape") setWaitlistOpen(false);
       /* C toggles the Controls card, anywhere but a text field. */
       const typing =
         e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
-      if (e.code === "KeyC" && !e.repeat && !typing && !latest.current.touch) {
+      if (e.code === "KeyC" && !e.shiftKey && !e.repeat && !typing && !latest.current.touch) {
         setWaitlistOpen(false);
         setControlsOpen((open) => !open);
       }
@@ -118,7 +111,7 @@ export function GamePanel(props: { onPress?: () => void }) {
       const onTitle = latest.current.ready && !latest.current.playing && !typing && !e.repeat;
       if (onTitle && e.code === "Enter" && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
-        latest.current.play("solo");
+        latest.current.play("online");
       }
       if (onTitle && e.code === "KeyJ") {
         e.preventDefault();
@@ -139,7 +132,6 @@ export function GamePanel(props: { onPress?: () => void }) {
       disposed = true;
       io.disconnect();
       window.removeEventListener("keydown", onKey);
-      clearInterval(statusTimer);
       gameRef.current?.dispose();
       gameRef.current = null;
     };
@@ -159,6 +151,7 @@ export function GamePanel(props: { onPress?: () => void }) {
   latest.current = { hud, playing, mode, muted, touch, ready: status === "ready", play };
 
   const leave = () => {
+    setMapOpen(false);
     game?.input.unlock();
     game?.start("attract");
   };
@@ -170,6 +163,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     !touch &&
     !hud.locked &&
     !hud.panel &&
+    !hud.settling &&
     performance.now() - startedAt.current > 500;
 
   return (
@@ -193,7 +187,25 @@ export function GamePanel(props: { onPress?: () => void }) {
         </div>
       )}
 
-      {playing && hud && <Hud hud={hud} touch={touch} onSelect={(i) => game?.selectSlot(i)} />}
+      {playing && hud && !hud.settling && (
+        <Hud hud={hud} touch={touch} onSelect={(i) => game?.selectSlot(i)} />
+      )}
+
+      {playing && hud?.connecting && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="font-sans text-xs font-bold text-white/60">Reaching the grand map…</div>
+        </div>
+      )}
+
+      {playing && hud?.settling && game && (
+        <SettleScreen game={game} settling={hud.settling} touch={touch} onLeave={leave} />
+      )}
+
+      {playing && mapOpen && hud?.player && game && (
+        <div className="pointer-events-none absolute inset-0 z-10">
+          <GrandMap game={game} inset={{ top: 64, bottom: 24, side: 16 }} />
+        </div>
+      )}
 
       {playing && hud && game && (
         <>
@@ -211,7 +223,7 @@ export function GamePanel(props: { onPress?: () => void }) {
               farshore
             </div>
             <div className="flex items-center gap-4 sm:gap-6">
-              <Button variant="menu" size="inline" onClick={() => play("solo")}>
+              <Button variant="menu" size="inline" onClick={() => play("online")}>
                 Go ashore
                 {touch ? (
                   <PlayIcon size={13} weight="fill" />
@@ -221,13 +233,6 @@ export function GamePanel(props: { onPress?: () => void }) {
                   </Kbd>
                 )}
               </Button>
-              {/* Multiplayer is parked for now; the online path still builds. */}
-              {ONLINE_ENABLED && onlineAvailable && (
-                <Button variant="menu" size="inline" onClick={() => play("online")}>
-                  Online
-                  {!!online && <span className="opacity-50">{online}</span>}
-                </Button>
-              )}
               {!touch && (
                 <ControlsMenu open={controlsOpen && !waitlistOpen} onOpenChange={setControlsOpen} />
               )}
@@ -282,23 +287,6 @@ export function GamePanel(props: { onPress?: () => void }) {
               Leave island
             </Button>
           </div>
-          {mode === "solo" && (
-            <Button
-              variant="link"
-              size="bare"
-              onClick={() => {
-                if (!confirmNew) {
-                  setConfirmNew(true);
-                  return;
-                }
-                setConfirmNew(false);
-                startedAt.current = performance.now();
-                game?.newIsland();
-              }}
-            >
-              {confirmNew ? "Sure? Everything here is lost" : "Start a new island"}
-            </Button>
-          )}
         </div>
       )}
       {/*
@@ -306,13 +294,34 @@ export function GamePanel(props: { onPress?: () => void }) {
         on M, which the card lists.
       */}
       {playing && (
-        <div className="absolute top-5 right-5 z-10 sm:top-6 sm:right-6">
-          {touch ? (
+        <div className="absolute top-5 right-5 z-30 flex items-center gap-4 sm:top-6 sm:right-6 sm:gap-6">
+          {/* Online: who you are, and how many are out here. */}
+          {mode === "online" && hud?.name && (
+            <span className={menuText}>
+              {hud.name}
+              <span className="ml-2 text-white/45">{hud.humans} online</span>
+              {hud.creative && <span className="ml-2 text-white/45">· Creative</span>}
+            </span>
+          )}
+          {hud?.settling ? (
+            <Button variant="menu" size="inline" onClick={leave}>
+              Back
+              {!touch && <Kbd className={menuKbd}>Esc</Kbd>}
+            </Button>
+          ) : touch ? (
             <Button variant="menu" size="inline" onClick={leave}>
               Leave
             </Button>
           ) : (
-            <ControlsMenu open={controlsOpen} onOpenChange={setControlsOpen} />
+            <>
+              {mode === "online" && hud?.player && (
+                <Button variant="menu" size="inline" onClick={() => setMapOpen((open) => !open)}>
+                  Map
+                  <Kbd className={menuKbd}>N</Kbd>
+                </Button>
+              )}
+              <ControlsMenu open={controlsOpen} onOpenChange={setControlsOpen} />
+            </>
           )}
         </div>
       )}

@@ -45,10 +45,16 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Turn a piece", ["R"]],
     ["Take a piece back", ["RMB"]],
   ],
+  [
+    ["Creative mode", ["Shift+C"]],
+    ["Take off, or drop", ["Space ×2"]],
+    ["Fly flat out", ["W ×2"]],
+  ],
 ];
 
 const CONTROL_FOOT: [string, string][] = [
   ["C", "This card"],
+  ["N", "Map"],
   ["M", "Mute"],
   ["Esc", "Pause"],
 ];

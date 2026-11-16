@@ -2,6 +2,10 @@ import {
   ACCEL_AIR,
   ACCEL_GROUND,
   BOUNDARY,
+  FLY_BOOST,
+  FLY_CEILING,
+  FLY_CLIMB,
+  FLY_SPEED,
   GRAVITY,
   JUMP_COST,
   JUMP_SPEED,
@@ -19,7 +23,7 @@ import {
   WATER_SPEED,
 } from "./constants";
 import { clamp, lerp } from "./math";
-import { inHole, type Solid, type Terrain } from "./terrain";
+import { type Ground, inHole, type Solid } from "./terrain";
 import type { Ladder } from "./structures";
 
 export type Body = {
@@ -49,7 +53,7 @@ export type Intent = {
 };
 
 export type StepWorld = {
-  terrain: Terrain;
+  terrain: Ground;
 };
 
 export type StepEvents = {
@@ -345,4 +349,66 @@ export function stepBody(body: Body, intent: Intent, dt: number, world: StepWorl
   events.moved = Math.hypot(body.x - px, body.z - pz);
   events.enteredWater = !wasWet && body.y < SEA_LEVEL;
   return events;
+}
+
+export type FlyIntent = {
+  forward: number;
+  right: number;
+  up: boolean;
+  down: boolean;
+  boost: boolean;
+};
+
+/*
+ * Creative flight: no gravity, quick to start and quick to stop, Space up and
+ * Shift down. You still bump into things and can't go through the ground, and
+ * you skim the sea rather than sink. Returns true when you've come down onto
+ * land with Shift held: time to stop flying.
+ */
+export function stepFly(body: Body, intent: FlyIntent, dt: number, world: StepWorld) {
+  const sin = Math.sin(body.yaw);
+  const cos = Math.cos(body.yaw);
+  let wx = -sin * intent.forward + cos * intent.right;
+  let wz = -cos * intent.forward - sin * intent.right;
+  const wlen = Math.hypot(wx, wz);
+  if (wlen > 1) {
+    wx /= wlen;
+    wz /= wlen;
+  }
+  const speed = intent.boost && intent.forward > 0 ? FLY_BOOST : FLY_SPEED;
+  const climb = (intent.up ? 1 : 0) - (intent.down ? 1 : 0);
+  /* Ease toward the wanted velocity: snappy, with a short glide when you let go. */
+  const k = Math.min(1, dt * (wlen > 0.1 ? 5 : 8));
+  body.vx += (wx * speed - body.vx) * k;
+  body.vz += (wz * speed - body.vz) * k;
+  body.vy += (climb * FLY_CLIMB * (intent.boost ? 1.6 : 1) - body.vy) * Math.min(1, dt * 8);
+  body.sprinting = false;
+  body.climbing = false;
+  body.stamina = STAMINA_MAX;
+
+  const px = body.x;
+  const pz = body.z;
+  body.x = clamp(body.x + body.vx * dt, -BOUNDARY, BOUNDARY);
+  body.z = clamp(body.z + body.vz * dt, -BOUNDARY, BOUNDARY);
+  resolveSolids(body, world.terrain.solidsNear(body.x, body.z));
+  body.y = Math.min(body.y + body.vy * dt, FLY_CEILING);
+
+  const { ground } = world.terrain.groundAt(body.x, body.z, body.y + STEP_HEIGHT);
+  const floor = Math.max(ground, SEA_LEVEL + 0.2);
+  let landed = false;
+  if (body.y <= floor) {
+    body.y = floor;
+    body.vy = Math.max(0, body.vy);
+    /* Shift onto dry land (or a deck) puts you back on your feet. */
+    landed = intent.down && ground >= SEA_LEVEL + 0.2;
+  }
+  body.grounded = landed;
+  if (landed) {
+    const h = Math.hypot(body.vx, body.vz);
+    if (h > WALK_SPEED) {
+      body.vx *= WALK_SPEED / h;
+      body.vz *= WALK_SPEED / h;
+    }
+  }
+  return { landed, moved: Math.hypot(body.x - px, body.z - pz) };
 }

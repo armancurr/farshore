@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Room } from "../src/game/server/room";
 import { TICK_HZ } from "../src/game/shared/constants";
 import { parseClientMsg, type ServerMsg } from "../src/game/shared/protocol";
+import { parseWorldSave } from "../src/game/shared/save";
 
 type Env = {
   ROOMS: DurableObjectNamespace<TideRoom>;
@@ -16,9 +17,29 @@ const cors = { "access-control-allow-origin": "*" };
  * island costs nothing.
  */
 export class TideRoom extends DurableObject<Env> {
-  private room = new Room({ online: true });
+  private room!: Room;
   private sockets = new Set<WebSocket>();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private saving: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    /* The grand map is kept in the object's storage, so it outlives the object. */
+    ctx.blockConcurrencyWhile(async () => {
+      const world = parseWorldSave(await ctx.storage.get("world"));
+      this.room = new Room({
+        online: true,
+        settle: true,
+        world,
+        onChange: () => {
+          this.saving ??= setTimeout(() => {
+            this.saving = null;
+            void this.ctx.storage.put("world", this.room.exportWorld());
+          }, 500);
+        },
+      });
+    });
+  }
 
   async fetch(request: Request) {
     const url = new URL(request.url);
@@ -41,6 +62,14 @@ export class TideRoom extends DurableObject<Env> {
           server.send(JSON.stringify(msg));
         } catch {
           /* socket already gone */
+        }
+      },
+      close: () => {
+        id = -1;
+        try {
+          server.close(4000, "replaced");
+        } catch {
+          /* already closed */
         }
       },
     };
