@@ -2,6 +2,7 @@ import { Room } from "../server/room";
 import { TICK_HZ } from "../shared/constants";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
 import { DEFAULT_SKIN, isSkinId, type SkinId } from "../shared/skins";
+import { isWeaponKind, type WeaponKind } from "../shared/weapons";
 
 export type ConnectionKind = "attract" | "online";
 
@@ -124,6 +125,30 @@ export function keepSkin(skin: SkinId) {
   }
 }
 
+/* ---------- what you carry ---------- */
+
+const WEAPON_KEY = "farshore:weapon";
+
+/* The weapon this browser last chose (null: empty-handed; undefined: never chose). */
+export function readWeapon(): WeaponKind | null | undefined {
+  try {
+    const saved = localStorage.getItem(WEAPON_KEY);
+    if (saved === "none") return null;
+    if (isWeaponKind(saved)) return saved;
+  } catch {
+    /* Storage unavailable. */
+  }
+  return undefined;
+}
+
+export function keepWeapon(kind: WeaponKind | null) {
+  try {
+    localStorage.setItem(WEAPON_KEY, kind ?? "none");
+  } catch {
+    /* Storage unavailable: it lasts until the tab closes. */
+  }
+}
+
 export function serverBase() {
   const configured = import.meta.env.VITE_TIDE_SERVER as string | undefined;
   if (configured) return configured.replace(/\/$/, "");
@@ -153,7 +178,12 @@ export class WsConnection implements Connection {
     this.ws.onopen = () => {
       this.open = true;
       this.ws.send(
-        JSON.stringify({ t: "hello", ...readToken(), skin: readSkin() } satisfies ClientMsg),
+        JSON.stringify({
+          t: "hello",
+          ...readToken(),
+          skin: readSkin(),
+          weapon: readWeapon(),
+        } satisfies ClientMsg),
       );
       for (const msg of this.queue) this.ws.send(JSON.stringify(msg));
       this.queue = [];

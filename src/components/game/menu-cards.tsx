@@ -46,7 +46,10 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Turn a piece", ["R"]],
     ["Take a piece back", ["RMB"]],
   ],
-  [["Marketplace", ["K"]]],
+  [
+    ["Skins and weapons", ["K"]],
+    ["Travel, claim an island", ["Esc"]],
+  ],
   [
     ["Creative mode", ["Shift+C"]],
     ["Take off, or drop", ["Space ×2"]],

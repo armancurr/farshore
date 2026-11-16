@@ -33,6 +33,13 @@ function nameTexture(name: string, stagger = 0) {
 }
 
 /* Another player, as you see them: their skin, what they hold, and their name. */
+/* Polearms are held partway down the shaft, so they don't tower overhead. */
+const GRIP_DROP: Partial<Record<WeaponKind, number>> = {
+  spear: -0.5,
+  trident: -0.5,
+  halberd: -0.7,
+};
+
 export class Avatar {
   readonly group = new THREE.Group();
   private body = new THREE.Group();
@@ -48,7 +55,6 @@ export class Avatar {
   private weapon: WeaponKind | null = null;
   private stagger = 0;
   private swing = 0;
-  private spin = 0;
 
   constructor(
     readonly id: number,
@@ -99,7 +105,7 @@ export class Avatar {
         if (weapon === "shield") {
           model.position.set(-0.3, 0, -0.25);
           model.rotation.y = 0.4;
-        } else if (weapon === "spear") model.position.y = -0.5;
+        } else model.position.y = GRIP_DROP[weapon] ?? 0;
         this.hand.add(model);
       }
     }
@@ -157,14 +163,13 @@ export class Avatar {
     const arc = Math.sin(this.swing * Math.PI);
     const blocking = (flags & FLAG.block) !== 0;
     const charging = (flags & FLAG.charge) !== 0;
-    if (charging && this.weapon === "flail") this.spin += dt * 14;
     this.hand.rotation.set(
       -0.9 -
         this.rig.hold +
         arc * -1.4 +
         (this.swing > 0.5 ? 0 : arc * 2.2) +
         (charging ? -1.2 : 0),
-      charging && this.weapon === "flail" ? this.spin : 0,
+      0,
       -0.15,
     );
     this.hand.position.x = blocking ? -0.32 : 0;

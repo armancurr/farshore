@@ -1,6 +1,6 @@
 import type { Bounty, BountyTarget } from "./bounties";
 import { BOUNDARY, HEALTH_MAX, MAX_ISLANDS } from "./constants";
-import { type IslandInfo, isShapeId, PLACE_LIMIT, tilesOverlap } from "./islands";
+import { HARBOR, type IslandInfo, isShapeId, PLACE_LIMIT, tilesOverlap } from "./islands";
 import {
   HOTBAR,
   type Inventory,
@@ -11,6 +11,7 @@ import {
   RARITIES,
   type Rarity,
   type Tool,
+  TOOLS,
 } from "./items";
 import { isSkinId, type SkinId } from "./skins";
 
@@ -73,9 +74,11 @@ function inventory(v: unknown): Inventory | null {
   const saved: unknown[] = [...v.hotbar, ...Array(HOTBAR - v.hotbar.length).fill(null)];
   const tools: Tool[] = [];
   for (const t of v.tools) {
-    if (!isObj(t) || !id(t.id) || !isToolKind(t.kind) || !int(t.uses, -1, 1000)) return null;
-    if (t.uses === 0 || tools.some((o) => o.id === t.id)) continue;
-    tools.push({ id: t.id, kind: t.kind, uses: t.uses });
+    if (!isObj(t) || !id(t.id) || !int(t.uses, -1, 1000)) return null;
+    /* Retired tools (the sword, the pickaxe, the flail, bought variants) are simply gone. */
+    if (!isToolKind(t.kind) || t.uses === 0 || tools.some((o) => o.id === t.id)) continue;
+    /* Weapons no longer wear out. */
+    tools.push({ id: t.id, kind: t.kind, uses: TOOLS[t.kind].weapon ? -1 : t.uses });
   }
   if (tools.length > MAX_TOOLS) return null;
   /* Slot 1 is always fists; other slots must point at tools you have, once each. */
@@ -114,7 +117,7 @@ function player(v: unknown): SavedPlayer | null {
 
 export const WORLD_SAVE_VERSION = 1;
 
-/* Someone who's been here: who they are, their island, and where they left off. */
+/* Someone who's been here: who they are, their island (null: still on the Harbor), and where they left off. */
 export type SavedProfile = {
   token: string;
   name: string;
@@ -150,7 +153,9 @@ export function parseWorldSave(raw: unknown): WorldSave | null {
   const islands: IslandInfo[] = [];
   for (const v of raw.islands) {
     const o = island(v);
-    if (!o || islands.length >= MAX_ISLANDS) continue;
+    if (!o || o.id === HARBOR.id || islands.length >= MAX_ISLANDS) continue;
+    /* The Harbor took the middle of the map: anything settled there before is gone. */
+    if (tilesOverlap(HARBOR.x, HARBOR.z, o.x, o.z)) continue;
     if (islands.some((p) => p.id === o.id || tilesOverlap(p.x, p.z, o.x, o.z))) continue;
     islands.push(o);
   }
@@ -162,11 +167,13 @@ export function parseWorldSave(raw: unknown): WorldSave | null {
     if (players.some((p) => p.token === v.token)) continue;
     const isl = id(v.island) && islands.some((o) => o.id === v.island) ? v.island : null;
     const saved = v.saved === null || v.saved === undefined ? null : player(v.saved);
+    /* Lost your island (it stood where the Harbor is now)? You start over on the Harbor. */
+    const evicted = id(v.island) && isl === null;
     players.push({
       token: v.token,
       name: v.name,
       island: isl,
-      saved: isl === null ? null : saved,
+      saved: evicted ? null : saved,
       skin: isSkinId(v.skin) ? v.skin : undefined,
     });
   }

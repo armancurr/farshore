@@ -94,39 +94,6 @@ function Crosshair(props: { hud: HudState }) {
   );
 }
 
-/* Weapons on the ground: a diamond where they are, or an arrow at the edge. */
-function Markers(props: { hud: HudState }) {
-  return (
-    <>
-      {props.hud.markers.map((m) => (
-        <div
-          key={m.id}
-          className="absolute -translate-1/2"
-          style={{ left: `${m.x * 100}%`, top: `${m.y * 100}%` }}
-        >
-          {m.off ? (
-            <svg
-              viewBox="0 0 16 16"
-              className="size-4 opacity-70"
-              style={{ transform: `rotate(${m.angle}rad)` }}
-              aria-hidden="true"
-            >
-              <polygon points="15,8 3,2 6,8 3,14" fill="white" />
-            </svg>
-          ) : (
-            <div className="flex flex-col items-center gap-0.5">
-              <div className="size-2.5 rotate-45 border border-white" />
-              <div className="font-mono text-[9px] tracking-[0.15em] text-white/70">
-                {Math.round(m.d)}m
-              </div>
-            </div>
-          )}
-        </div>
-      ))}
-    </>
-  );
-}
-
 /* The strike: a needle sweeps the bar; click while it's inside the mark. */
 function StrikeBar(props: { strike: Strike; at: number }) {
   const needle = useRef<HTMLDivElement>(null);
@@ -229,10 +196,20 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           <ActiveBounty hud={h} />
         </div>
       )}
+      {/* The Harbor is common ground: nobody can be hurt here. */}
+      {h.player && h.sheltered && !h.economy && (
+        <div
+          className={cn(
+            "absolute left-1/2 -translate-x-1/2 font-mono text-[10px] tracking-[0.2em] whitespace-nowrap text-white/60 uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]",
+            props.touch ? "top-24" : "top-6",
+          )}
+        >
+          The Harbor · safe from harm
+        </div>
+      )}
 
       {h.player && (
         <>
-          <Markers hud={h} />
           <Crosshair hud={h} />
           <Fishing hud={h} />
           {h.prompt && (
