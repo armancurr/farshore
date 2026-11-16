@@ -49,7 +49,6 @@ const CONTROL_GROUPS: [string, string[]][][] = [
 
 const CONTROL_FOOT: [string, string][] = [
   ["C", "This card"],
-  ["N", "Music"],
   ["M", "Mute"],
   ["Esc", "Pause"],
 ];

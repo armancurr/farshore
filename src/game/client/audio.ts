@@ -1,9 +1,8 @@
 import type { WeaponKind } from "../shared/weapons";
-import { Score } from "./music";
 
 /*
  * Every sound is synthesized: noise through filters for the sea and wind,
- * enveloped sines for thumps, and a generated score on top.
+ * enveloped sines for thumps.
  * Nothing to download.
  */
 export class TideAudio {
@@ -16,8 +15,6 @@ export class TideAudio {
   private noise!: AudioBuffer;
   private muted = false;
   private lastHeart = 0;
-  private score: Score | null = null;
-  private music = true;
 
   get isMuted() {
     return this.muted;
@@ -81,25 +78,6 @@ export class TideAudio {
     this.windGain.gain.value = 0;
     wind.connect(windFilter).connect(this.windGain).connect(this.muffle);
     wind.start();
-
-    /* The score runs through the same muffle, so it dulls underwater too. */
-    this.score = new Score(ctx, this.muffle);
-    this.score.setEnabled(this.music);
-    this.score.start();
-  }
-
-  get musicOn() {
-    return this.music;
-  }
-
-  setMusic(on: boolean) {
-    this.music = on;
-    this.score?.setEnabled(on);
-  }
-
-  /* 0..1: how tense things are. */
-  intensity(v: number) {
-    this.score?.setIntensity(v);
   }
 
   setMuted(muted: boolean) {
@@ -116,8 +94,6 @@ export class TideAudio {
   }
 
   close() {
-    this.score?.dispose();
-    this.score = null;
     void this.ctx?.close();
     this.ctx = null;
   }
@@ -318,7 +294,6 @@ export class TideAudio {
   }
 
   drowned() {
-    this.score?.stinger("drowned");
     this.tone(220, 55, 0.25, 0.05, 2.2, "triangle");
     this.splash(1.4);
   }
@@ -395,7 +370,6 @@ export class TideAudio {
 
   /* A bounty paid out. */
   reward() {
-    this.score?.stinger("win");
     for (const [i, f] of [392, 523.3, 659.3, 784].entries()) {
       setTimeout(() => this.tone(f, f, 0.12, 0.01, 1.4), i * 140);
     }
