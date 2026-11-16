@@ -2,7 +2,7 @@ import { cn } from "cn";
 import { useEffect, useRef } from "react";
 import { Progress } from "@/components/ui/progress";
 import type { HudState } from "../../game/client/game";
-import { Belt } from "./belt";
+import { Belt, controlHint } from "./belt";
 import { needleAt, type Strike } from "../../game/shared/fishing";
 
 const DOWN_TEXT: Record<string, string> = {
@@ -187,15 +187,40 @@ function Fishing(props: { hud: HudState }) {
   );
 }
 
+/* "Space up · Shift down · …" as a short list, one control to a line. */
+function ControlHints(props: { text: string | null }) {
+  if (!props.text) return null;
+  const lines = props.text.split(" · ").map((line) => line.charAt(0).toUpperCase() + line.slice(1));
+  return (
+    <ul className="flex flex-col items-start gap-1.5 text-white/55">
+      {lines.map((line) => (
+        <li key={line}>{line}</li>
+      ))}
+    </ul>
+  );
+}
+
 export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   const h = props.hud;
   return (
     <div className="pointer-events-none absolute inset-0 text-white select-none">
-      <div className="absolute top-5 left-5 space-y-3">
+      {/*
+        Top left, in one column: coins, what the controls do right now (one
+        per line), then the feed of what just happened (mode changes, pickups).
+      */}
+      <div className="absolute top-5 left-5 flex max-w-[min(18rem,calc(100%-2.5rem))] flex-col items-start gap-4 font-sans text-xs font-bold [text-shadow:0_1px_3px_rgba(0,0,0,0.8)] sm:top-6 sm:left-6">
         {h.player && h.economy && (
-          <div className="font-mono text-[13px] tracking-[0.12em] tabular-nums">
+          <div className="font-mono text-[13px] font-normal tracking-[0.12em] tabular-nums">
             <span className="mr-1.5 text-white/45">◎</span>
             {h.inv.coins}
+          </div>
+        )}
+        {!props.touch && h.player && <ControlHints text={controlHint(h, props.touch)} />}
+        {h.feed.length > 0 && (
+          <div className="flex flex-col items-start gap-1.5 text-white/70">
+            {h.feed.map((item, i) => (
+              <div key={i}>{item.text}</div>
+            ))}
           </div>
         )}
       </div>
@@ -204,14 +229,6 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           <ActiveBounty hud={h} />
         </div>
       )}
-
-      <div className="absolute top-40 right-5 flex flex-col items-end gap-1.5 font-sans text-xs font-bold text-white/70 sm:top-16 sm:right-6">
-        {h.feed.map((item, i) => (
-          <div key={i} className="[text-shadow:0_1px_3px_rgba(0,0,0,0.8)]">
-            {item.text}
-          </div>
-        ))}
-      </div>
 
       {h.player && (
         <>

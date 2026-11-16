@@ -52,7 +52,8 @@ export class Input {
       if (e.code === "KeyE") this.queued.add("interact");
       if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
       if (e.code === "KeyB") this.queued.add("build");
-      if (e.code === "KeyR") this.queued.add("rotate");
+      /* ⌘R / Ctrl+R is the reload key, which the island menu catches. */
+      if (e.code === "KeyR" && !e.metaKey && !e.ctrlKey) this.queued.add("rotate");
       if (e.code === "KeyC" && e.shiftKey) this.queued.add("creative");
       if (e.code === "KeyW" || e.code === "ArrowUp") {
         const now = performance.now();
