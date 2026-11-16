@@ -3,9 +3,12 @@ import {
   ArrowClockwiseIcon,
   ArrowUpIcon,
   EnvelopeSimpleIcon,
+  HourglassMediumIcon,
   PlayIcon,
   SignOutIcon,
   StorefrontIcon,
+  UserCircleIcon,
+  UserPlusIcon,
 } from "@phosphor-icons/react";
 import { cn } from "cn";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -13,11 +16,13 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
 import { Marketplace } from "./marketplace";
-import { ControlsCard, MenuPointer, WaitlistCard } from "./menu-cards";
+import { AccessCard, ControlsCard, MenuPointer, PendingCard, PlayerCard } from "./menu-cards";
+import { NameDialog } from "./name-dialog";
 import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
 import { SettleScreen } from "./settle-screen";
 import { TouchControls } from "./touch-controls";
@@ -34,6 +39,15 @@ const menuKbd = "h-5 min-w-5 px-1.5 text-[10px]";
 const menuText =
   "font-sans text-[15px] leading-none font-bold whitespace-nowrap text-white select-none";
 
+/* Why Go ashore is greyed out, by who's looking at it. */
+const LOCKED_REASON: Record<AuthStatus, string | null> = {
+  loading: null,
+  guest: "Invite only for now. Join the waitlist, or sign in if you've been invited.",
+  unapproved: "You haven't been let in yet. You'll get an email when you are.",
+  naming: "Pick your name first.",
+  ready: null,
+};
+
 const menuCardPlacement = {
   side: "bottom",
   align: "end",
@@ -49,7 +63,7 @@ const menuCardPlacement = {
 export function GamePanel(props: { onPress?: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const root = useRef<HTMLDivElement>(null);
-  const waitlistCard = useRef<HTMLDivElement>(null);
+  const accountCard = useRef<HTMLDivElement>(null);
   const gameRef = useRef<Game | null>(null);
   const startedAt = useRef(0);
 
@@ -63,12 +77,18 @@ export function GamePanel(props: { onPress?: () => void }) {
   /* The marketplace (K), from the title screen or out on the island. */
   const [marketOpen, setMarketOpen] = useState(false);
   /*
-   * Both menu cards open on hover. Keyboard focus opens Controls; the waitlist
-   * opens on Enter or a tap, and stays up while focus is inside it (typing, or
-   * the note after joining). The Controls card steps aside while it's up.
+   * Both menu cards open on hover. Keyboard focus opens Controls; the account
+   * card (the waitlist, for guests) opens on Enter or a tap, and stays up while
+   * focus is inside it (typing, or the note after joining). The Controls card
+   * steps aside while it's up.
    */
   const [controlsOpen, setControlsOpen] = useState(false);
-  const [waitlistOpen, setWaitlistOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [nameOpen, setNameOpen] = useState(false);
+
+  /* Only approved, named players get past the title screen. */
+  const auth = useAuth();
+  const canPlay = auth.status === "ready";
   /*
    * A reload key (⌘R, Ctrl+R, F5) caught while on the island: the island menu
    * asks first, naming the key so a second press goes through.
@@ -133,12 +153,12 @@ export function GamePanel(props: { onPress?: () => void }) {
       if (e.code === "KeyM" && latest.current.playing) toggleMute();
       if (e.code === "KeyN" && !e.repeat && latest.current.playing && !latest.current.hud?.settling)
         setMapOpen((open) => !open);
-      if (e.code === "Escape") setWaitlistOpen(false);
+      if (e.code === "Escape") setAccountOpen(false);
       /* C toggles the Controls card, anywhere but a text field. */
       const typing =
         e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
       if (e.code === "KeyC" && !e.shiftKey && !e.repeat && !typing && !latest.current.touch) {
-        setWaitlistOpen(false);
+        setAccountOpen(false);
         setControlsOpen((open) => !open);
       }
       /* K opens or closes the marketplace, but not over another panel or the settle screen. */
@@ -148,22 +168,27 @@ export function GamePanel(props: { onPress?: () => void }) {
         if (latest.current.marketOpen) latest.current.closeMarket(true);
         else latest.current.openMarket();
       }
-      /* On the title screen: Enter goes ashore, J opens the waitlist (and its field). */
+      /*
+       * On the title screen: Enter goes ashore, or else takes you to whatever
+       * stands in the way (the waitlist, or the name picker). J opens the
+       * account card, and its email field for guests.
+       */
       const onTitle =
         latest.current.ready &&
         !latest.current.playing &&
         !latest.current.marketOpen &&
         !typing &&
         !e.repeat;
+      const status = latest.current.authStatus;
       if (onTitle && e.code === "Enter" && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
-        latest.current.play("online");
+        if (status === "ready") latest.current.play("online");
+        else if (status === "naming") setNameOpen(true);
+        else if (status === "guest" || status === "unapproved") latest.current.openAccount();
       }
       if (onTitle && e.code === "KeyJ") {
         e.preventDefault();
-        setControlsOpen(false);
-        setWaitlistOpen(true);
-        setTimeout(() => document.getElementById("waitlist-email")?.focus(), 30);
+        latest.current.openAccount();
       }
       /* Panels have the mouse; these keys put it away again. */
       const panel = latest.current.hud?.panel;
@@ -196,17 +221,24 @@ export function GamePanel(props: { onPress?: () => void }) {
   }, [toggleMute]);
 
   const play = (next: Mode) => {
+    if (!canPlay) return;
     props.onPress?.();
-    setWaitlistOpen(false);
+    setAccountOpen(false);
     if (!game) return;
     startedAt.current = performance.now();
     game.start(next);
     game.lock();
   };
 
+  const openAccount = () => {
+    setControlsOpen(false);
+    setAccountOpen(true);
+    setTimeout(() => document.getElementById("waitlist-email")?.focus(), 30);
+  };
+
   const openMarket = () => {
     setMapOpen(false);
-    setWaitlistOpen(false);
+    setAccountOpen(false);
     setControlsOpen(false);
     setMarketOpen(true);
     gameRef.current?.input.unlock();
@@ -228,6 +260,8 @@ export function GamePanel(props: { onPress?: () => void }) {
     reloadKey,
     ready: false,
     play,
+    openAccount,
+    authStatus: auth.status,
     marketOpen,
     openMarket,
     closeMarket,
@@ -241,10 +275,43 @@ export function GamePanel(props: { onPress?: () => void }) {
     reloadKey,
     ready: status === "ready",
     play,
+    openAccount,
+    authStatus: auth.status,
     marketOpen,
     openMarket,
     closeMarket,
   };
+
+  /* Approved without a name: ask for one as soon as the island is up. */
+  const askedForName = useRef(false);
+  useEffect(() => {
+    if (status !== "ready" || auth.status !== "naming" || askedForName.current) return;
+    askedForName.current = true;
+    setAccountOpen(false);
+    setNameOpen(true);
+  }, [status, auth.status]);
+  useEffect(() => {
+    if (auth.status !== "naming") setNameOpen(false);
+  }, [auth.status]);
+
+  /* A dead invite link (or a shut-out account): put the right card in front of them. */
+  const shownFor = useRef<number | null>(null);
+  useEffect(() => {
+    const notice = auth.notice;
+    if (status !== "ready" || !notice?.openAccess || auth.status === "loading") return;
+    if (shownFor.current === notice.id) return;
+    shownFor.current = notice.id;
+    latest.current.openAccount();
+  }, [status, auth.status, auth.notice]);
+
+  /* Title-screen notices (welcomes, dead links) clear themselves. */
+  useEffect(() => {
+    if (!auth.notice || auth.notice.sticky) return;
+    const timer = setTimeout(dismissNotice, auth.notice.tone === "error" ? 7000 : 4000);
+    return () => clearTimeout(timer);
+  }, [auth.notice]);
+
+  const lockedReason = LOCKED_REASON[auth.status];
 
   const leave = () => {
     setMapOpen(false);
@@ -332,51 +399,54 @@ export function GamePanel(props: { onPress?: () => void }) {
               farshore
             </div>
             <div className="flex items-center gap-4 sm:gap-6">
-              <Button variant="menu" size="inline" onClick={() => play("online")}>
-                Go ashore
-                {touch ? (
-                  <PlayIcon size={13} weight="fill" />
-                ) : (
-                  <Kbd className={menuKbd} aria-label="Enter">
-                    <ArrowBendDownLeftIcon weight="bold" />
-                  </Kbd>
-                )}
-              </Button>
+              <PlayButton
+                touch={touch}
+                lockedReason={canPlay ? null : (lockedReason ?? "")}
+                onClick={() => play("online")}
+              />
               <MarketLink touch={touch} onClick={openMarket} />
               {!touch && (
-                <ControlsMenu open={controlsOpen && !waitlistOpen} onOpenChange={setControlsOpen} />
+                <ControlsMenu open={controlsOpen && !accountOpen} onOpenChange={setControlsOpen} />
               )}
-              <Popover
-                open={waitlistOpen}
-                onOpenChange={(open, details) => {
-                  /* Wandering off with the pointer doesn't close it mid-typing. */
-                  const typing = waitlistCard.current?.contains(document.activeElement);
-                  if (!open && details.reason === "trigger-hover" && typing) return;
-                  setWaitlistOpen(open);
-                }}
-              >
-                <PopoverTrigger
-                  openOnHover={!touch}
-                  delay={0}
-                  render={<Button variant="menu" size="inline" />}
-                >
-                  Join waitlist
-                  {touch ? (
-                    <EnvelopeSimpleIcon size={14} weight="fill" />
-                  ) : (
-                    <Kbd className={menuKbd}>J</Kbd>
-                  )}
-                </PopoverTrigger>
-                <PopoverContent
-                  ref={waitlistCard}
-                  initialFocus={false}
-                  {...menuCardPlacement}
-                  className="w-[min(20rem,calc(100vw-1.5rem))]"
-                >
-                  <MenuPointer />
-                  <WaitlistCard />
-                </PopoverContent>
-              </Popover>
+              {auth.status === "naming" ? (
+                <Button variant="menu" size="inline" onClick={() => setNameOpen(true)}>
+                  Pick a name
+                  <UserPlusIcon size={14} weight="fill" />
+                </Button>
+              ) : (
+                auth.status !== "loading" && (
+                  <Popover
+                    open={accountOpen}
+                    onOpenChange={(open, details) => {
+                      /* Wandering off with the pointer doesn't close it mid-typing. */
+                      const typing = accountCard.current?.contains(document.activeElement);
+                      if (!open && details.reason === "trigger-hover" && typing) return;
+                      setAccountOpen(open);
+                    }}
+                  >
+                    <PopoverTrigger
+                      openOnHover={!touch}
+                      delay={0}
+                      render={<Button variant="menu" size="inline" />}
+                    >
+                      <AccountLabel status={auth.status} username={auth.username} touch={touch} />
+                    </PopoverTrigger>
+                    <PopoverContent
+                      ref={accountCard}
+                      initialFocus={false}
+                      {...menuCardPlacement}
+                      className="w-[min(20rem,calc(100vw-1.5rem))]"
+                    >
+                      <MenuPointer />
+                      {auth.status === "guest" && <AccessCard />}
+                      {auth.status === "unapproved" && <PendingCard email={auth.email} />}
+                      {auth.status === "ready" && auth.username && (
+                        <PlayerCard username={auth.username} email={auth.email} />
+                      )}
+                    </PopoverContent>
+                  </Popover>
+                )
+              )}
             </div>
           </div>
           {hud?.notice && (
@@ -384,7 +454,20 @@ export function GamePanel(props: { onPress?: () => void }) {
               {hud.notice}
             </div>
           )}
+          {auth.notice && (
+            <div
+              key={auth.notice.id}
+              role="status"
+              className="absolute bottom-6 left-1/2 max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-[10px] border border-[#242424] bg-[#121212]/95 px-4 py-2.5 text-center font-sans text-[13px] font-bold text-white shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7)] duration-300 animate-in fade-in-0 slide-in-from-bottom-2"
+            >
+              {auth.notice.text}
+            </div>
+          )}
         </>
+      )}
+
+      {auth.status === "naming" && (
+        <NameDialog open={nameOpen && !playing} onOpenChange={setNameOpen} email={auth.email} />
       )}
 
       {playing && touch && game && <TouchControls input={game.input} />}
@@ -528,5 +611,74 @@ function ControlsMenu(props: { open: boolean; onOpenChange: (open: boolean) => v
         <ControlsCard />
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+/*
+ * Go ashore. Locked (with a card saying why) until the player is approved and
+ * named; focusable while locked, so the reason can be read from the keyboard.
+ */
+function PlayButton(props: { touch: boolean; lockedReason: string | null; onClick: () => void }) {
+  const locked = props.lockedReason !== null;
+  const button = (
+    <Button
+      variant="menu"
+      size="inline"
+      disabled={locked}
+      focusableWhenDisabled
+      onClick={props.onClick}
+    >
+      Go ashore
+      {props.touch ? (
+        <PlayIcon size={13} weight="fill" />
+      ) : (
+        <Kbd className={menuKbd} aria-label="Enter">
+          <ArrowBendDownLeftIcon weight="bold" />
+        </Kbd>
+      )}
+    </Button>
+  );
+  if (!props.lockedReason) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={button} />
+      <TooltipContent
+        {...menuCardPlacement}
+        className="w-[16rem] px-4 py-3 text-[13px] leading-normal text-[#d6d6d6]"
+      >
+        <MenuPointer />
+        {props.lockedReason}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/* What the right-most title-bar link says: the waitlist, or who you are. */
+function AccountLabel(props: { status: AuthStatus; username: string | null; touch: boolean }) {
+  if (props.status === "ready" && props.username) {
+    return (
+      <span className="flex items-center gap-1.5 duration-300 animate-in fade-in-0 slide-in-from-right-1">
+        <UserCircleIcon size={17} weight="fill" />
+        {props.username}
+      </span>
+    );
+  }
+  if (props.status === "unapproved") {
+    return (
+      <>
+        Not in yet
+        <HourglassMediumIcon size={14} weight="fill" />
+      </>
+    );
+  }
+  return (
+    <>
+      Join waitlist
+      {props.touch ? (
+        <EnvelopeSimpleIcon size={14} weight="fill" />
+      ) : (
+        <Kbd className={menuKbd}>J</Kbd>
+      )}
+    </>
   );
 }

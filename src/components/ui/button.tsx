@@ -14,7 +14,7 @@ const buttonVariants = cva(
       variant: {
         default:
           "gap-2 rounded-lg border border-[#d4d4d4] bg-[#f2f2f2] font-sans font-extrabold text-[#0a0a0a] transition-[background-color,scale] duration-100 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#f2f2f2] disabled:active:scale-100",
-        menu: "gap-1.5 rounded-sm font-sans leading-none font-bold text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 disabled:cursor-not-allowed disabled:opacity-40",
+        menu: "gap-1.5 rounded-sm font-sans leading-none font-bold text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 disabled:cursor-not-allowed disabled:opacity-40 data-disabled:cursor-not-allowed data-disabled:opacity-40",
         ghost: "rounded-lg text-white hover:bg-white/10 focus-visible:bg-white/10",
         /* Thin white rule, fills white under the pointer. Panels and the pause menu. */
         outline:
