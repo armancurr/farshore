@@ -1,8 +1,12 @@
 import {
   ArrowBendDownLeftIcon,
+  ArrowClockwiseIcon,
+  ArrowUpIcon,
   EnvelopeSimpleIcon,
   HourglassMediumIcon,
   PlayIcon,
+  SignOutIcon,
+  StorefrontIcon,
   UserCircleIcon,
   UserPlusIcon,
 } from "@phosphor-icons/react";
@@ -16,6 +20,7 @@ import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
+import { Marketplace } from "./marketplace";
 import { AccessCard, ControlsCard, MenuPointer, PendingCard, PlayerCard } from "./menu-cards";
 import { NameDialog } from "./name-dialog";
 import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
@@ -69,6 +74,8 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [touch, setTouch] = useState(false);
   /* The grand map, over the game (N). */
   const [mapOpen, setMapOpen] = useState(false);
+  /* The marketplace (K), from the title screen or out on the island. */
+  const [marketOpen, setMarketOpen] = useState(false);
   /*
    * Both menu cards open on hover. Keyboard focus opens Controls; the account
    * card (the waitlist, for guests) opens on Enter or a tap, and stays up while
@@ -82,6 +89,13 @@ export function GamePanel(props: { onPress?: () => void }) {
   /* Only approved, named players get past the title screen. */
   const auth = useAuth();
   const canPlay = auth.status === "ready";
+  /*
+   * A reload key (⌘R, Ctrl+R, F5) caught while on the island: the island menu
+   * asks first, naming the key so a second press goes through.
+   */
+  const [reloadKey, setReloadKey] = useState<string | null>(null);
+  /* Set just before we reload on purpose, so the browser's own prompt stays quiet. */
+  const unloading = useRef(false);
 
   const mode: Mode = hud?.mode ?? "attract";
   const playing = mode !== "attract";
@@ -120,6 +134,22 @@ export function GamePanel(props: { onPress?: () => void }) {
     if (root.current) io.observe(root.current);
 
     const onKey = (e: KeyboardEvent) => {
+      /*
+       * On the island, a reload key opens the island menu instead. Pressing it
+       * again while the menu asks lets the reload through.
+       */
+      const reload = e.code === "F5" || ((e.metaKey || e.ctrlKey) && e.code === "KeyR");
+      if (reload && latest.current.playing && !latest.current.touch) {
+        if (latest.current.reloadKey) {
+          unloading.current = true;
+          return;
+        }
+        e.preventDefault();
+        setMapOpen(false);
+        setReloadKey(e.code === "F5" ? "F5" : e.metaKey ? "⌘R" : "Ctrl+R");
+        gameRef.current?.input.unlock();
+        return;
+      }
       if (e.code === "KeyM" && latest.current.playing) toggleMute();
       if (e.code === "KeyN" && !e.repeat && latest.current.playing && !latest.current.hud?.settling)
         setMapOpen((open) => !open);
@@ -131,12 +161,24 @@ export function GamePanel(props: { onPress?: () => void }) {
         setAccountOpen(false);
         setControlsOpen((open) => !open);
       }
+      /* K opens or closes the marketplace, but not over another panel or the settle screen. */
+      const blocked = !!latest.current.hud?.panel || !!latest.current.hud?.settling;
+      if (e.code === "KeyK" && !e.repeat && !typing && latest.current.ready && !blocked) {
+        e.preventDefault();
+        if (latest.current.marketOpen) latest.current.closeMarket(true);
+        else latest.current.openMarket();
+      }
       /*
        * On the title screen: Enter goes ashore, or else takes you to whatever
        * stands in the way (the waitlist, or the name picker). J opens the
        * account card, and its email field for guests.
        */
-      const onTitle = latest.current.ready && !latest.current.playing && !typing && !e.repeat;
+      const onTitle =
+        latest.current.ready &&
+        !latest.current.playing &&
+        !latest.current.marketOpen &&
+        !typing &&
+        !e.repeat;
       const status = latest.current.authStatus;
       if (onTitle && e.code === "Enter" && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
@@ -157,10 +199,22 @@ export function GamePanel(props: { onPress?: () => void }) {
     };
     window.addEventListener("keydown", onKey);
 
+    /*
+     * The reload button, closing the tab, a back swipe: a page can't show its
+     * own dialog for those, so on the island the browser asks instead.
+     */
+    const onUnload = (e: BeforeUnloadEvent) => {
+      if (!latest.current.playing || unloading.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onUnload);
+
     return () => {
       disposed = true;
       io.disconnect();
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("beforeunload", onUnload);
       gameRef.current?.dispose();
       gameRef.current = null;
     };
@@ -182,6 +236,20 @@ export function GamePanel(props: { onPress?: () => void }) {
     setTimeout(() => document.getElementById("waitlist-email")?.focus(), 30);
   };
 
+  const openMarket = () => {
+    setMapOpen(false);
+    setAccountOpen(false);
+    setControlsOpen(false);
+    setMarketOpen(true);
+    gameRef.current?.input.unlock();
+  };
+
+  /* Closed by a click, the island takes the mouse back; Escape leaves the island menu up. */
+  const closeMarket = useCallback((byClick: boolean) => {
+    setMarketOpen(false);
+    if (byClick && latest.current.playing) gameRef.current?.lock();
+  }, []);
+
   /* The keyboard handler and the status poll live outside renders; give them the latest. */
   const latest = useRef({
     hud,
@@ -189,10 +257,14 @@ export function GamePanel(props: { onPress?: () => void }) {
     mode,
     muted,
     touch,
+    reloadKey,
     ready: false,
     play,
     openAccount,
     authStatus: auth.status,
+    marketOpen,
+    openMarket,
+    closeMarket,
   });
   latest.current = {
     hud,
@@ -200,10 +272,14 @@ export function GamePanel(props: { onPress?: () => void }) {
     mode,
     muted,
     touch,
+    reloadKey,
     ready: status === "ready",
     play,
     openAccount,
     authStatus: auth.status,
+    marketOpen,
+    openMarket,
+    closeMarket,
   };
 
   /* Approved without a name: ask for one as soon as the island is up. */
@@ -239,19 +315,32 @@ export function GamePanel(props: { onPress?: () => void }) {
 
   const leave = () => {
     setMapOpen(false);
+    setMarketOpen(false);
+    setReloadKey(null);
     game?.input.unlock();
     game?.start("attract");
   };
 
-  /* Give the pointer lock a moment to engage before calling it a pause. */
-  const paused =
+  /* Back in the game (or off it): the reload question is settled. */
+  const locked = !!hud?.locked;
+  useEffect(() => {
+    if (locked || !playing) setReloadKey(null);
+  }, [locked, playing]);
+
+  /*
+   * The mouse is free but you're still out there: the island doesn't pause,
+   * so this is a menu over a live world. Give the pointer lock a moment to
+   * engage before showing it.
+   */
+  const menuOpen =
     !!hud &&
     playing &&
     !touch &&
     !hud.locked &&
     !hud.panel &&
     !hud.settling &&
-    performance.now() - startedAt.current > 500;
+    !marketOpen &&
+    (!!reloadKey || performance.now() - startedAt.current > 500);
 
   return (
     <div
@@ -260,7 +349,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     >
       <div
         ref={host}
-        className={cn("absolute inset-0", playing && !paused && "cursor-none")}
+        className={cn("absolute inset-0", playing && !menuOpen && "cursor-none")}
         onClick={() => playing && game?.lock()}
       />
 
@@ -315,6 +404,7 @@ export function GamePanel(props: { onPress?: () => void }) {
                 lockedReason={canPlay ? null : (lockedReason ?? "")}
                 onClick={() => play("online")}
               />
+              <MarketLink touch={touch} onClick={openMarket} />
               {!touch && (
                 <ControlsMenu open={controlsOpen && !accountOpen} onOpenChange={setControlsOpen} />
               )}
@@ -382,29 +472,29 @@ export function GamePanel(props: { onPress?: () => void }) {
 
       {playing && touch && game && <TouchControls input={game.input} />}
 
-      {paused && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/45 backdrop-blur-[6px]">
-          <div className="flex gap-2">
-            <Button onClick={() => game?.lock()}>Resume</Button>
-            <Button variant="secondary" onClick={leave}>
-              Leave island
-            </Button>
-          </div>
-        </div>
+      {menuOpen && (
+        <IslandMenu
+          reloadKey={reloadKey}
+          onBack={() => {
+            setReloadKey(null);
+            game?.lock();
+          }}
+          onLeave={leave}
+          onReload={() => {
+            unloading.current = true;
+            window.location.reload();
+          }}
+        />
       )}
       {/*
-        Above the pause screen, so the card can be read there. Sound lives
+        Above the island menu, so the card can be read there. Sound lives
         on M, which the card lists.
       */}
       {playing && (
         <div className="absolute top-5 right-5 z-30 flex items-center gap-4 sm:top-6 sm:right-6 sm:gap-6">
-          {/* Online: who you are, and how many are out here. */}
+          {/* Online: how many are out here. */}
           {mode === "online" && hud?.name && (
-            <span className={menuText}>
-              {hud.name}
-              <span className="ml-2 text-white/45">{hud.humans} online</span>
-              {hud.creative && <span className="ml-2 text-white/45">· Creative</span>}
-            </span>
+            <span className={cn(menuText, "text-white/45")}>{hud.humans} online</span>
           )}
           {hud?.settling ? (
             <Button variant="menu" size="inline" onClick={leave}>
@@ -412,23 +502,99 @@ export function GamePanel(props: { onPress?: () => void }) {
               {!touch && <Kbd className={menuKbd}>Esc</Kbd>}
             </Button>
           ) : touch ? (
-            <Button variant="menu" size="inline" onClick={leave}>
-              Leave
-            </Button>
+            <>
+              {hud?.player && <MarketLink touch onClick={openMarket} />}
+              <Button variant="menu" size="inline" onClick={leave}>
+                Leave
+              </Button>
+            </>
           ) : (
             <>
+              {hud?.player && (
+                <span className={cn(menuText, "inline-flex items-center gap-1.5")}>
+                  {hud.creative ? "Creative" : "Survival"}
+                  <Kbd className={menuKbd} aria-label="Shift+C">
+                    <ArrowUpIcon weight="bold" />C
+                  </Kbd>
+                </span>
+              )}
               {mode === "online" && hud?.player && (
                 <Button variant="menu" size="inline" onClick={() => setMapOpen((open) => !open)}>
-                  Map
+                  Open map
                   <Kbd className={menuKbd}>N</Kbd>
                 </Button>
               )}
+              {hud?.player && <MarketLink touch={false} onClick={openMarket} />}
               <ControlsMenu open={controlsOpen} onOpenChange={setControlsOpen} />
             </>
           )}
         </div>
       )}
+
+      {marketOpen && game && <Marketplace game={game} touch={touch} onClose={closeMarket} />}
     </div>
+  );
+}
+
+/*
+ * Over the island whenever the mouse is free. Online there's no pausing, so it
+ * says so. After a reload key it asks about that instead. Its buttons are the
+ * same bare links as the title bar.
+ */
+function IslandMenu(props: {
+  reloadKey: string | null;
+  onBack: () => void;
+  onLeave: () => void;
+  onReload: () => void;
+}) {
+  const reload = props.reloadKey;
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-black/45 px-4 backdrop-blur-[6px]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="island-menu-title"
+        className="flex w-full max-w-sm flex-col items-start gap-6 text-left text-white select-none"
+      >
+        <div className="flex flex-col gap-2">
+          <h2 id="island-menu-title" className="font-sans text-2xl leading-none font-extrabold">
+            {reload ? "Reload the page?" : "Still on the island"}
+          </h2>
+          <p className="font-sans text-sm leading-snug text-white/60">
+            {reload
+              ? "You'll wake up right where you are, with everything you carry. A boat seat or a line in the water won't come with you."
+              : "Farshore doesn't pause. The tide and everyone else keep going while you're here."}
+          </p>
+        </div>
+        <div className="flex items-center gap-6">
+          <Button variant="menu" size="inline" autoFocus onClick={props.onBack}>
+            {reload ? "Stay" : "Back to the island"}
+            <PlayIcon size={13} weight="fill" />
+          </Button>
+          {reload ? (
+            <Button variant="menu" size="inline" onClick={props.onReload}>
+              Reload
+              <ArrowClockwiseIcon size={14} weight="bold" />
+            </Button>
+          ) : (
+            <Button variant="menu" size="inline" onClick={props.onLeave}>
+              Leave island
+              <SignOutIcon size={14} weight="bold" />
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* The title-bar link to the marketplace. */
+function MarketLink(props: { touch: boolean; onClick: () => void }) {
+  return (
+    <Button variant="menu" size="inline" onClick={props.onClick}>
+      Marketplace
+      {props.touch ? <StorefrontIcon size={14} weight="fill" /> : <Kbd className={menuKbd}>K</Kbd>}
+    </Button>
   );
 }
 
