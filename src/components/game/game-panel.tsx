@@ -204,7 +204,7 @@ export function GamePanel(props: { onPress?: () => void }) {
                   onClick={() => setControlsOpen(!controlsOpen())}
                 >
                   Controls
-                  <GameController size={14} />
+                  <GameController size={14} weight="fill" />
                 </button>
                 <Show when={controlsOpen()}>
                   <dl class="absolute top-full right-0 mt-2 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
