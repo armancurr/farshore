@@ -343,14 +343,14 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
     <div class="pointer-events-none absolute inset-0 select-none text-white">
       <div class="absolute top-5 left-5 space-y-3">
         <Clock hud={h()} />
-        <Show when={h().player}>
+        <Show when={h().player && h().economy}>
           <div class="font-mono text-[13px] tracking-[0.12em] tabular-nums">
             <span class="mr-1.5 text-white/45">◎</span>
             {h().inv.coins}
           </div>
         </Show>
       </div>
-      <Show when={h().player}>
+      <Show when={h().player && h().economy}>
         <div class="absolute top-5 left-1/2 -translate-x-1/2" classList={{ "top-24": props.touch }}>
           <ActiveBounty hud={h()} />
         </div>

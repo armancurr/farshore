@@ -3,6 +3,7 @@ import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shar
 import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
 import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
 import { clockLabel, daylight, isNight } from "../shared/daylight";
+import { FEATURES } from "../shared/features";
 import {
   BITE_TEXT,
   depthAt,
@@ -145,6 +146,8 @@ export type HudState = {
   fishing: { state: LineState; text: string; strike: Strike | null; at: number } | null;
   /* A big line of news for a moment: a catch, a fish getting away, a payout. */
   banner: { title: string; sub: string | null; at: number } | null;
+  /* Bounties and coins are switched on. */
+  economy: boolean;
   /* The bounty you've taken, and the board's offers. */
   bounty: BountyView | null;
   board: BountyView[];
@@ -1297,13 +1300,15 @@ export class Game {
     };
     if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
     const bd = world.terrain.board;
-    consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
+    if (FEATURES.bounties)
+      consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
     const sh = world.terrain.shop;
-    consider(sh.x, sh.y, sh.z, 3.4, () => ({
-      kind: "shop",
-      id: 0,
-      label: "E · The keeper's stall",
-    }));
+    if (FEATURES.shop)
+      consider(sh.x, sh.y, sh.z, 3.4, () => ({
+        kind: "shop",
+        id: 0,
+        label: "E · The keeper's stall",
+      }));
     for (const p of this.built.list()) {
       if (p.kind === "rowboat")
         consider(p.x, b.y, p.z, BOAT_REACH, () => ({
@@ -1357,7 +1362,12 @@ export class Game {
       return;
     }
     if (!this.ownedKits().length) {
-      this.say("Nothing to build yet. The keeper's stall at the lighthouse sells kits.", 3);
+      this.say(
+        FEATURES.shop
+          ? "Nothing to build yet. The keeper's stall at the lighthouse sells kits."
+          : "Nothing to build yet.",
+        3,
+      );
       return;
     }
     if (this.myLine) this.conn?.send({ t: "reel", at: -1 });
@@ -1830,6 +1840,7 @@ export class Game {
           }
         : null,
       banner: this.banner && now - this.banner.at < 2.8 ? this.banner : null,
+      economy: FEATURES.bounties,
       bounty: this.inv.bounty ? this.bountyView(this.inv.bounty) : null,
       board: this.board.map((b) => this.bountyView(b)),
       nearBoard: this.nearBoard(),

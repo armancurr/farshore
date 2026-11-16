@@ -14,8 +14,7 @@ const CONTROLS = [
   ["WASD", "Move"],
   ["Space", "Jump"],
   ["Shift", "Sprint"],
-  ["Click / F", "Attack · hold to charge"],
-  ["Right-click", "Block (shield)"],
+  ["Click / F", "Punch · cast and strike"],
   ["E", "Interact"],
   ["1–5 / Wheel", "Hotbar"],
   ["Tab / I", "Pack"],
@@ -303,7 +302,7 @@ export function GamePanel(props: { onPress?: () => void }) {
             <div class="mt-2 font-mono text-[10px] leading-5 tracking-[0.12em] text-white/40 uppercase">
               WASD move · Space jump · Shift sprint
               <br />
-              Click / F attack, hold to charge · right-click block
+              Click / F punch, cast and strike
               <br />E interact · 1–5 hotbar · Tab pack · B build · N music · M mute
             </div>
           </div>

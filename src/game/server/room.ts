@@ -30,6 +30,7 @@ import {
 } from "../shared/bounties";
 import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
 import { isNight, untilDawn } from "../shared/daylight";
+import { FEATURES } from "../shared/features";
 import {
   BITE_WINDOW,
   depthAt,
@@ -193,7 +194,8 @@ export class Room {
   private toolId = 1;
   private nextWeaponAt = 0;
   private pending: PendingHit[] = [];
-  private herd: Herd;
+  /* Animals, when they're switched on. */
+  private herd: Herd | null = null;
   /* The bounty board: offers, and when each was posted (world time). */
   private board: Bounty[] = [];
   private posted = new Map<number, number>();
@@ -216,26 +218,28 @@ export class Room {
     this.seed = save?.seed ?? opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
     this.terrain = new Terrain(this.seed);
     const t = this.terrain;
-    this.herd = new Herd(
-      {
-        terrain: t,
-        rng: this.rng,
-        gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
-        blocked: (id) => {
-          const m = this.members.get(id);
-          if (!m) return;
-          this.wear(m);
-          m.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
+    if (FEATURES.animals)
+      this.herd = new Herd(
+        {
+          terrain: t,
+          rng: this.rng,
+          gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
+          blocked: (id) => {
+            const m = this.members.get(id);
+            if (!m) return;
+            this.wear(m);
+            m.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
+          },
         },
-      },
-      [
-        { x: t.home.x, z: t.home.z, r: 45 },
-        { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
-      ],
-    );
+        [
+          { x: t.home.x, z: t.home.z, r: 45 },
+          { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
+        ],
+      );
     if (save) this.restore(save);
     this.fillBoard();
-    for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
+    if (FEATURES.weapons)
+      for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
   }
 
   /* ---------- saving ---------- */
@@ -283,6 +287,12 @@ export class Room {
   /* Put the saved player back where they were, with everything they had. */
   private welcomeBack(m: Member, saved: SavedPlayer) {
     m.inv = saved.inv;
+    /* Weapons are off for now: anything you'd found or bought stays behind. */
+    if (!FEATURES.weapons) {
+      const keep = m.inv.tools.filter((t) => !TOOLS[t.kind].weapon);
+      m.inv.hotbar = m.inv.hotbar.map((id) => (keep.some((t) => t.id === id) ? id : null));
+      m.inv.tools = keep;
+    }
     m.health = saved.health;
     m.invDirty = true;
     const boat = saved.boat === null ? null : this.prefabs.get(saved.boat);
@@ -544,7 +554,7 @@ export class Room {
     const s = this.terrain.shop;
     const near =
       Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH && Math.abs(s.y - m.body.y) < 3;
-    if (!entry || !near || m.inv.coins < entry.price) return;
+    if (!FEATURES.shop || !entry || !near || m.inv.coins < entry.price) return;
     if ("tool" in entry.give) {
       if (!this.giveTool(m, entry.give.tool, 1)) {
         m.peer.send({ t: "feed", text: "Your pack is full" });
@@ -706,6 +716,7 @@ export class Room {
 
   /* Top the board up to its full set of offers. Returns true if anything changed. */
   private fillBoard() {
+    if (!FEATURES.bounties) return false;
     let changed = false;
     while (this.board.length < BOARD_SIZE) {
       const held = [...this.members.values()].map((m) => m.inv.bounty).filter((b) => !!b);
@@ -734,7 +745,7 @@ export class Room {
 
   private accept(m: Member, id: number) {
     const offer = this.board.find((b) => b.id === id);
-    if (!offer || m.inv.bounty || !this.nearBoard(m)) return;
+    if (!FEATURES.bounties || !offer || m.inv.bounty || !this.nearBoard(m)) return;
     this.board = this.board.filter((b) => b !== offer);
     this.posted.delete(offer.id);
     m.inv.bounty = offer;
@@ -745,7 +756,7 @@ export class Room {
 
   private turnIn(m: Member) {
     const b = m.inv.bounty;
-    if (!b || !this.nearBoard(m) || progress(m.inv, b) < b.count) return;
+    if (!FEATURES.bounties || !b || !this.nearBoard(m) || progress(m.inv, b) < b.count) return;
     consume(m.inv, b);
     m.inv.coins += b.reward;
     m.inv.bounty = null;
@@ -858,7 +869,7 @@ export class Room {
 
   private simulate(now: number, dt: number) {
     this.resolveHits(now);
-    this.herd.tick(now, dt, this.preyList());
+    this.herd?.tick(now, dt, this.preyList());
 
     for (const m of this.members.values()) {
       if (m.spectator) continue;
@@ -898,7 +909,11 @@ export class Room {
 
     this.refreshBoard();
 
-    if (this.weapons.length < GROUND_WEAPONS && this.time >= this.nextWeaponAt) {
+    if (
+      FEATURES.weapons &&
+      this.weapons.length < GROUND_WEAPONS &&
+      this.time >= this.nextWeaponAt
+    ) {
       this.nextWeaponAt = this.time + WEAPON_RESPAWN;
       this.spawnWeapon(null, true);
     }
@@ -1237,6 +1252,7 @@ export class Room {
     const def = weaponDef(p.kind);
     const fx = -Math.sin(p.yaw);
     const fz = -Math.cos(p.yaw);
+    if (!this.herd) return;
     for (const a of this.herd.animals) {
       if (a.respawnAt !== null || a.state === "dead") continue;
       const dx = a.x - m.body.x;
@@ -1325,7 +1341,7 @@ export class Room {
       ]);
     }
     const time = round2(this.time);
-    const a = this.herd.snapshot();
+    const a = this.herd?.snapshot() ?? [];
     const b: BoatSnap[] = [];
     for (const p of this.prefabs.values()) {
       if (p.kind === "rowboat")

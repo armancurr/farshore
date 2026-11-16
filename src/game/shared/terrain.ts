@@ -1,4 +1,5 @@
 import { GRID, ISLAND_RADIUS, MAX_HEIGHT, SEA_FLOOR, STEP_HEIGHT, WORLD_SIZE } from "./constants";
+import { FEATURES } from "./features";
 import { angleTo, clamp, createNoise2D, fbm, mulberry32, range, smoothstep } from "./math";
 import {
   type Block,
@@ -208,7 +209,8 @@ export class Terrain {
     const z = -this.half + Math.floor(best / GRID) * this.cell;
     const top = this.heights[best];
 
-    this.levelPad(x, z, LIGHTHOUSE.plinthRadius - 1, LIGHTHOUSE.plinthRadius + 5, top);
+    if (FEATURES.lighthouse)
+      this.levelPad(x, z, LIGHTHOUSE.plinthRadius - 1, LIGHTHOUSE.plinthRadius + 5, top);
 
     this.lighthouse = { x, y: top, z };
     /* The lantern deck, built with the other structures. */
@@ -234,7 +236,10 @@ export class Terrain {
 
   /* Windmill, chapel, mast, henge, villages, watchtowers, aqueduct, wrecks, jetties. */
   private raiseStructures() {
-    const plan = planStructures(this, this.seed);
+    const plan = planStructures(this, this.seed, {
+      lighthouse: FEATURES.lighthouse,
+      landmarks: FEATURES.landmarks,
+    });
     this.structures.push(...plan.structures);
     this.perches = plan.perches;
     this.taken = plan.footprints;
@@ -389,74 +394,93 @@ export class Terrain {
       }
     };
 
+    /*
+     * Every kind is scattered (so the trees always land in the same places),
+     * but a kind that's switched off is taken straight back out again.
+     */
+    const keepIf = (on: boolean, place: () => void) => {
+      const props = this.props.length;
+      const solids = this.solids.length;
+      place();
+      if (on) return;
+      this.props.length = props;
+      this.solids.length = solids;
+    };
+
     /* Ruins: broken columns climbing in a ring, a parkour stair to a high perch. */
-    scatter(8, { minH: 5, spacing: 11, minNy: 0.8 }, (cx, cy, cz) => {
-      const n = 5 + Math.floor(rng() * 3);
-      const start = rng() * Math.PI * 2;
-      const turn = range(rng, 0.65, 0.85) * (rng() < 0.5 ? -1 : 1);
-      const radius = range(rng, 4.2, 5.6);
-      let top = cy;
-      for (let c = 0; c < n; c++) {
-        const a = start + c * turn;
-        const x = cx + Math.cos(a) * radius;
-        const z = cz + Math.sin(a) * radius;
-        const ground = this.heightAt(x, z);
-        top = Math.max(top + range(rng, 0.95, 1.2), ground + 1.1);
-        const scale = range(rng, 0.62, 0.74);
-        this.props.push({
-          id: id++,
-          kind: "column",
-          x,
-          y: ground - 0.4,
-          z,
-          rot: rng() * Math.PI,
-          scale,
-          height: top - ground + 0.4,
-          variant: c === n - 1 && rng() < 0.6 ? 1 : 0,
-        });
-        this.solids.push({ x, z, r: scale, bottom: ground - 1, top, standable: true });
-      }
-    });
+    keepIf(FEATURES.ruins, () =>
+      scatter(8, { minH: 5, spacing: 11, minNy: 0.8 }, (cx, cy, cz) => {
+        const n = 5 + Math.floor(rng() * 3);
+        const start = rng() * Math.PI * 2;
+        const turn = range(rng, 0.65, 0.85) * (rng() < 0.5 ? -1 : 1);
+        const radius = range(rng, 4.2, 5.6);
+        let top = cy;
+        for (let c = 0; c < n; c++) {
+          const a = start + c * turn;
+          const x = cx + Math.cos(a) * radius;
+          const z = cz + Math.sin(a) * radius;
+          const ground = this.heightAt(x, z);
+          top = Math.max(top + range(rng, 0.95, 1.2), ground + 1.1);
+          const scale = range(rng, 0.62, 0.74);
+          this.props.push({
+            id: id++,
+            kind: "column",
+            x,
+            y: ground - 0.4,
+            z,
+            rot: rng() * Math.PI,
+            scale,
+            height: top - ground + 0.4,
+            variant: c === n - 1 && rng() < 0.6 ? 1 : 0,
+          });
+          this.solids.push({ x, z, r: scale, bottom: ground - 1, top, standable: true });
+        }
+      }),
+    );
 
     /* Stacked stones left by whoever was here before. */
-    scatter(30, { minH: 1.5, spacing: 18, minNy: 0.75 }, (x, y, z) => {
-      this.props.push({
-        id: id++,
-        kind: "cairn",
-        x,
-        y,
-        z,
-        rot: rng() * Math.PI * 2,
-        scale: 1,
-        height: 1.1,
-        variant: Math.floor(rng() * 3),
-      });
-    });
+    keepIf(FEATURES.cairns, () =>
+      scatter(30, { minH: 1.5, spacing: 18, minNy: 0.75 }, (x, y, z) => {
+        this.props.push({
+          id: id++,
+          kind: "cairn",
+          x,
+          y,
+          z,
+          rot: rng() * Math.PI * 2,
+          scale: 1,
+          height: 1.1,
+          variant: Math.floor(rng() * 3),
+        });
+      }),
+    );
 
-    scatter(240, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
-      const scale = rng() < 0.15 ? range(rng, 2.2, 3.4) : range(rng, 0.6, 1.9);
-      const sink = scale * 0.28;
-      const height = scale * range(rng, 0.8, 1.15);
-      this.props.push({
-        id: id++,
-        kind: "rock",
-        x,
-        y: y - sink,
-        z,
-        rot: rng() * Math.PI * 2,
-        scale,
-        height,
-        variant: Math.floor(rng() * 1e6),
-      });
-      this.solids.push({
-        x,
-        z,
-        r: scale * 0.82,
-        bottom: y - sink,
-        top: y - sink + height * 0.86,
-        standable: true,
-      });
-    });
+    keepIf(FEATURES.rocks, () =>
+      scatter(240, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
+        const scale = rng() < 0.15 ? range(rng, 2.2, 3.4) : range(rng, 0.6, 1.9);
+        const sink = scale * 0.28;
+        const height = scale * range(rng, 0.8, 1.15);
+        this.props.push({
+          id: id++,
+          kind: "rock",
+          x,
+          y: y - sink,
+          z,
+          rot: rng() * Math.PI * 2,
+          scale,
+          height,
+          variant: Math.floor(rng() * 1e6),
+        });
+        this.solids.push({
+          x,
+          z,
+          r: scale * 0.82,
+          bottom: y - sink,
+          top: y - sink + height * 0.86,
+          standable: true,
+        });
+      }),
+    );
 
     scatter(140, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
       const scale = range(rng, 0.8, 1.35);
@@ -481,25 +505,27 @@ export class Terrain {
       });
     });
 
-    for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {
-      const a = rng() * Math.PI * 2;
-      const d = range(rng, ISLAND_RADIUS * 0.95, ISLAND_RADIUS * 1.15);
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
-      if (this.heightAt(x, z) > -3) continue;
-      this.props.push({
-        id: id++,
-        kind: "buoy",
-        x,
-        y: 0,
-        z,
-        rot: rng() * 6.28,
-        scale: 1,
-        height: 3,
-        variant: b,
-      });
-      b++;
-    }
+    keepIf(FEATURES.buoys, () => {
+      for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {
+        const a = rng() * Math.PI * 2;
+        const d = range(rng, ISLAND_RADIUS * 0.95, ISLAND_RADIUS * 1.15);
+        const x = Math.cos(a) * d;
+        const z = Math.sin(a) * d;
+        if (this.heightAt(x, z) > -3) continue;
+        this.props.push({
+          id: id++,
+          kind: "buoy",
+          x,
+          y: 0,
+          z,
+          rot: rng() * 6.28,
+          scale: 1,
+          height: 3,
+          variant: b,
+        });
+        b++;
+      }
+    });
   }
 
   /* Bucket every solid by the cells its footprint (plus a body) overlaps. */

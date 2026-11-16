@@ -78,9 +78,8 @@ export function Profile(props: { onPress?: () => void }) {
         </h2>
         <p class="text-[14px] leading-6 text-white/60">
           <span class="text-white">Rising Tide</span>, a small survival game I built for this page.
-          Wake on a moonlit island, fish and hunt for bounties at the lighthouse, and build yourself
-          somewhere to sleep. Written from scratch with three.js and SolidJS; the island keeps
-          itself in your browser.
+          Wake on a quiet, moonlit island and fish the shallows while the days turn. Written from
+          scratch with three.js and SolidJS; the island keeps itself in your browser.
         </p>
       </section>
     </div>

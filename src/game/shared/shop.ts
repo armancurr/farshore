@@ -1,4 +1,5 @@
-import type { KitId, ToolKind } from "./items";
+import { FEATURES } from "./features";
+import { type KitId, type ToolKind, TOOLS } from "./items";
 
 /*
  * The keeper's stall by the lighthouse. Coins only come from bounties, and
@@ -14,7 +15,7 @@ export type ShopEntry = {
   give: { kit: KitId } | { tool: ToolKind };
 };
 
-export const SHOP: readonly ShopEntry[] = [
+const CATALOG: readonly ShopEntry[] = [
   { id: "hut", section: "Shelter", price: 120, give: { kit: "hut" } },
   { id: "cabin", section: "Shelter", price: 320, give: { kit: "cabin" } },
   { id: "campfire", section: "Amenities", price: 25, give: { kit: "campfire" } },
@@ -27,6 +28,11 @@ export const SHOP: readonly ShopEntry[] = [
   { id: "axe2", section: "Gear", price: 160, give: { tool: "axe2" } },
   { id: "rowboat", section: "Vehicles", price: 220, give: { kit: "rowboat" } },
 ];
+
+/* What's for sale right now: no weapons while they're switched off. */
+export const SHOP: readonly ShopEntry[] = CATALOG.filter(
+  (e) => FEATURES.weapons || !("tool" in e.give) || !TOOLS[e.give.tool].weapon,
+);
 
 /* How close to the stall you need to be to trade. */
 export const SHOP_REACH = 6;
