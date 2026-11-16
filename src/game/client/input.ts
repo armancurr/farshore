@@ -8,7 +8,8 @@ export type Action =
   | "interact"
   | "inventory"
   | "build"
-  | "rotate";
+  | "rotate"
+  | "creative";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -28,6 +29,9 @@ export class Input {
   /* The last number key pressed (0-based), and mouse-wheel steps, until read. */
   private digit: number | null = null;
   private wheel = 0;
+  /* W tapped twice quickly and still held: flying flat out. */
+  private boostHeld = false;
+  private lastForwardTap = 0;
   private cleanup: (() => void)[] = [];
 
   constructor(private target: HTMLElement) {
@@ -49,6 +53,12 @@ export class Input {
       if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
       if (e.code === "KeyB") this.queued.add("build");
       if (e.code === "KeyR") this.queued.add("rotate");
+      if (e.code === "KeyC" && e.shiftKey) this.queued.add("creative");
+      if (e.code === "KeyW" || e.code === "ArrowUp") {
+        const now = performance.now();
+        this.boostHeld = now - this.lastForwardTap < 300;
+        this.lastForwardTap = now;
+      }
       if (/^Digit[1-9]$/.test(e.code)) this.digit = Number(e.code.slice(5)) - 1;
       if (e.code === "Tab") e.preventDefault();
       if (e.code === "Space") this.queued.add("jump");
@@ -57,9 +67,11 @@ export class Input {
     on("keyup", (e) => {
       this.keys.delete(e.code);
       if (e.code === "KeyF") this.setAttack(false);
+      if (!this.has("KeyW", "ArrowUp")) this.boostHeld = false;
     });
     on("blur", () => {
       this.keys.clear();
+      this.boostHeld = false;
       this.setAttack(false);
       this.setAlt(false);
     });
@@ -173,6 +185,7 @@ export class Input {
 
   clear() {
     this.keys.clear();
+    this.boostHeld = false;
     this.queued.clear();
     this.digit = null;
     this.wheel = 0;
@@ -193,6 +206,11 @@ export class Input {
 
   get sprint() {
     return this.has("ShiftLeft", "ShiftRight") || this.touchSprint;
+  }
+
+  /* Double-tap W (and hold it) to go flat out. */
+  get boost() {
+    return this.boostHeld && this.has("KeyW", "ArrowUp");
   }
 
   get jumpHeld() {

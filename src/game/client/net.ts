@@ -1,53 +1,15 @@
 import { Room } from "../server/room";
 import { TICK_HZ } from "../shared/constants";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
-import { parseSave, type SaveData } from "../shared/save";
 
-export type ConnectionKind = "attract" | "solo" | "online";
+export type ConnectionKind = "attract" | "online";
 
 export interface Connection {
   readonly kind: ConnectionKind;
   send(msg: ClientMsg): void;
   close(): void;
-  /* Rooms in this tab can freeze (paused, or scrolled away); online ones keep going. */
+  /* The title screen's room can freeze while it's out of sight; the online one keeps going. */
   setPaused(paused: boolean): void;
-}
-
-/* ---------- the island, kept in this browser ---------- */
-
-const SAVE_KEY = "rising-tide:island";
-/* Save at least this often while playing, and this soon after anything worth keeping. */
-const AUTOSAVE = 20;
-const SOON = 1.5;
-
-/* The saved island, or null if there isn't one (or it can't be read, or doesn't make sense). */
-export function loadSave(): SaveData | null {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const save = parseSave(JSON.parse(raw));
-    if (!save) console.warn("Rising Tide: ignoring a damaged or outdated save; starting fresh.");
-    return save;
-  } catch {
-    return null;
-  }
-}
-
-function writeSave(save: SaveData) {
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function clearSave() {
-  try {
-    localStorage.removeItem(SAVE_KEY);
-  } catch {
-    /* Storage unavailable: nothing to clear. */
-  }
 }
 
 type Handlers = {
@@ -56,11 +18,12 @@ type Handlers = {
 };
 
 /*
- * A room that lives in this tab. Messages are cloned on the way through so the
- * client can never reach into the room's state, exactly as if it were remote.
- * Solo keeps the island in localStorage; the idle background only reads it.
+ * The title screen: a quiet room in this tab with one island and nobody on
+ * it, watched from a slow orbit. Messages are cloned on the way through, as
+ * if it were remote.
  */
 export class LocalConnection implements Connection {
+  readonly kind = "attract" as const;
   private room: Room;
   private id = -1;
   private timer: ReturnType<typeof setInterval>;
@@ -68,47 +31,20 @@ export class LocalConnection implements Connection {
   private clock = 0;
   private last = performance.now();
   private closed = false;
-  private sinceSave = 0;
-  private sinceSoon = 0;
-  private saveOnHide = () => {
-    if (document.visibilityState === "hidden") this.save();
-  };
-  private saveNow = () => this.save();
 
   constructor(
-    readonly kind: "attract" | "solo",
     private handlers: Handlers,
-    /* With no save (or a fresh start), the island to make. */
-    opts: { seed?: number; fresh?: boolean } = {},
+    opts: { seed?: number } = {},
   ) {
-    /* The room runs on its own clock so that pausing solo really stops time. */
-    this.room = new Room({
-      online: false,
-      now: () => this.clock,
-      maxHumans: 1,
-      seed: opts.seed,
-      save: opts.fresh ? null : loadSave(),
-    });
+    /* The room runs on its own clock so that pausing really stops time. */
+    this.room = new Room({ online: false, now: () => this.clock, maxHumans: 0, seed: opts.seed });
     const peer = {
       send: (msg: ServerMsg) => {
         if (!this.closed) this.handlers.message(structuredClone(msg));
       },
     };
-    this.id = this.room.join(peer, { spectate: kind === "attract" });
+    this.id = this.room.join(peer, { spectate: true });
     this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
-    if (kind === "solo") {
-      document.addEventListener("visibilitychange", this.saveOnHide);
-      window.addEventListener("pagehide", this.saveNow);
-      this.save();
-    }
-  }
-
-  /* Write the island down (solo only). */
-  save() {
-    if (this.kind !== "solo" || this.closed) return;
-    this.sinceSave = 0;
-    this.room.saveSoon = false;
-    writeSave(this.room.exportSave());
   }
 
   private tick() {
@@ -118,28 +54,49 @@ export class LocalConnection implements Connection {
     if (this.paused) return;
     this.clock += dt;
     this.room.tick();
-    this.sinceSave += dt;
-    this.sinceSoon = this.room.saveSoon ? this.sinceSoon + dt : 0;
-    if (this.sinceSave > AUTOSAVE || this.sinceSoon > SOON) this.save();
   }
 
-  send(msg: ClientMsg) {
-    if (this.closed || msg.t === "hello") return;
-    this.room.handle(this.id, structuredClone(msg));
-  }
+  send() {}
 
   setPaused(paused: boolean) {
-    if (paused && !this.paused) this.save();
     this.paused = paused;
   }
 
   close() {
-    this.save();
-    document.removeEventListener("visibilitychange", this.saveOnHide);
-    window.removeEventListener("pagehide", this.saveNow);
     this.closed = true;
     clearInterval(this.timer);
     this.room.leave(this.id);
+  }
+}
+
+/* ---------- who you are online ---------- */
+
+const TOKEN_KEY = "farshore:player";
+
+/*
+ * Your online identity is a token the server hands out. This tab keeps its own
+ * (sessionStorage, so it survives a reload); a fresh tab borrows the browser's
+ * (localStorage). If that one is already playing in another tab, the server
+ * makes this tab a new player, so two tabs are two players.
+ */
+function readToken(): { token?: string; own: boolean } {
+  try {
+    const own = sessionStorage.getItem(TOKEN_KEY);
+    if (own) return { token: own, own: true };
+    const shared = localStorage.getItem(TOKEN_KEY);
+    if (shared) return { token: shared, own: false };
+  } catch {
+    /* Storage unavailable: a new player every time. */
+  }
+  return { own: false };
+}
+
+function keepToken(token: string) {
+  try {
+    sessionStorage.setItem(TOKEN_KEY, token);
+    if (!localStorage.getItem(TOKEN_KEY)) localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* Storage unavailable. */
   }
 }
 
@@ -157,18 +114,6 @@ function wsUrl(base: string, path: string) {
   return url.toString();
 }
 
-export async function fetchStatus(): Promise<{ humans: number } | null> {
-  const base = serverBase();
-  if (!base) return null;
-  try {
-    const res = await fetch(`${base}/party-status`, { signal: AbortSignal.timeout(2500) });
-    if (!res.ok) return null;
-    return (await res.json()) as { humans: number };
-  } catch {
-    return null;
-  }
-}
-
 export class WsConnection implements Connection {
   readonly kind = "online" as const;
   private ws: WebSocket;
@@ -183,16 +128,19 @@ export class WsConnection implements Connection {
     this.ws = new WebSocket(wsUrl(base, "party/public"));
     this.ws.onopen = () => {
       this.open = true;
-      this.ws.send(JSON.stringify({ t: "hello" } satisfies ClientMsg));
+      this.ws.send(JSON.stringify({ t: "hello", ...readToken() } satisfies ClientMsg));
       for (const msg of this.queue) this.ws.send(JSON.stringify(msg));
       this.queue = [];
     };
     this.ws.onmessage = (event) => {
+      let msg: ServerMsg;
       try {
-        this.handlers.message(JSON.parse(event.data as string) as ServerMsg);
+        msg = JSON.parse(event.data as string) as ServerMsg;
       } catch {
-        /* ignore malformed frames */
+        return; /* ignore malformed frames */
       }
+      if (msg.t === "welcome" && msg.token) keepToken(msg.token);
+      this.handlers.message(msg);
     };
     this.ws.onclose = () => this.finish(this.open ? "Connection lost" : "Server unreachable");
     this.ws.onerror = () => this.finish("Server unreachable");

@@ -294,7 +294,8 @@ export class TideAudio {
     setTimeout(() => this.tone(52, 38, 0.28, 0.01, 0.16), 170);
   }
 
-  drowned() {
+  /* Blacking out. */
+  blackout() {
     this.tone(220, 55, 0.25, 0.05, 2.2, "triangle");
     this.splash(1.4);
   }

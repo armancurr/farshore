@@ -1,12 +1,15 @@
-/* World */
-export const WORLD_SIZE = 760; // metres, square
+/* One island: a square tile of land and sea. */
+export const TILE_SIZE = 760; // metres, square
 export const GRID = 305; // height samples per side (2.5 m apart)
 export const ISLAND_RADIUS = 300;
 export const MAX_HEIGHT = 46;
 export const CONTOUR = 2.5; // metres between contour lines
 export const SEA_FLOOR = -14;
 export const SEA_LEVEL = 0;
-export const BOUNDARY = WORLD_SIZE / 2 - 6;
+/* The grand map: open sea that every player's island sits in. */
+export const GRAND_SIZE = 3800; // metres, square: room for 5 x 5 tiles
+export const MAX_ISLANDS = 16;
+export const BOUNDARY = GRAND_SIZE / 2 - 6;
 
 /* Room */
 export const MAX_PLAYERS = 8;
@@ -27,20 +30,19 @@ export const JUMP_SPEED = 8.3; // ~1.45 m of lift
 export const STEEP_NY = 0.66; // ground steeper than this slides you down
 export const SLIDE_ACCEL = 20;
 
+/* Creative: fly anywhere, fast, and nothing hurts you. */
+export const FLY_SPEED = 22;
+export const FLY_BOOST = 85; // double-tap W
+export const FLY_CLIMB = 16; // up and down
+export const FLY_CEILING = 320; // metres above the sea
+
 export const STAMINA_MAX = 100;
 export const SPRINT_DRAIN = 20;
 export const STAMINA_REGEN = 15;
 export const JUMP_COST = 10;
 
-/* Breath: wading chills you slowly, going under drowns you fast. */
-export const BREATH_MAX = 100;
-export const BREATH_WADE = 7;
-export const BREATH_UNDER = 30;
-export const BREATH_REGEN = 14;
-
-/* Health: drowning, falls and animals wear it down; it comes back slowly once you're safe. */
+/* Health: falls and animals wear it down; it comes back slowly once you're safe. The sea never does. */
 export const HEALTH_MAX = 100;
-export const DROWN_DAMAGE = 14; // per second with no breath left
 export const FALL_SAFE_SPEED = 13; // m/s at impact, about a 3.5 m drop
 export const FALL_DAMAGE = 7; // per m/s beyond that
 export const HEALTH_REGEN = 1.2; // per second

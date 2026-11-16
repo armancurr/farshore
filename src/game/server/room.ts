@@ -1,17 +1,12 @@
 import {
   BOUNDARY,
-  BREATH_MAX,
-  BREATH_REGEN,
-  BREATH_UNDER,
-  BREATH_WADE,
-  DROWN_DAMAGE,
   FALL_DAMAGE,
   FALL_SAFE_SPEED,
+  FLY_CEILING,
   HEALTH_MAX,
   HEALTH_REGEN,
   ISLAND_RADIUS,
   MAX_PLAYERS,
-  PLAYER_HEIGHT,
   REGEN_DELAY,
   RESPAWN_DELAY,
   SEA_FLOOR,
@@ -75,9 +70,16 @@ import {
   type Prefab,
   prefabBlocks,
 } from "../shared/prefabs";
-import { SAVE_VERSION, type SaveData, type SavedPlayer } from "../shared/save";
+import { Archipelago } from "../shared/archipelago";
+import { type IslandInfo, placementProblem, type ShapeId } from "../shared/islands";
+import {
+  type SavedPlayer,
+  type SavedProfile,
+  WORLD_SAVE_VERSION,
+  type WorldSave,
+} from "../shared/save";
 import { SHOP_REACH, shopEntry } from "../shared/shop";
-import { blockSolid, overSolid, Terrain } from "../shared/terrain";
+import { blockSolid, overSolid } from "../shared/terrain";
 import {
   COMBO_WINDOW,
   knockScale,
@@ -95,17 +97,25 @@ import { Herd, type Prey } from "./animals";
 
 export interface Peer {
   send(msg: ServerMsg): void;
+  /* Hang up: someone else has taken over this player (the same tab, reloaded). */
+  close?(): void;
 }
+
+/* Someone who's been here, connected or not. */
+type Profile = SavedProfile;
 
 type Member = {
   id: number;
   name: string;
   peer: Peer;
   spectator: boolean; // joined only to watch
+  /* Online: who this is across visits, and their island. */
+  profile: Profile | null;
+  /* In the world with a body. Online, that's once you've settled an island. */
+  placed: boolean;
   body: Body;
   pitch: number;
   flags: number;
-  breath: number;
   health: number;
   lastHurtAt: number;
   /* Falling speed from the last airborne report, for landing damage. */
@@ -157,8 +167,15 @@ export type RoomOptions = {
   now?: () => number;
   maxHumans?: number;
   seed?: number;
-  /* An island to pick up where it was left. */
-  save?: SaveData | null;
+  /*
+   * The game: the grand map, where everyone settles an island of their own.
+   * Otherwise (the title screen) there's one island in the middle to look at.
+   */
+  settle?: boolean;
+  /* The grand map as it was left (online). */
+  world?: WorldSave | null;
+  /* The grand map changed in a way worth keeping: the host should store exportWorld(). */
+  onChange?: () => void;
 };
 
 /* Points round a body's centre, to test whether it fits somewhere. */
@@ -175,16 +192,18 @@ const GROUND_WEAPONS = 8;
 const WEAPON_RESPAWN = 45;
 
 /*
- * The island. Transport-agnostic: the Cloudflare Durable Object, the Vite dev
- * server and the in-browser solo mode all drive this same class. The room
+ * The world. Transport-agnostic: the Cloudflare Durable Object and the Vite dev
+ * server run the game with it, and the title screen runs a quiet one in the tab. The room
  * runs the world and everything in it; each human reports their own movement
  * and asks for everything else.
  */
 export class Room {
   private members = new Map<number, Member>();
   private nextId = 1;
-  private readonly terrain: Terrain;
+  private readonly world: Archipelago;
   private readonly seed: number;
+  private profiles = new Map<string, Profile>();
+  private islandId = 1;
   /* World clock in seconds; it only advances while the room ticks. */
   private time = 0;
   private lastTick: number | null = null;
@@ -200,10 +219,6 @@ export class Room {
   private posted = new Map<number, number>();
   private prefabs = new Map<number, Prefab>();
   private boatSpeed = new Map<number, number>();
-  /* The saved player, waiting for the first person to arrive. */
-  private returning: SavedPlayer | null = null;
-  /* Something happened that would hurt to lose: the host should save soon. */
-  saveSoon = false;
   private prefabId = 1;
   private bountyId = 1;
   private prey: Prey[] = [];
@@ -213,14 +228,22 @@ export class Room {
   constructor(private readonly opts: RoomOptions) {
     this.now = opts.now ?? (() => Date.now() / 1000);
     this.rng = mulberry32((Math.random() * 2 ** 32) >>> 0);
-    const save = opts.save ?? null;
-    this.seed = save?.seed ?? opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
-    this.terrain = new Terrain(this.seed);
-    const t = this.terrain;
-    if (FEATURES.animals)
+    this.seed = opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
+    this.world = new Archipelago();
+    if (opts.settle) {
+      const w = opts.world;
+      if (w) {
+        for (const info of w.islands) this.world.add(info);
+        for (const p of w.players) this.profiles.set(p.token, structuredClone(p));
+        this.islandId = w.ids.island;
+        this.toolId = w.ids.tool;
+      }
+    } else this.world.add({ id: 0, shape: "headland", seed: this.seed, x: 0, z: 0, name: "" });
+    const t = this.world.primary;
+    if (FEATURES.animals && t)
       this.herd = new Herd(
         {
-          terrain: t,
+          terrain: this.world,
           rng: this.rng,
           gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
           blocked: (id) => {
@@ -235,7 +258,6 @@ export class Room {
           { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
         ],
       );
-    if (save) this.restore(save);
     this.fillBoard();
     if (FEATURES.weapons)
       for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
@@ -243,43 +265,19 @@ export class Room {
 
   /* ---------- saving ---------- */
 
-  private restore(save: SaveData) {
-    this.time = save.time;
-    this.toolId = save.ids.tool;
-    this.prefabId = save.ids.prefab;
-    this.bountyId = save.ids.bounty;
-    for (const p of save.prefabs) this.build(structuredClone(p));
-    this.board = save.board.map((b) => structuredClone(b));
-    for (const b of this.board) this.posted.set(b.id, this.time);
-    this.returning = save.player ? structuredClone(save.player) : null;
-  }
-
-  /* The island as it stands, with the first player's things, ready to store. */
-  exportSave(): SaveData {
-    const m = [...this.members.values()].find((o) => !o.spectator);
-    let player: SavedPlayer | null = this.returning;
-    if (m) {
-      /* Saved while down: you come back on your feet, where you'd have woken. */
-      const down = m.respawnAt !== null;
-      const at = down ? this.spawnPoint(m) : { ...m.body, yaw: m.body.yaw };
-      player = {
-        x: round2(at.x),
-        y: round2(at.y),
-        z: round2(at.z),
-        yaw: round2(at.yaw),
-        health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
-        inv: structuredClone(m.inv),
-        boat: down ? null : m.boat,
-      };
-    }
+  /* Where someone is and what they carry, ready to store. */
+  private playerState(m: Member): SavedPlayer {
+    /* Saved while down: you come back on your feet, where you'd have woken. */
+    const down = m.respawnAt !== null;
+    const at = down ? this.spawnPoint(m) : { ...m.body, yaw: m.body.yaw };
     return {
-      v: SAVE_VERSION,
-      seed: this.seed,
-      time: round2(this.time),
-      prefabs: [...this.prefabs.values()].map((p) => structuredClone(p)),
-      board: this.board.map((b) => structuredClone(b)),
-      player,
-      ids: { tool: this.toolId, prefab: this.prefabId, bounty: this.bountyId },
+      x: round2(at.x),
+      y: round2(at.y),
+      z: round2(at.z),
+      yaw: round2(at.yaw),
+      health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
+      inv: structuredClone(m.inv),
+      boat: down ? null : m.boat,
     };
   }
 
@@ -301,8 +299,8 @@ export class Room {
       return;
     }
     /* Never inside something that was built over the spot, or underground. */
-    const { ground } = this.terrain.groundAt(saved.x, saved.z, saved.y + 0.3);
-    const inside = this.terrain
+    const { ground } = this.world.groundAt(saved.x, saved.z, saved.y + 0.3);
+    const inside = this.world
       .solidsNear(saved.x, saved.z)
       .some(
         (o) => o.top > ground + 0.6 && o.bottom < ground + 1.7 && overSolid(o, saved.x, saved.z),
@@ -319,23 +317,58 @@ export class Room {
     return n;
   }
 
-  join(peer: Peer, hello: { spectate?: boolean } = {}) {
+  /* In the world with a body: not just watching, and (online) settled. */
+  private present(m: Member) {
+    return !m.spectator && m.placed;
+  }
+
+  /*
+   * Who's arriving, by the token they bring. A token this tab owns takes over
+   * a connection still holding it (the tab was reloaded); one borrowed from
+   * another tab that's still connected gets a new identity instead, so two
+   * tabs in one browser are two players.
+   */
+  private claim(token: string | undefined, own: boolean): Profile {
+    const known = token ? this.profiles.get(token) : undefined;
+    if (known) {
+      const using = [...this.members.values()].find((o) => o.profile === known);
+      if (!using) return known;
+      if (own) {
+        this.leave(using.id);
+        using.peer.close?.();
+        return known;
+      }
+    }
+    const fresh: Profile = {
+      token: token && !known ? token : crypto.randomUUID(),
+      name: randomName(Math.random),
+      island: null,
+      saved: null,
+    };
+    this.profiles.set(fresh.token, fresh);
+    return fresh;
+  }
+
+  join(peer: Peer, hello: { spectate?: boolean; token?: string; own?: boolean } = {}) {
     const spectator = !!hello.spectate;
+    const profile = this.opts.settle && !spectator ? this.claim(hello.token, !!hello.own) : null;
     if (!spectator && this.humans() >= (this.opts.maxHumans ?? MAX_PLAYERS)) {
       peer.send({ t: "full" });
       return -1;
     }
     const id = this.nextId++;
-    const h = this.terrain.home;
+    const placed = !spectator && (!this.opts.settle || profile?.island != null);
+    const h = this.homeFor(profile);
     const member: Member = {
       id,
-      name: randomName(Math.random),
+      name: profile?.name ?? randomName(Math.random),
       peer,
       spectator,
+      profile,
+      placed,
       body: createBody(h.x, h.y, h.z, h.yaw),
       pitch: 0,
       flags: 0,
-      breath: BREATH_MAX,
       health: HEALTH_MAX,
       lastHurtAt: -1e9,
       airVy: 0,
@@ -354,12 +387,18 @@ export class Room {
       blockSince: 0,
       charging: false,
     };
-    if (!spectator && this.returning) {
-      this.welcomeBack(member, this.returning);
-      this.returning = null;
+    if (placed && profile?.saved) {
+      this.welcomeBack(member, profile.saved);
+      profile.saved = null;
     } else if (!spectator) this.giveTool(member, "rod", 2);
     this.members.set(id, member);
-    peer.send({ t: "welcome", id, name: member.name, online: this.opts.online });
+    peer.send({
+      t: "welcome",
+      id,
+      name: member.name,
+      online: this.opts.online,
+      token: profile?.token ?? null,
+    });
     peer.send({ t: "world", ...this.worldInfo(member) });
     if (member.boat !== null) peer.send({ t: "aboard", boat: member.boat });
     if (!spectator) {
@@ -373,6 +412,13 @@ export class Room {
   leave(id: number) {
     const m = this.members.get(id);
     if (!m) return;
+    /* Online, your island keeps your place: you come back where you left off. */
+    if (m.profile && m.placed) {
+      m.profile.saved = this.playerState(m);
+      /* A rowboat may have been taken apart by the time you're back. */
+      m.profile.saved.boat = null;
+      this.opts.onChange?.();
+    }
     m.boat = null;
     this.members.delete(id);
     if (!m.spectator) {
@@ -383,9 +429,74 @@ export class Room {
 
   handle(id: number, msg: ClientMsg) {
     const m = this.members.get(id);
-    if (!m || m.spectator || m.respawnAt !== null) return;
+    if (!m || m.spectator) return;
+    if (msg.t === "settle") {
+      this.settle(m, msg.shape, msg.seed, msg.x, msg.z);
+      return;
+    }
+    if (!m.placed || m.respawnAt !== null) return;
     this.apply(m, msg);
     this.flush(m);
+  }
+
+  /* ---------- the grand map ---------- */
+
+  /* Put a new island on the map for someone who hasn't got one, and wake them up on it. */
+  private settle(m: Member, shape: ShapeId, seed: number, x: number, z: number) {
+    const p = m.profile;
+    if (!p || m.placed || p.island !== null) {
+      m.peer.send({ t: "unsettled", reason: "You already have an island" });
+      return;
+    }
+    const at = { x: round2(x), z: round2(z) };
+    const problem = placementProblem(this.world.list(), at.x, at.z);
+    if (problem) {
+      m.peer.send({ t: "unsettled", reason: problem });
+      return;
+    }
+    const info: IslandInfo = { id: this.islandId++, shape, seed: seed >>> 0, ...at, name: m.name };
+    this.world.add(info);
+    p.island = info.id;
+    m.placed = true;
+    const h = this.homeFor(p);
+    m.body = createBody(h.x, h.y, h.z, h.yaw);
+    m.health = HEALTH_MAX;
+    m.airVy = 0;
+    this.broadcast({ t: "island", island: info });
+    m.peer.send({ t: "world", ...this.worldInfo(m) });
+    this.feed(`${m.name} settled a new island`);
+    this.opts.onChange?.();
+  }
+
+  /* Where someone wakes up with no bed: on their own island, or the only one there is. */
+  private homeFor(p: Profile | null): Spawn {
+    const own = p?.island == null ? null : this.world.islands.get(p.island)?.terrain;
+    const h = (own ?? this.world.primary)?.home ?? { x: 0, y: 0, z: 0, yaw: 0 };
+    return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
+  }
+
+  private keptState(m: Member): SavedPlayer {
+    const state = this.playerState(m);
+    state.boat = null;
+    return state;
+  }
+
+  /* The grand map and everyone who's been on it, ready to store. */
+  exportWorld(): WorldSave {
+    const live = new Map<Profile, Member>();
+    for (const m of this.members.values()) if (m.profile && m.placed) live.set(m.profile, m);
+    return {
+      v: WORLD_SAVE_VERSION,
+      islands: this.world.list(),
+      players: [...this.profiles.values()].map((p) => {
+        const m = live.get(p);
+        return {
+          ...structuredClone(p),
+          saved: m ? this.keptState(m) : p.saved,
+        };
+      }),
+      ids: { island: this.islandId, tool: this.toolId },
+    };
   }
 
   private apply(m: Member, msg: ClientMsg) {
@@ -396,12 +507,13 @@ export class Room {
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
-        m.body.y = clamp(msg.y, SEA_FLOOR - 20, this.terrain.peak + 30);
+        const creative = (msg.flags & FLAG.creative) !== 0;
+        m.body.y = clamp(msg.y, SEA_FLOOR - 20, creative ? FLY_CEILING + 5 : this.world.peak + 30);
         m.body.z = clamp(msg.z, -BOUNDARY, BOUNDARY);
         m.body.vx = msg.vx;
         m.body.vy = msg.vy;
         m.body.vz = msg.vz;
-        m.flags = msg.flags & (FLAG.sprint | FLAG.grounded | FLAG.wet);
+        m.flags = msg.flags & (FLAG.sprint | FLAG.grounded | FLAG.wet | FLAG.fly | FLAG.creative);
         return;
       }
       case "attack":
@@ -550,9 +662,11 @@ export class Room {
 
   private buy(m: Member, id: string) {
     const entry = shopEntry(id);
-    const s = this.terrain.shop;
+    const s = this.world.primary?.shop;
     const near =
-      Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH && Math.abs(s.y - m.body.y) < 3;
+      !!s &&
+      Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH &&
+      Math.abs(s.y - m.body.y) < 3;
     if (!FEATURES.shop || !entry || !near || m.inv.coins < entry.price) return;
     if ("tool" in entry.give) {
       if (!this.giveTool(m, entry.give.tool, 1)) {
@@ -562,7 +676,6 @@ export class Room {
     } else this.addItem(m, entry.give.kit);
     m.inv.coins -= entry.price;
     m.invDirty = true;
-    this.saveSoon = true;
   }
 
   private build(p: Prefab) {
@@ -570,7 +683,7 @@ export class Room {
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
       .map(blockSolid);
-    if (solids.length) this.terrain.addSolids(p.id, solids);
+    if (solids.length) this.world.addSolids(p.id, solids);
   }
 
   private place(m: Member, kind: Prefab["kind"], x: number, z: number, rot: number) {
@@ -579,7 +692,7 @@ export class Room {
       m.peer.send({ t: "feed", text: "The island can't hold any more" });
       return;
     }
-    const v = checkPlacement(this.terrain, kind, x, z, rot, m.body);
+    const v = checkPlacement(this.world, kind, x, z, rot, m.body);
     if (!v.ok) return;
     const p: Prefab = {
       id: this.prefabId++,
@@ -593,7 +706,6 @@ export class Room {
     this.build(p);
     this.addItem(m, kind, -1);
     if (kind === "bed") m.inv.bed = p.id;
-    this.saveSoon = true;
     this.broadcast({ t: "prefab", prefab: p });
   }
 
@@ -602,7 +714,7 @@ export class Room {
     const p = this.prefabs.get(id);
     if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
     this.prefabs.delete(id);
-    this.terrain.removeSolids(id);
+    this.world.removeSolids(id);
     this.addItem(m, p.kind, 1);
     for (const [item, n] of Object.entries(p.store ?? {}) as [ItemId, number][])
       this.addItem(m, item, n);
@@ -612,7 +724,6 @@ export class Room {
         o.invDirty = true;
       }
     }
-    this.saveSoon = true;
     this.broadcast({ t: "unprefab", id });
   }
 
@@ -658,7 +769,7 @@ export class Room {
     const cx = x - SEAT.lz * Math.sin(b.rot);
     const cz = z - SEAT.lz * Math.cos(b.rot);
     const step = Math.hypot(cx - p.x, cz - p.z);
-    if (step > 4 || this.terrain.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
+    if (step > 4 || this.world.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
     p.x = round2(cx);
     p.z = round2(cz);
     p.rot = round2(b.rot);
@@ -699,7 +810,8 @@ export class Room {
   /* ---------- bounties ---------- */
 
   private nearBoard(m: Member) {
-    const b = this.terrain.board;
+    const b = this.world.primary?.board;
+    if (!b) return false;
     return Math.hypot(b.x - m.body.x, b.z - m.body.z) < BOARD_REACH && Math.abs(b.y - m.body.y) < 3;
   }
 
@@ -750,7 +862,6 @@ export class Room {
     m.inv.coins += b.reward;
     m.inv.bounty = null;
     m.invDirty = true;
-    this.saveSoon = true;
     m.peer.send({ t: "paid", bounty: b });
   }
 
@@ -765,7 +876,7 @@ export class Room {
     const rod = this.rodOf(m);
     if (!rod || m.line) return;
     const reach = Math.hypot(x - m.body.x, z - m.body.z);
-    const depth = depthAt(this.terrain.heightAt(x, z));
+    const depth = depthAt(this.world.heightAt(x, z));
     /* Standing (or sitting) above the water, casting a fair distance into enough of it. */
     if (reach > rod.cast + 1.5 || reach < 1.5 || depth < MIN_CAST_DEPTH) return;
     if (SEA_LEVEL - m.body.y > 1.2) return;
@@ -813,7 +924,6 @@ export class Room {
     m.line = null;
     if (fish) {
       this.addItem(m, fish);
-      this.saveSoon = true;
     }
     this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "none" });
     this.broadcast({ t: "catch", by: m.id, fish });
@@ -861,25 +971,13 @@ export class Room {
     this.herd?.tick(now, dt, this.preyList());
 
     for (const m of this.members.values()) {
-      if (m.spectator) continue;
-      const depth = SEA_LEVEL - m.body.y;
-      /* Under: drowning. Swimming: the cold. Paddling: a slow chill. Dry: recovering. */
-      const rate =
-        depth > PLAYER_HEIGHT - 0.25
-          ? -BREATH_UNDER
-          : depth > 0.9
-            ? -BREATH_WADE
-            : depth > 0
-              ? -BREATH_WADE * 0.35
-              : BREATH_REGEN;
-      m.breath = clamp(m.breath + rate * dt, 0, BREATH_MAX);
+      if (!this.present(m)) continue;
       if (m.respawnAt !== null) {
         if (now >= m.respawnAt) this.respawn(m);
         continue;
       }
 
-      if (m.breath <= 0) this.hurt(m, DROWN_DAMAGE * dt, "drowned");
-      else if (m.health < HEALTH_MAX) {
+      if (m.health < HEALTH_MAX) {
         /* A campfire warms you back quickly; otherwise it takes a while. */
         const warm = this.nearCampfire(m);
         const quiet = now - m.lastHurtAt;
@@ -893,7 +991,8 @@ export class Room {
       if (now - m.lastHitAt > STAGGER_GRACE)
         m.stagger = Math.max(0, m.stagger - STAGGER_RECOVER * dt);
 
-      if (m.body.y < SEA_FLOOR - 8) this.hurt(m, HEALTH_MAX, "drowned");
+      /* The sea is safe now; only a glitch through the floor sends you home, unhurt. */
+      if (m.body.y < SEA_FLOOR - 8) this.respawn(m);
     }
 
     this.refreshBoard();
@@ -912,7 +1011,7 @@ export class Room {
   private preyList() {
     this.prey.length = 0;
     for (const m of this.members.values()) {
-      if (m.spectator) continue;
+      if (!this.present(m)) continue;
       this.prey.push(this.asPrey(m));
     }
     return this.prey;
@@ -927,7 +1026,8 @@ export class Room {
       yaw: m.body.yaw,
       running: (m.flags & FLAG.sprint) !== 0,
       blocking: m.blocking && this.weaponOf(m) === "shield",
-      away: m.respawnAt !== null || m.boat !== null,
+      /* Boars leave alone anyone in a boat, down, or in creative. */
+      away: m.respawnAt !== null || m.boat !== null || (m.flags & FLAG.creative) !== 0,
     };
   }
 
@@ -948,8 +1048,8 @@ export class Room {
       for (const side of [1, -1]) {
         const x = bed.x + side * 0.95 * c;
         const z = bed.z - side * 0.95 * s;
-        const { ground } = this.terrain.groundAt(x, z, bed.y + 0.3);
-        const blocked = this.terrain
+        const { ground } = this.world.groundAt(x, z, bed.y + 0.3);
+        const blocked = this.world
           .solidsNear(x, z)
           .some(
             (o) =>
@@ -961,17 +1061,17 @@ export class Room {
       }
       return { x: bed.x, y: bed.y + 0.45, z: bed.z, yaw: bed.rot };
     }
-    const h = this.terrain.home;
-    return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
+    return this.homeFor(m.profile);
   }
 
   /* Damage from any source. At zero you black out, and wake up somewhere safe. */
   private hurt(m: Member, amount: number, cause: HurtCause) {
     if (m.respawnAt !== null || amount <= 0) return;
+    /* Nothing hurts you in creative. */
+    if (m.flags & FLAG.creative) return;
     m.health = Math.max(0, m.health - amount);
     m.lastHurtAt = this.now();
-    /* Drowning ticks every frame; only report the bigger knocks. */
-    if (cause !== "drowned") m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
+    m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
     if (m.health > 0) return;
     m.respawnAt = this.now() + RESPAWN_DELAY;
     this.reelIn(m);
@@ -986,6 +1086,11 @@ export class Room {
 
   /* Hitting the ground hard hurts; landing in water doesn't. */
   private landing(m: Member, vy: number, flags: number) {
+    /* In creative (or coming down from it) no fall counts. */
+    if (flags & FLAG.creative) {
+      m.airVy = 0;
+      return;
+    }
     const grounded = (flags & FLAG.grounded) !== 0;
     if (!grounded) {
       m.airVy = vy;
@@ -1003,7 +1108,6 @@ export class Room {
     m.respawnAt = null;
     m.health = HEALTH_MAX;
     m.airVy = 0;
-    m.breath = BREATH_MAX;
     m.stagger = 0;
     m.blocking = false;
     m.charging = false;
@@ -1014,7 +1118,8 @@ export class Room {
 
   /* Somewhere dry and open for a weapon: on the ground, or up on a structure. */
   private weaponSpot() {
-    const terrain = this.terrain;
+    const terrain = this.world.primary;
+    if (!terrain) return null;
     const far = (x: number, z: number) =>
       this.weapons.every((w) => Math.hypot(w.x - x, w.z - z) > 22);
     const perches = terrain.perches;
@@ -1026,8 +1131,8 @@ export class Room {
       }
       const a = this.rng() * Math.PI * 2;
       const d = Math.sqrt(this.rng()) * ISLAND_RADIUS * 0.95;
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
+      const x = terrain.ox + Math.cos(a) * d;
+      const z = terrain.oz + Math.sin(a) * d;
       const h = terrain.heightAt(x, z);
       if (h < 3 || !far(x, z)) continue;
       const { ground } = terrain.groundAt(x, z, h + 0.1);
@@ -1149,7 +1254,7 @@ export class Room {
       const fz = -Math.cos(p.yaw);
       this.hitAnimals(m, p, now);
       for (const o of this.members.values()) {
-        if (o === m || o.spectator || o.respawnAt !== null) continue;
+        if (o === m || !this.present(o) || o.respawnAt !== null) continue;
         const dx = o.body.x - m.body.x;
         const dz = o.body.z - m.body.z;
         const d = Math.hypot(dx, dz);
@@ -1258,7 +1363,6 @@ export class Room {
       const dead = this.herd.strike(a, this.asPrey(m), damage, now);
       if (dead) {
         this.addItem(m, a.kind);
-        this.saveSoon = true;
       }
       this.broadcast({
         t: "ahit",
@@ -1281,13 +1385,14 @@ export class Room {
 
   private worldInfo(m: Member): WorldInfo {
     return {
-      seed: this.seed,
+      islands: this.world.list(),
+      mine: m.spectator ? null : m.profile ? m.profile.island : (this.world.list()[0]?.id ?? null),
       time: this.time,
       roster: this.roster(),
       weapons: this.weapons,
       board: this.board,
       prefabs: [...this.prefabs.values()],
-      you: m.spectator ? null : { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw },
+      you: this.present(m) ? { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw } : null,
     };
   }
 
@@ -1311,7 +1416,7 @@ export class Room {
   private broadcastSnap(now: number) {
     const p: PlayerSnap[] = [];
     for (const m of this.members.values()) {
-      if (m.spectator) continue;
+      if (!this.present(m)) continue;
       p.push([
         m.id,
         round2(m.body.x),
@@ -1324,7 +1429,6 @@ export class Room {
           (now < m.shoveFlagUntil ? FLAG.shove : 0) |
           (m.blocking ? FLAG.block : 0) |
           (m.charging ? FLAG.charge : 0),
-        Math.round(m.breath),
         weaponIndex(this.weaponOf(m)),
         Math.round(m.stagger),
       ]);
@@ -1349,11 +1453,10 @@ export class Room {
         p,
         a,
         b,
-        me: m.spectator
+        me: !this.present(m)
           ? null
           : {
               health: Math.ceil(m.health),
-              breath: Math.round(m.breath),
               stagger: Math.round(m.stagger),
               dead: m.respawnAt !== null,
             },

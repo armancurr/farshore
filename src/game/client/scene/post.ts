@@ -2,15 +2,14 @@ import * as THREE from "three";
 
 /*
  * The last pass: everything to grey (but the build ghost), a fine ordered dither so gradients break
- * into texture, a vignette, and the moods — underwater murk, a gasping pulse
- * when breath runs low, a white flash when someone shoves you.
+ * into texture, a vignette, and the moods — underwater murk, a white flash
+ * when someone shoves you.
  */
 const FRAGMENT = /* glsl */ `
   uniform sampler2D tScene;
   uniform vec2 uResolution;
   uniform float uTime;
   uniform float uUnder;
-  uniform float uBreath;
   uniform float uFlash;
   uniform float uFade;
   varying vec2 vUv;
@@ -45,11 +44,6 @@ const FRAGMENT = /* glsl */ `
     float r = length(c);
     float vignette = 1.0 - smoothstep(0.45, 1.15, r) * 0.75;
 
-    /* Breath: the edges close in and pulse when you're running out of air. */
-    float gasp = 1.0 - uBreath;
-    float pulse = 0.5 + 0.5 * sin(uTime * (4.0 + gasp * 6.0));
-    float tunnel = smoothstep(0.85 - gasp * 0.55, 0.05, r);
-    l *= mix(1.0, tunnel, gasp * (0.65 + 0.35 * pulse));
     l *= vignette;
 
     l += uFlash * 0.35 * (1.0 - r);
@@ -74,7 +68,6 @@ export class PostPass {
     uResolution: { value: THREE.Vector2 };
     uTime: { value: number };
     uUnder: { value: number };
-    uBreath: { value: number };
     uFlash: { value: number };
     uFade: { value: number };
   };
@@ -90,7 +83,6 @@ export class PostPass {
       uResolution: { value: new THREE.Vector2(1, 1) },
       uTime: { value: 0 },
       uUnder: { value: 0 },
-      uBreath: { value: 1 },
       uFlash: { value: 0 },
       uFade: { value: 1 },
     };
