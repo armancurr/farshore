@@ -58,7 +58,7 @@ import { FishingLines } from "./scene/fishing";
 import { BoatView } from "./scene/boats";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
-import { createTerrainMesh, createWater } from "./scene/land";
+import { createLand } from "./scene/land";
 import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
@@ -165,7 +165,6 @@ export type HudState = {
   /* Weapons on the ground, as screen positions (0..1) or edge arrows. */
   markers: { id: number; x: number; y: number; d: number; off: boolean; angle: number }[];
   target: { name: string; health: number | null } | null;
-  music: boolean;
 };
 
 type Sample = {
@@ -448,11 +447,6 @@ export class Game {
     this.audio.setMuted(muted);
   }
 
-  toggleMusic() {
-    this.audio.setMusic(!this.audio.musicOn);
-    this.emitHud();
-  }
-
   private shouldPause() {
     if (!this.visible || document.hidden) return true;
     /* Solo waits for you when you let go of the mouse. */
@@ -536,8 +530,7 @@ export class Game {
     this.dropWorld();
     const terrain = new Terrain(seed);
     const group = new THREE.Group();
-    group.add(createTerrainMesh(terrain));
-    group.add(createWater(terrain));
+    group.add(...createLand(terrain));
     const props = new WorldProps(terrain);
     group.add(props.group);
     const drops = new WeaponDrops();
@@ -1240,8 +1233,6 @@ export class Game {
       this.orbitCamera(dt);
     }
 
-    if (this.input.take("music")) this.toggleMusic();
-
     const above = this.camera.position.y - SEA_LEVEL;
     this.audio.ambience(above, this.under > 0.5, this.camera.position.y);
   }
@@ -1739,7 +1730,6 @@ export class Game {
     this.feed = this.feed.filter((f) => now - f.at < 7);
     const playing = !!this.body && !this.down;
     const def = weaponDef(this.weapon);
-    this.audio.intensity(this.musicIntensity());
 
     /* Weapons on the ground: on screen, or an arrow at the edge pointing at them. */
     const markers: HudState["markers"] = [];
@@ -1851,21 +1841,6 @@ export class Game {
       prompt,
       markers,
       target,
-      music: this.audio.musicOn,
     });
-  }
-
-  /* How tense the score should be: low breath, low health, danger. */
-  private musicIntensity() {
-    if (this.mode === "attract") return 0.05;
-    if (!this.body || this.down) return 0.15;
-    let danger = 0;
-    for (const a of this.herd.list().values()) {
-      if (a.state !== ANIMAL_STATE.charge && a.state !== ANIMAL_STATE.alert) continue;
-      if (a.kind === "boar" && this.distanceTo(a.x, a.z) < 22) danger = 1;
-    }
-    const breath = clamp(1 - this.breath / 100, 0, 1);
-    const hurt = clamp(1 - this.health / HEALTH_MAX, 0, 1);
-    return clamp(0.12 + breath * 0.4 + hurt * 0.45 + danger * 0.4, 0, 1);
   }
 }

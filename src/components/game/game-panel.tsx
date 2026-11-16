@@ -302,8 +302,8 @@ export function GamePanel(props: { onPress?: () => void }) {
         </div>
       )}
       {/*
-        Above the pause screen, so the card can be read there. Sound and music
-        live on M and N, which the card lists.
+        Above the pause screen, so the card can be read there. Sound lives
+        on M, which the card lists.
       */}
       {playing && (
         <div className="absolute top-5 right-5 z-10 sm:top-6 sm:right-6">

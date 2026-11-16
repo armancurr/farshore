@@ -3,7 +3,7 @@ import { shared } from "./materials";
 
 /*
  * The sky, following the camera. It's always day: one fixed grey, and a large
- * white sun high up, etched with warped contour rings that creep slowly inward.
+ * white sun high up, etched with warped contour rings that ripple out from its centre.
  * Below the horizon the dome is the fog tone, which the far sea fades into;
  * above, it steps straight down to a darker grey, so sea meets sky on a crisp line.
  */
@@ -53,19 +53,19 @@ export class Sky {
           float theta = atan(p.y, p.x);
           float r = ang / SUN_R;
 
-          /* Contour rings, bent unevenly like the island's, drifting inward. */
-          float warp = 0.06 * sin(theta * 3.0 + uTime * 0.11)
-                     + 0.035 * sin(theta * 5.0 - 1.7 + r * 4.0)
-                     + 0.02 * sin(theta * 9.0 + 2.3 - uTime * 0.07);
-          float rings = isoLine(r * (1.0 + warp) * RINGS + uTime * 0.12, 1.6);
-          rings *= smoothstep(0.08, 0.2, r);
+          /* Contour rings, bent unevenly like the island's, born at the centre and rippling out. */
+          float warp = 0.05 * sin(theta * 3.0 + uTime * 0.15)
+                     + 0.03 * sin(theta * 5.0 - 1.7 + r * 3.0 - uTime * 0.1);
+          float rings = isoLine(r * (1.0 + warp) * RINGS - uTime * 0.45, mix(2.4, 1.3, r));
+          rings *= smoothstep(0.0, 0.12, r);
 
           float disc = 1.0 - smoothstep(1.0 - fwidth(r) * 1.5, 1.0, r);
-          float face = 1.0 - rings * 0.5;
+          /* Past white, so it stays blown out through the vignette; the rings cut dark into it. */
+          float face = mix(1.6, 0.28, rings);
 
           /* A tight white corona and a wide, faint haze. */
           float past = max(ang - SUN_R, 0.0);
-          float corona = 0.45 * exp(-past * 16.0) + 0.1 * exp(-past * 3.0);
+          float corona = 0.6 * exp(-past * 14.0) + 0.14 * exp(-past * 3.0);
 
           float c = mix(sky + corona, face, disc);
           gl_FragColor = vec4(vec3(c), 1.0);

@@ -8,8 +8,7 @@ export type Action =
   | "interact"
   | "inventory"
   | "build"
-  | "rotate"
-  | "music";
+  | "rotate";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -50,7 +49,6 @@ export class Input {
       if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
       if (e.code === "KeyB") this.queued.add("build");
       if (e.code === "KeyR") this.queued.add("rotate");
-      if (e.code === "KeyN") this.queued.add("music");
       if (/^Digit[1-9]$/.test(e.code)) this.digit = Number(e.code.slice(5)) - 1;
       if (e.code === "Tab") e.preventDefault();
       if (e.code === "Space") this.queued.add("jump");
