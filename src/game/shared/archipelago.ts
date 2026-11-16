@@ -31,7 +31,12 @@ export class Archipelago implements Ground {
   add(info: IslandInfo): Island {
     const had = this.islands.get(info.id);
     if (had) return had;
-    const terrain = new Terrain(info.seed, info.shape, { x: info.x, z: info.z });
+    const terrain = new Terrain(
+      info.seed,
+      info.shape,
+      { x: info.x, z: info.z },
+      { harbor: info.harbor },
+    );
     const island = { info: { ...info }, terrain };
     this.islands.set(info.id, island);
     this.ladders = [...this.islands.values()].flatMap((o) => o.terrain.ladders);

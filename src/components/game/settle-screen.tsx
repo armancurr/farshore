@@ -14,9 +14,10 @@ const card =
   "rounded-[14px] border border-[#242424] bg-[#121212]/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_24px_48px_-16px_rgba(0,0,0,0.7),0_2px_6px_rgba(0,0,0,0.4)]";
 
 /*
- * Arriving online: the grand map fills the screen, the land you'd bring sits
- * in a bar along the bottom, and your island follows the pointer until you
- * click a stretch of open sea. Other players' islands appear as they settle.
+ * Claiming land of your own, from the Harbor: the grand map fills the screen,
+ * the land you'd bring sits in a bar along the bottom, and your island follows
+ * the pointer until you click a stretch of open sea. Other players' islands
+ * appear as they settle. Free for now; it will cost coins.
  */
 export function SettleScreen(props: {
   game: Game;

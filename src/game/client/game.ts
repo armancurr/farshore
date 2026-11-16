@@ -30,6 +30,7 @@ import {
   type RosterEntry,
   type ServerMsg,
   type Spawn,
+  type TravelTarget,
   type WorldInfo,
 } from "../shared/protocol";
 import {
@@ -45,7 +46,7 @@ import { SHOP, SHOP_REACH } from "../shared/shop";
 import { canWear, type SkinId } from "../shared/skins";
 import { Archipelago } from "../shared/archipelago";
 import { type IslandInfo, type ShapeId } from "../shared/islands";
-import { blockSolid, overSolid, type Solid } from "../shared/terrain";
+import { blockSolid } from "../shared/terrain";
 import {
   emptyInventory,
   HOTBAR,
@@ -59,15 +60,23 @@ import {
   TOOLS,
   type ToolKind,
 } from "../shared/items";
-import { COMBO_WINDOW, WEAPONS, weaponDef, weaponFromIndex } from "../shared/weapons";
+import {
+  COMBO_WINDOW,
+  DAZE_SPEED,
+  type WeaponKind,
+  weaponDef,
+  weaponFromIndex,
+} from "../shared/weapons";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { islandImage, type MapView } from "./map";
 import {
   type Connection,
   keepSkin,
+  keepWeapon,
   LocalConnection,
   readSkin,
+  readWeapon,
   serverBase,
   WsConnection,
 } from "./net";
@@ -81,7 +90,7 @@ import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
 import { Sky } from "./scene/sky";
-import { type RodPose, ViewModel, WeaponDrops } from "./scene/weapons";
+import { type RodPose, ViewModel } from "./scene/weapons";
 
 /* The title screen, or the game: online, on the grand map. */
 export type Mode = "attract" | "online";
@@ -121,9 +130,6 @@ export type ToolView = {
   id: number;
   kind: ToolKind;
   name: string;
-  /* Wear left as 0..1, or null when it never wears out. */
-  wear: number | null;
-  droppable: boolean;
 };
 
 export type InventoryView = {
@@ -140,8 +146,12 @@ type Focus = { kind: InteractKind | "board" | "shop" | "chest"; id: number; labe
 export type HudState = {
   mode: Mode;
   connecting: boolean;
-  /* Online and not yet settled: choosing where your island goes on the grand map. */
+  /* Choosing where your own island goes on the grand map (asked for from the island menu). */
   settling: { error: string | null; pending: boolean; islands: number } | null;
+  /* Standing on the Harbor: common ground, where nobody can be hurt. */
+  sheltered: boolean;
+  /* Online and on your feet: where fast travel can take you, and whether you can claim land. */
+  travel: { home: boolean; onHarbor: boolean; claimable: boolean } | null;
   notice: string | null;
   humans: number;
   name: string;
@@ -177,15 +187,13 @@ export type HudState = {
   /* The open chest's contents. */
   chest: { id: ItemId; name: string; count: number }[] | null;
   build: BuildView | null;
-  /* 0..1 while winding up a hammer or flail. */
+  /* 0..1 while winding up a warhammer or greatsword. */
   charge: number | null;
   blocking: boolean;
   /* Fades from 1 after you land a hit, with what it did. */
   hitMarker: number;
   hitText: string | null;
   prompt: string | null;
-  /* Weapons on the ground, as screen positions (0..1) or edge arrows. */
-  markers: { id: number; x: number; y: number; d: number; off: boolean; angle: number }[];
   target: { name: string; health: number | null } | null;
 };
 
@@ -215,7 +223,6 @@ type World = {
   islands: Map<number, IslandView>;
   group: THREE.Group;
   sea: OpenSea;
-  drops: WeaponDrops;
 };
 
 const STEP = 1 / 60;
@@ -223,9 +230,6 @@ const STEP = 1 / 60;
 /* What bought tools are good for, for the shop. */
 const TOOL_NOTES: Partial<Record<ToolKind, string>> = {
   rod2: "Casts further, bites sooner, a wider strike, and better luck with rare fish.",
-  sword2: "Hits harder than anything you'll find lying about, and never breaks.",
-  spear2: "Long reach, made for deer. Never breaks.",
-  axe2: "The heaviest blow you can buy. Never breaks.",
 };
 const BASE_FOV = 76;
 
@@ -261,8 +265,12 @@ export class Game {
   private myName = "";
   /* Your island on the grand map, once you have one. */
   private mine: number | null = null;
+  /* Choosing where to claim an island of your own. */
+  private claiming = false;
   private settleError: string | null = null;
   private settlePending = false;
+  /* A mace's blow slows you until then (performance seconds). */
+  private dazeUntil = 0;
   private roster: RosterEntry[] = [];
   private body: Body | null = null;
   private health = HEALTH_MAX;
@@ -469,14 +477,63 @@ export class Game {
     this.haveClock = false;
     this.myId = -1;
     this.mine = null;
+    this.claiming = false;
     this.settleError = null;
     this.settlePending = false;
+    this.dazeUntil = 0;
     this.input.clear();
   }
 
-  /* Online, connected, and not on an island yet. */
+  /* Online, connected, without land of your own, and choosing where to claim some. */
   get settling() {
-    return this.mode === "online" && this.myId >= 0 && !!this.world && this.mine === null;
+    return (
+      this.mode === "online" &&
+      this.claiming &&
+      this.myId >= 0 &&
+      !!this.world &&
+      this.mine === null
+    );
+  }
+
+  /* Open the grand map to claim an island of your own (free, for now). */
+  openClaim() {
+    if (this.mode !== "online" || this.mine !== null) return;
+    this.claiming = true;
+    this.settleError = null;
+    this.input.unlock();
+    this.emitHud();
+  }
+
+  /* Back to the Harbor without claiming anything. */
+  closeClaim() {
+    if (!this.claiming) return;
+    this.claiming = false;
+    this.settlePending = false;
+    this.emitHud();
+  }
+
+  /* Fast travel to the Harbor, or home to your own island, and back into the game. */
+  travel(to: TravelTarget) {
+    this.conn?.send({ t: "travel", to });
+    this.lock();
+  }
+
+  /* The weapon you carry: what's in your pack once you're out there, or what this browser chose. */
+  get armedWith(): WeaponKind | null {
+    if (this.body) {
+      const tool = this.inv.tools.find((t) => TOOLS[t.kind].weapon);
+      return tool ? TOOLS[tool.kind].weapon : null;
+    }
+    return readWeapon() ?? null;
+  }
+
+  /*
+   * Take up a weapon from the marketplace (null: put it away). This browser
+   * remembers it, and you arrive carrying it next time.
+   */
+  arm(kind: WeaponKind | null) {
+    keepWeapon(kind);
+    if (this.conn?.kind === "online") this.conn.send({ t: "arm", kind });
   }
 
   /* Ask for your island at (x, z) on the grand map. */
@@ -601,8 +658,6 @@ export class Game {
       o.props.dispose();
       o.group.remove(o.props.group);
     }
-    this.world.drops.dispose();
-    this.world.group.remove(this.world.drops.group);
     disposeTree(this.world.group);
     this.world = null;
   }
@@ -613,8 +668,6 @@ export class Game {
     const group = new THREE.Group();
     const sea = new OpenSea();
     group.add(sea.mesh);
-    const drops = new WeaponDrops();
-    group.add(drops.group);
     this.scene.add(group);
     this.world = {
       seed: null,
@@ -622,7 +675,6 @@ export class Game {
       islands: new Map(),
       group,
       sea,
-      drops,
     };
   }
 
@@ -670,7 +722,11 @@ export class Game {
         this.myId = msg.id;
         this.myName = msg.name;
         this.connecting = false;
-        if (this.mode === "online") this.pushFeed(`You are ${msg.name}`);
+        if (this.mode === "online") {
+          this.pushFeed(`You are ${msg.name}`);
+          if (readWeapon() === undefined)
+            this.pushFeed("Choose a weapon in the marketplace. The Harbor is safe ground");
+        }
         break;
       case "full":
         this.input.unlock();
@@ -721,6 +777,8 @@ export class Game {
         this.endBuild();
         this.boat = null;
         this.down = msg.cause;
+        this.dazeUntil = 0;
+        if (msg.by) this.pushFeed(`${msg.by} knocked you out`);
         this.downAt = performance.now() / 1000;
         this.input.clear();
         this.chargeStart = null;
@@ -730,6 +788,21 @@ export class Game {
         this.place(msg);
         if (this.down) this.pushFeed("You come to, everything you own still with you");
         this.down = null;
+        this.dazeUntil = 0;
+        break;
+      case "warp":
+        this.endBuild();
+        this.boat = null;
+        this.chargeStart = null;
+        this.place(msg);
+        this.claiming = false;
+        this.dazeUntil = 0;
+        this.audio.splash(0.4);
+        this.pushFeed(this.onHarbor() ? "You arrive at the Harbor" : "You arrive home");
+        break;
+      case "daze":
+        this.dazeUntil = performance.now() / 1000 + msg.seconds;
+        this.pushFeed("You're dazed");
         break;
       case "swing":
         if (msg.by !== this.myId) {
@@ -741,17 +814,6 @@ export class Game {
         break;
       case "hit":
         this.onHit(msg);
-        break;
-      case "wspawn":
-        this.world?.drops.add(msg.weapon);
-        break;
-      case "wtake":
-        this.world?.drops.remove(msg.id);
-        if (msg.by === this.myId) {
-          this.chargeStart = null;
-          this.audio.pickup();
-          this.pushFeed(`You picked up the ${WEAPONS[msg.kind].name.toLowerCase()}`);
-        }
         break;
       case "inv":
         this.inv = msg.inv;
@@ -809,13 +871,6 @@ export class Game {
         } else {
           this.audio.slip();
           this.pushFeed("It got away");
-        }
-        break;
-      case "wbreak":
-        if (msg.by === this.myId) {
-          this.chargeStart = null;
-          this.audio.broke();
-          this.pushFeed(`Your ${WEAPONS[msg.kind].name.toLowerCase()} broke`);
         }
         break;
       case "feed":
@@ -1022,8 +1077,6 @@ export class Game {
     if (this.settling) this.input.unlock();
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
-    world.drops.clear();
-    for (const w of info.weapons) world.drops.add(w);
     this.board = info.board;
     for (const p of this.built.list()) world.ground.removeSolids(p.id);
     this.built.reset([]);
@@ -1110,7 +1163,14 @@ export class Game {
     }
     if (msg.by === this.myId) {
       this.hitMarker = 1;
-      this.hitText = msg.parry ? "Parried" : msg.blocked ? "Blocked" : `+${msg.added}%`;
+      /* Health taken when it counts; on the Harbor (or in creative) only the stagger. */
+      this.hitText = msg.parry
+        ? "Parried"
+        : msg.damage > 0
+          ? `-${msg.damage}${msg.blocked ? " · through the shield" : ""}`
+          : msg.blocked
+            ? "Blocked"
+            : `+${msg.added}%`;
       if (msg.blocked || msg.parry) this.audio.clang(msg.parry);
       else this.audio.hit(msg.kind, msg.heavy);
       return;
@@ -1124,38 +1184,6 @@ export class Game {
     else this.audio.hit(msg.kind, msg.heavy, near);
   }
 
-  private foeInReach(b: Body, reach: number) {
-    const fx = -Math.sin(b.yaw);
-    const fz = -Math.cos(b.yaw);
-    for (const r of this.remotes.values()) {
-      if (!r.avatar.group.visible) continue;
-      const p = r.avatar.group.position;
-      const dx = p.x - b.x;
-      const dz = p.z - b.z;
-      const d = Math.hypot(dx, dz);
-      if (d < reach + 0.3 && Math.abs(p.y - b.y) < 2 && (dx * fx + dz * fz) / (d || 1) > 0.4)
-        return true;
-    }
-    return false;
-  }
-
-  /* Is there a wall or cliff right in front, worth a pickaxe? */
-  private wallAhead(b: Body) {
-    const world = this.world;
-    if (!world) return false;
-    const fx = -Math.sin(b.yaw);
-    const fz = -Math.cos(b.yaw);
-    for (const d of [0.65, 1]) {
-      const px = b.x + fx * d;
-      const pz = b.z + fz * d;
-      if (world.ground.heightAt(px, pz) > b.y + 0.8) return true;
-      for (const s of world.ground.solidsNear(px, pz)) {
-        if (s.bottom < b.y + 1.4 && s.top > b.y + 0.9 && overSolid(s, px, pz)) return true;
-      }
-    }
-    return false;
-  }
-
   private tryAttack(b: Body, charge: number) {
     const now = performance.now() / 1000;
     if (now < this.attackReadyAt) return;
@@ -1163,7 +1191,7 @@ export class Game {
     const def = weaponDef(kind);
     this.attackReadyAt = now + def.cooldown;
     let heavy = false;
-    if (kind === "sword") {
+    if (def.combo) {
       this.combo = now - this.lastSwingAt < COMBO_WINDOW ? this.combo + 1 : 1;
       if (this.combo >= 3) {
         heavy = true;
@@ -1171,16 +1199,7 @@ export class Game {
       }
     }
     this.lastSwingAt = now;
-    /* A pickaxe swung at a wall hauls you up it, unless there's someone to hit. */
-    const climb = kind === "pickaxe" && !this.foeInReach(b, def.reach) && this.wallAhead(b);
-    if (climb) {
-      b.vy = Math.max(b.vy, 10.5);
-      b.vx += -Math.sin(b.yaw) * 2.5;
-      b.vz += -Math.cos(b.yaw) * 2.5;
-      b.grounded = false;
-      b.stamina = Math.max(0, b.stamina - 8);
-    }
-    this.conn?.send({ t: "attack", charge, climb });
+    this.conn?.send({ t: "attack", charge });
     this.viewmodel.swing(heavy);
     this.audio.swing(kind, heavy);
     this.kick = kind ? -0.3 : -0.6;
@@ -1209,7 +1228,6 @@ export class Game {
 
     if (this.world) {
       for (const o of this.world.islands.values()) o.props.update(t);
-      this.world.drops.update(t);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
@@ -1296,7 +1314,10 @@ export class Game {
             right: this.input.right,
             jump: tapped || this.input.jumpHeld,
             sprint: this.input.sprint,
-            speedScale: (def.speed ?? 1) * (this.blocking ? 0.6 : 1),
+            speedScale:
+              (def.speed ?? 1) *
+              (this.blocking ? 0.6 : 1) *
+              (performance.now() / 1000 < this.dazeUntil ? DAZE_SPEED : 1),
             noSprint: charging || this.blocking,
           }
         : { forward: 0, right: 0, jump: false, sprint: false };
@@ -1334,7 +1355,7 @@ export class Game {
       const speed = Math.hypot(b.vx, b.vz);
       this.bobAmp = lerp(this.bobAmp, b.grounded ? Math.min(1, speed / 9) : 0, Math.min(1, dt * 8));
 
-      /* Attack: instant swings on press; hammers and flails charge until release. */
+      /* Attack: instant swings on press; the warhammer and greatsword charge until release. */
       const now = performance.now() / 1000;
       const fishing = !!(heldTool(this.inv) && TOOLS[heldTool(this.inv)!.kind].rod);
       if (this.build) this.buildInput(b);
@@ -1513,13 +1534,6 @@ export class Game {
           id: p.id,
           label: "E · Rest (you'll wake here)",
         }));
-    }
-    for (const w of world.drops.list()) {
-      consider(w.x, w.y, w.z, 2.6, () => ({
-        kind: "weapon",
-        id: w.id,
-        label: `E · Pick up the ${WEAPONS[w.kind].name.toLowerCase()}`,
-      }));
     }
     return best;
   }
@@ -1778,10 +1792,6 @@ export class Game {
     this.conn?.send({ t: "equip", tool, slot });
   }
 
-  drop(tool: number) {
-    this.conn?.send({ t: "drop", tool });
-  }
-
   selectSlot(slot: number) {
     if (slot < 0 || slot >= HOTBAR) return;
     this.inv.slot = slot;
@@ -1793,15 +1803,7 @@ export class Game {
   private toolView(id: number | null): ToolView | null {
     const tool = id == null ? null : this.inv.tools.find((t) => t.id === id);
     if (!tool) return null;
-    const def = TOOLS[tool.kind];
-    const max = def.weapon ? weaponDef(def.weapon).uses : 0;
-    return {
-      id: tool.id,
-      kind: tool.kind,
-      name: def.name,
-      wear: tool.uses < 0 || !max ? null : tool.uses / max,
-      droppable: def.droppable,
-    };
+    return { id: tool.id, kind: tool.kind, name: TOOLS[tool.kind].name };
   }
 
   private inventoryView(): InventoryView {
@@ -1944,6 +1946,18 @@ export class Game {
     }
   }
 
+  /* On the Harbor's tile: common ground, where nobody comes to harm. */
+  private onHarbor() {
+    const b = this.body;
+    const world = this.world;
+    if (!b || !world || this.mode !== "online") return false;
+    for (const o of world.islands.values()) {
+      if (!o.info.harbor) continue;
+      if (world.ground.islands.get(o.info.id)?.terrain.contains(b.x, b.z)) return true;
+    }
+    return false;
+  }
+
   /* ---------- HUD ---------- */
 
   private emitHud() {
@@ -1953,28 +1967,6 @@ export class Game {
     const playing = !!this.body && !this.down;
     const def = weaponDef(this.weapon);
 
-    /* Weapons on the ground: on screen, or an arrow at the edge pointing at them. */
-    const markers: HudState["markers"] = [];
-    if (playing && this.world) {
-      const v = this.tmpV;
-      for (const w of this.world.drops.list()) {
-        const d = this.distanceTo(w.x, w.z);
-        if (d > 45) continue;
-        v.set(w.x, w.y + 1.2, w.z).project(this.camera);
-        const behind = v.z > 1;
-        const off = behind || Math.abs(v.x) > 0.94 || Math.abs(v.y) > 0.9;
-        let ax = behind ? -v.x : v.x;
-        let ay = behind ? -v.y : v.y;
-        if (behind && Math.abs(ax) < 0.01 && Math.abs(ay) < 0.01) ay = -1;
-        const angle = Math.atan2(-ay, ax);
-        if (off) {
-          const k = 1 / Math.max(Math.abs(ax) / 0.94, Math.abs(ay) / 0.9, 1e-6);
-          ax *= k;
-          ay *= k;
-        }
-        markers.push({ id: w.id, x: (ax + 1) / 2, y: (1 - ay) / 2, d, off, angle });
-      }
-    }
     /* Whoever's under the crosshair, close enough to hit. */
     let target: HudState["target"] = null;
     if (playing) {
@@ -2019,6 +2011,11 @@ export class Game {
             islands: this.world?.islands.size ?? 0,
           }
         : null,
+      sheltered: playing && this.onHarbor(),
+      travel:
+        this.mode === "online" && playing
+          ? { home: this.mine !== null, onHarbor: this.onHarbor(), claimable: this.mine === null }
+          : null,
       notice: this.notice,
       humans: this.roster.length,
       name: this.myName,
@@ -2070,7 +2067,6 @@ export class Game {
       hitMarker: this.hitMarker,
       hitText: this.hitText,
       prompt,
-      markers,
       target,
     });
   }

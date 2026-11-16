@@ -14,11 +14,12 @@ import {
   type Icon,
   KnifeIcon,
   LightningIcon,
-  LinkSimpleIcon,
+  MoonIcon,
   ShieldIcon,
-  ShovelIcon,
+  StarFourIcon,
   SwordIcon,
   TreasureChestIcon,
+  WavesIcon,
 } from "@phosphor-icons/react";
 import { cn } from "cn";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -29,17 +30,18 @@ import type { KitId, ToolKind } from "../../game/shared/items";
 const TOOL_ICONS: Record<ToolKind, Icon> = {
   rod: FishSimpleIcon,
   rod2: FishSimpleIcon,
-  sword: SwordIcon,
-  sword2: SwordIcon,
-  axe: AxeIcon,
-  axe2: AxeIcon,
-  spear: ArrowUpRightIcon,
-  spear2: ArrowUpRightIcon,
-  hammer: HammerIcon,
-  pickaxe: ShovelIcon,
   daggers: KnifeIcon,
+  sickle: MoonIcon,
+  machete: KnifeIcon,
+  boardaxe: AxeIcon,
+  spear: ArrowUpRightIcon,
+  trident: WavesIcon,
+  mace: StarFourIcon,
+  halberd: AxeIcon,
+  axe: AxeIcon,
+  greatsword: SwordIcon,
+  hammer: HammerIcon,
   shield: ShieldIcon,
-  flail: LinkSimpleIcon,
 };
 
 const KIT_ICONS: Record<KitId, Icon> = {
@@ -160,15 +162,6 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                   >
                     <SlotKey n={i + 1} />
                     {ToolIcon && <ToolIcon size={18} weight="fill" />}
-                    {tool?.wear != null && (
-                      <Progress
-                        aria-label={`${tool.name} wear`}
-                        value={tool.wear * 100}
-                        className="absolute inset-x-1.5 bottom-1"
-                        trackClassName="h-[2px] rounded-full bg-current/15"
-                        indicatorClassName="rounded-full bg-current/60"
-                      />
-                    )}
                   </Button>
                 );
               })}

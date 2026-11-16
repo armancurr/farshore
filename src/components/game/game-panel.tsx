@@ -1,9 +1,12 @@
 import {
+  AnchorIcon,
   ArrowBendDownLeftIcon,
   ArrowClockwiseIcon,
   ArrowUpIcon,
   EnvelopeSimpleIcon,
+  FlagIcon,
   HourglassMediumIcon,
+  HouseLineIcon,
   PlayIcon,
   SignOutIcon,
   StorefrontIcon,
@@ -18,6 +21,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
 import type { Game, HudState, Mode } from "../../game/client/game";
+import type { TravelTarget } from "../../game/shared/protocol";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
 import { Marketplace } from "./marketplace";
@@ -374,7 +378,12 @@ export function GamePanel(props: { onPress?: () => void }) {
       )}
 
       {playing && hud?.settling && game && (
-        <SettleScreen game={game} settling={hud.settling} touch={touch} onLeave={leave} />
+        <SettleScreen
+          game={game}
+          settling={hud.settling}
+          touch={touch}
+          onLeave={() => game.closeClaim()}
+        />
       )}
 
       {playing && mapOpen && hud?.player && game && (
@@ -475,6 +484,12 @@ export function GamePanel(props: { onPress?: () => void }) {
       {menuOpen && (
         <IslandMenu
           reloadKey={reloadKey}
+          travel={hud.travel}
+          onTravel={(to) => game?.travel(to)}
+          onClaim={() => {
+            setMapOpen(false);
+            game?.openClaim();
+          }}
           onBack={() => {
             setReloadKey(null);
             game?.lock();
@@ -497,12 +512,19 @@ export function GamePanel(props: { onPress?: () => void }) {
             <span className={cn(menuText, "text-white/45")}>{hud.humans} online</span>
           )}
           {hud?.settling ? (
-            <Button variant="menu" size="inline" onClick={leave}>
+            <Button variant="menu" size="inline" onClick={() => game?.closeClaim()}>
               Back
               {!touch && <Kbd className={menuKbd}>Esc</Kbd>}
             </Button>
           ) : touch ? (
             <>
+              {hud?.travel && (
+                <TravelLinks
+                  travel={hud.travel}
+                  onTravel={(to) => game?.travel(to)}
+                  onClaim={() => game?.openClaim()}
+                />
+              )}
               {hud?.player && <MarketLink touch onClick={openMarket} />}
               <Button variant="menu" size="inline" onClick={leave}>
                 Leave
@@ -543,11 +565,15 @@ export function GamePanel(props: { onPress?: () => void }) {
  */
 function IslandMenu(props: {
   reloadKey: string | null;
+  travel: HudState["travel"];
+  onTravel: (to: TravelTarget) => void;
+  onClaim: () => void;
   onBack: () => void;
   onLeave: () => void;
   onReload: () => void;
 }) {
   const reload = props.reloadKey;
+  const travel = props.travel;
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-black/45 px-4 backdrop-blur-[6px]">
       <div
@@ -566,6 +592,16 @@ function IslandMenu(props: {
               : "Farshore doesn't pause. The tide and everyone else keep going while you're here."}
           </p>
         </div>
+        {!reload && travel && (
+          <div className="flex flex-col items-start gap-3">
+            <TravelLinks travel={travel} onTravel={props.onTravel} onClaim={props.onClaim} />
+            <p className="font-sans text-xs leading-snug text-white/40">
+              {travel.onHarbor
+                ? "The Harbor is common ground: nobody can be hurt here."
+                : "Out here, weapons hurt. The Harbor is safe ground."}
+            </p>
+          </div>
+        )}
         <div className="flex items-center gap-6">
           <Button variant="menu" size="inline" autoFocus onClick={props.onBack}>
             {reload ? "Stay" : "Back to the island"}
@@ -584,6 +620,40 @@ function IslandMenu(props: {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/*
+ * Getting about: claim land of your own (free, for now), or fast travel
+ * between it and the Harbor. The room refuses mid-fight, and says so.
+ */
+function TravelLinks(props: {
+  travel: NonNullable<HudState["travel"]>;
+  onTravel: (to: TravelTarget) => void;
+  onClaim: () => void;
+}) {
+  const t = props.travel;
+  return (
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+      {t.claimable && (
+        <Button variant="menu" size="inline" onClick={props.onClaim}>
+          Claim an island
+          <FlagIcon size={14} weight="fill" />
+        </Button>
+      )}
+      {t.home && t.onHarbor && (
+        <Button variant="menu" size="inline" onClick={() => props.onTravel("home")}>
+          Travel home
+          <HouseLineIcon size={14} weight="fill" />
+        </Button>
+      )}
+      {!t.onHarbor && (
+        <Button variant="menu" size="inline" onClick={() => props.onTravel("harbor")}>
+          To the Harbor
+          <AnchorIcon size={14} weight="fill" />
+        </Button>
+      )}
     </div>
   );
 }

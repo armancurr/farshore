@@ -5,6 +5,11 @@ import type { WeaponKind } from "../shared/weapons";
  * enveloped sines for thumps.
  * Nothing to download.
  */
+/* How each weapon sounds: big slow whooshes, quick whistles, and blunt thuds. */
+const HEAVY = new Set<WeaponKind>(["hammer", "axe", "greatsword", "halberd", "mace"]);
+const QUICK = new Set<WeaponKind>(["daggers", "sickle", "machete", "spear", "trident"]);
+const BLUNT = new Set<WeaponKind>(["hammer", "mace", "shield"]);
+
 export class TideAudio {
   private ctx: AudioContext | null = null;
   private master!: GainNode;
@@ -302,8 +307,8 @@ export class TideAudio {
 
   /* The whoosh of a swing: heavier weapons are lower and slower. */
   swing(kind: WeaponKind | null, heavy = false) {
-    const low = kind === "hammer" || kind === "axe" || kind === "flail" || heavy;
-    const quick = kind === "daggers" || kind === "spear";
+    const low = heavy || (!!kind && HEAVY.has(kind));
+    const quick = !!kind && QUICK.has(kind);
     this.noiseBurst({
       type: "bandpass",
       freq: low ? 300 : quick ? 1400 : 700,
@@ -319,7 +324,7 @@ export class TideAudio {
   /* Landing a blow: a thud, with a metallic edge for blades. */
   hit(kind: WeaponKind | null, heavy = false, near = 1) {
     const k = Math.max(0.15, near);
-    const big = heavy || kind === "hammer" || kind === "axe";
+    const big = heavy || (!!kind && HEAVY.has(kind));
     this.tone(big ? 70 : 110, big ? 38 : 60, (big ? 0.55 : 0.35) * k, 0.004, big ? 0.3 : 0.16);
     this.noiseBurst({
       type: "lowpass",
@@ -329,8 +334,8 @@ export class TideAudio {
       attack: 0.003,
       decay: 0.15,
     });
-    if (kind && kind !== "hammer" && kind !== "flail" && kind !== "shield")
-      this.ring(1800, 0.06 * k, 0.12);
+    /* Edges ring; blunt heads and shields only thud. */
+    if (kind && !BLUNT.has(kind)) this.ring(1800, 0.06 * k, 0.12);
   }
 
   /* Steel on a shield. */

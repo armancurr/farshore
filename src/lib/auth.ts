@@ -60,8 +60,16 @@ let state: AuthState = {
 };
 const listeners = new Set<() => void>();
 
+/*
+ * Dev builds skip the invite gate: whoever is at the title screen (signed in
+ * or not, approved or not) can go ashore straight away. Production is untouched.
+ */
+const OPEN_DOOR = import.meta.env.DEV;
+
 function set(next: Partial<AuthState>) {
   state = { ...state, ...next };
+  if (OPEN_DOOR && state.status !== "loading" && state.status !== "ready")
+    state = { ...state, status: "ready", username: state.username ?? "dev" };
   for (const listener of listeners) listener();
 }
 

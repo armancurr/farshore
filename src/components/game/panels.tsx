@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { Game, HudState, ToolView } from "../../game/client/game";
+import { TOOLS } from "../../game/shared/items";
 
 const heading = "font-mono text-[10px] tracking-[0.3em] text-white/45 uppercase";
 
@@ -59,9 +60,7 @@ function ToolRow(props: { tool: ToolView; children: ReactNode }) {
       <div className="min-w-0">
         <div className="truncate text-[13px]">{props.tool.name}</div>
         <div className="font-mono text-[10px] tracking-[0.12em] text-white/40 uppercase">
-          {props.tool.wear === null
-            ? "Never wears out"
-            : `${Math.round(props.tool.wear * 100)}% left`}
+          {TOOLS[props.tool.kind].weapon ? "Weapon · swap it in the marketplace" : "Fishing rod"}
         </div>
       </div>
       <div className="flex shrink-0 gap-2">{props.children}</div>
@@ -116,11 +115,6 @@ export function InventoryPanel(props: { hud: HudState; game: Game }) {
                 >
                   To slot {target + 1}
                 </Button>
-                {t.droppable && (
-                  <Button variant="outline" size="hud-xs" onClick={() => props.game.drop(t.id)}>
-                    Drop
-                  </Button>
-                )}
               </ToolRow>
             ))}
           </ul>

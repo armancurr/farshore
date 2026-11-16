@@ -14,19 +14,9 @@ import {
 } from "./items";
 import type { Prefab } from "./prefabs";
 import { isSkinId, type SkinId } from "./skins";
-import type { WeaponKind } from "./weapons";
+import { isWeaponKind, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string; skin: SkinId };
-
-/* A weapon lying on the ground, waiting for someone to pick it up. */
-export type GroundWeapon = {
-  id: number;
-  kind: WeaponKind;
-  x: number;
-  y: number;
-  z: number;
-  uses: number;
-};
 
 /* Compact per-player state: [id, x, y, z, yaw, pitch, flags, weapon, stagger]. */
 export type PlayerSnap = [number, number, number, number, number, number, number, number, number];
@@ -54,7 +44,7 @@ export const FLAG = {
   shove: 16, // mid-swing
   fly: 32, // flying in creative
   block: 64, // shield raised
-  charge: 128, // winding up a hammer or flail
+  charge: 128, // winding up a warhammer or greatsword
   creative: 256, // in creative: nothing hurts you
 } as const;
 
@@ -64,6 +54,9 @@ export type LineState = "cast" | "bite" | "none";
 
 export type HurtCause = "fall" | "boar" | "hit";
 
+/* Where fast travel goes: the Harbor, or the island you settled. */
+export type TravelTarget = "harbor" | "home";
+
 export type WorldInfo = {
   /* Every island on the grand map. */
   islands: IslandInfo[];
@@ -72,7 +65,6 @@ export type WorldInfo = {
   /* World clock: seconds the island has been running. */
   time: number;
   roster: RosterEntry[];
-  weapons: GroundWeapon[];
   board: Bounty[];
   prefabs: Prefab[];
   /* Where you stand right now; null when only watching. */
@@ -87,6 +79,8 @@ export type ServerMsg =
   | { t: "island"; island: IslandInfo }
   /* Your island couldn't go where you asked. */
   | { t: "unsettled"; reason: string }
+  /* You've been moved: onto your new island, or by fast travel. */
+  | ({ t: "warp" } & Spawn)
   | { t: "roster"; roster: RosterEntry[] }
   | {
       t: "snap";
@@ -116,7 +110,10 @@ export type ServerMsg =
   /* An animal struck; `dead` when that was the end of it. */
   | { t: "ahit"; id: number; kind: AnimalKind; by: number; damage: number; dead: boolean }
   | { t: "hurt"; amount: number; cause: HurtCause }
-  | { t: "died"; cause: HurtCause }
+  /* `by` is who knocked you out, when someone did. */
+  | { t: "died"; cause: HurtCause; by: string | null }
+  /* A mace's blow: you're slowed for this many seconds. */
+  | { t: "daze"; seconds: number }
   | { t: "impulse"; vx: number; vy: number; vz: number }
   | ({ t: "respawn" } & Spawn)
   | { t: "swing"; by: number; kind: WeaponKind | null; heavy: boolean }
@@ -128,13 +125,12 @@ export type ServerMsg =
       /* The victim's stagger after the hit, and what this hit added. */
       stagger: number;
       added: number;
+      /* Health it took (0 on the Harbor, in creative, or against a block). */
+      damage: number;
       blocked: boolean;
       parry: boolean;
       heavy: boolean;
     }
-  | { t: "wspawn"; weapon: GroundWeapon }
-  | { t: "wtake"; id: number; by: number; kind: WeaponKind }
-  | { t: "wbreak"; by: number; kind: WeaponKind }
   | { t: "feed"; text: string }
   | { t: "full" };
 
@@ -152,9 +148,14 @@ export type ClientMsg =
       own?: boolean;
       /* The skin you last wore, kept by this browser. */
       skin?: SkinId;
+      /* The weapon you last chose, kept by this browser (null: empty-handed). */
+      weapon?: WeaponKind | null;
     }
   /* Wear a different skin from the marketplace. */
   | { t: "skin"; skin: SkinId }
+  /* Take up a weapon from the marketplace, in place of the one you carry (null: put it away). */
+  | { t: "arm"; kind: WeaponKind | null }
+  | { t: "travel"; to: TravelTarget }
   /* Put your island on the grand map, centred at (x, z). */
   | { t: "settle"; shape: ShapeId; seed: number; x: number; z: number }
   | {
@@ -171,13 +172,12 @@ export type ClientMsg =
       /* Rowing: the boat's heading and speed (its position is yours). */
       boat?: { rot: number; speed: number };
     }
-  | { t: "attack"; charge: number; climb: boolean }
+  | { t: "attack"; charge: number }
   | { t: "stance"; block: boolean; charge: boolean }
   | { t: "interact"; kind: InteractKind; id: number }
   | { t: "slot"; i: number }
   /* Move a tool into a hotbar slot (1 to HOTBAR - 1), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
-  | { t: "drop"; tool: number }
   | { t: "buy"; item: string }
   | { t: "place"; kind: KitId; x: number; z: number; rot: number }
   | { t: "pickup"; id: number }
@@ -190,8 +190,8 @@ export type ClientMsg =
   /* Strike, `at` seconds after the bite as the angler saw it. */
   | { t: "reel"; at: number };
 
-export type InteractKind = "weapon" | "prefab";
-const INTERACT_KINDS: readonly InteractKind[] = ["weapon", "prefab"];
+export type InteractKind = "prefab";
+const INTERACT_KINDS: readonly InteractKind[] = ["prefab"];
 
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 
@@ -232,19 +232,21 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         token: isToken(m.token) ? m.token : undefined,
         own: m.own === true,
         skin: isSkinId(m.skin) ? m.skin : undefined,
+        weapon: m.weapon === null ? null : isWeaponKind(m.weapon) ? m.weapon : undefined,
       };
     case "skin":
       return isSkinId(m.skin) ? { t: "skin", skin: m.skin } : null;
+    case "arm":
+      if (m.kind !== null && !isWeaponKind(m.kind)) return null;
+      return { t: "arm", kind: m.kind };
+    case "travel":
+      return m.to === "harbor" || m.to === "home" ? { t: "travel", to: m.to } : null;
     case "settle":
       if (!isShapeId(m.shape) || !isInt(m.seed, 0, 2 ** 32 - 1)) return null;
       if (!finite(m.x, COORD) || !finite(m.z, COORD)) return null;
       return { t: "settle", shape: m.shape, seed: m.seed, x: m.x, z: m.z };
     case "attack":
-      return {
-        t: "attack",
-        charge: finite(m.charge, 10) ? Math.max(0, m.charge) : 0,
-        climb: m.climb === true,
-      };
+      return { t: "attack", charge: finite(m.charge, 10) ? Math.max(0, m.charge) : 0 };
     case "stance":
       return { t: "stance", block: m.block === true, charge: m.charge === true };
     case "interact":
@@ -278,9 +280,6 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       return { t: "cast", x: m.x, z: m.z };
     case "reel":
       return { t: "reel", at: finite(m.at, 60) ? m.at : -1 };
-    case "drop":
-      if (!isId(m.tool)) return null;
-      return { t: "drop", tool: m.tool };
     case "move": {
       const nums = ["x", "y", "z", "yaw", "pitch", "vx", "vy", "vz"] as const;
       for (const k of nums) if (!finite(m[k], COORD)) return null;

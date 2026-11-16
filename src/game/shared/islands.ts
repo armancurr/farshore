@@ -41,6 +41,25 @@ export type IslandInfo = {
   z: number;
   /* Whoever settled it. */
   name: string;
+  /* The common ground in the middle of the map; see HARBOR. */
+  harbor?: boolean;
+};
+
+/*
+ * The Harbor: common ground in the middle of the grand map. Everyone arrives
+ * here, nobody owns it, and nobody can be hurt on it. A horseshoe of land
+ * round a sheltered bay, with a lighthouse on the high ground and jetties
+ * running out into the water.
+ */
+export const HARBOR_ID = 0;
+export const HARBOR: IslandInfo = {
+  id: HARBOR_ID,
+  shape: "crescent",
+  seed: 83,
+  x: 0,
+  z: 0,
+  name: "the Harbor",
+  harbor: true,
 };
 
 type Hill = { x: number; z: number; r: number; h: number };
@@ -474,10 +493,12 @@ export function tilesOverlap(ax: number, az: number, bx: number, bz: number) {
 
 /* Why an island can't go at (x, z), or null if it can. */
 export function placementProblem(islands: readonly IslandInfo[], x: number, z: number) {
-  if (islands.length >= MAX_ISLANDS) return "The map is full";
+  if (islands.filter((o) => !o.harbor).length >= MAX_ISLANDS) return "The map is full";
   if (Math.abs(x) > PLACE_LIMIT + 0.01 || Math.abs(z) > PLACE_LIMIT + 0.01)
     return "Too close to the edge of the map";
+  /* The Harbor always holds the middle, even before the room has said so. */
+  if (tilesOverlap(HARBOR.x, HARBOR.z, x, z)) return "Too close to the Harbor";
   const hit = islands.find((o) => tilesOverlap(o.x, o.z, x, z));
-  if (hit) return `Too close to ${hit.name}'s island`;
+  if (hit) return hit.harbor ? "Too close to the Harbor" : `Too close to ${hit.name}'s island`;
   return null;
 }
