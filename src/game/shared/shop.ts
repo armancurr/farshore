@@ -1,4 +1,3 @@
-import { FEATURES } from "./features";
 import { type KitId, type ToolKind, TOOLS } from "./items";
 
 /*
@@ -23,15 +22,12 @@ const CATALOG: readonly ShopEntry[] = [
   { id: "bed", section: "Amenities", price: 60, give: { kit: "bed" } },
   { id: "dock", section: "Amenities", price: 150, give: { kit: "dock" } },
   { id: "rod2", section: "Gear", price: 90, give: { tool: "rod2" } },
-  { id: "sword2", section: "Gear", price: 110, give: { tool: "sword2" } },
-  { id: "spear2", section: "Gear", price: 130, give: { tool: "spear2" } },
-  { id: "axe2", section: "Gear", price: 160, give: { tool: "axe2" } },
   { id: "rowboat", section: "Vehicles", price: 220, give: { kit: "rowboat" } },
 ];
 
-/* What's for sale right now: no weapons while they're switched off. */
+/* What's for sale here. Weapons come from the marketplace instead. */
 export const SHOP: readonly ShopEntry[] = CATALOG.filter(
-  (e) => FEATURES.weapons || !("tool" in e.give) || !TOOLS[e.give.tool].weapon,
+  (e) => !("tool" in e.give) || !TOOLS[e.give.tool].weapon,
 );
 
 /* How close to the stall you need to be to trade. */

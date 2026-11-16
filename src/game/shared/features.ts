@@ -15,8 +15,6 @@ export const FEATURES = {
   buoys: false,
   /* Deer and boar. */
   animals: false,
-  /* Loose weapons on the ground, and weapons in the shop. */
-  weapons: false,
   /* The bounty board (the only source of coins) and the shop (the only place to spend them). */
   bounties: false,
   shop: false,

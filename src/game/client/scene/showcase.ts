@@ -1,11 +1,13 @@
 import * as THREE from "three";
 import type { SkinId } from "../../shared/skins";
+import type { WeaponKind } from "../../shared/weapons";
 import { edges, flatten, inkMaterial, lineMaterial } from "./materials";
 import { buildRig, disposeRig, type Rig } from "./skins";
+import { buildWeapon, WEAPON_SPAN } from "./weapons";
 
 /*
  * The marketplace's fitting room: one skin on a plinth, turning slowly and
- * walking on the spot. Drag to turn it yourself.
+ * walking on the spot, or one weapon standing over it. Drag to turn either.
  */
 
 /* Steps per second when a showcase skin walks on the spot. */
@@ -21,14 +23,39 @@ function plinth() {
   return g;
 }
 
-/* Fit the rig in view, with `margin` metres to spare above and below. */
-function frame(camera: THREE.PerspectiveCamera, rig: Rig, margin = 0.45) {
+/* Fit something `height` metres tall in view, with `margin` metres to spare above and below. */
+function frame(camera: THREE.PerspectiveCamera, height: number, margin = 0.45) {
   /* Taller skins (a lantern, a lighthouse) need the camera to step back. */
-  const top = Math.max(2.3, rig.top);
+  const top = Math.max(2.3, height);
   const mid = top / 2;
   const dist = (top / 2 + margin) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   camera.position.set(0, mid + 0.35, -dist);
   camera.lookAt(0, mid, 0);
+}
+
+/* A weapon on display: stood on its pommel just over the plinth, about as tall as a person. */
+function displayWeapon(kind: WeaponKind) {
+  const span = WEAPON_SPAN[kind];
+  const length = span.to - span.from;
+  const scale = Math.min(kind === "shield" ? 1.6 : 3, 1.85 / length);
+  const model = buildWeapon(kind);
+  model.scale.setScalar(scale);
+  /* Lift it so the bottom clears the plinth, then lean it a touch. */
+  model.position.y = -span.from * scale;
+  const tilt = new THREE.Group();
+  tilt.add(model);
+  tilt.position.y = 0.25;
+  tilt.rotation.z = kind === "shield" ? 0 : 0.12;
+  const root = new THREE.Group();
+  root.add(tilt);
+  return root;
+}
+
+/* A weapon's geometry is its own; its materials are shared and stay. */
+function disposeWeapon(root: THREE.Object3D) {
+  root.traverse((o) => {
+    if ((o as THREE.Mesh).geometry) (o as THREE.Mesh).geometry.dispose();
+  });
 }
 
 export class Showcase {
@@ -36,6 +63,7 @@ export class Showcase {
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
   private rig: Rig | null = null;
+  private weapon: THREE.Group | null = null;
   private yaw = 0.55;
   private spinning = true;
   private walking = true;
@@ -58,13 +86,30 @@ export class Showcase {
   }
 
   show(skin: SkinId) {
+    this.clear();
+    this.rig = buildRig(skin);
+    this.scene.add(this.rig.root);
+    frame(this.camera, this.rig.top);
+  }
+
+  showWeapon(kind: WeaponKind) {
+    this.clear();
+    this.weapon = displayWeapon(kind);
+    this.scene.add(this.weapon);
+    frame(this.camera, 2.3);
+  }
+
+  private clear() {
     if (this.rig) {
       this.scene.remove(this.rig.root);
       disposeRig(this.rig);
+      this.rig = null;
     }
-    this.rig = buildRig(skin);
-    this.scene.add(this.rig.root);
-    frame(this.camera, this.rig);
+    if (this.weapon) {
+      this.scene.remove(this.weapon);
+      disposeWeapon(this.weapon);
+      this.weapon = null;
+    }
   }
 
   /* Turn by a drag of `dx` pixels. Turning by hand stops the turntable. */
@@ -97,16 +142,20 @@ export class Showcase {
     this.clock += dt;
     this.walk += ((this.walking ? 1 : 0) - this.walk) * Math.min(1, dt * 4);
     if (this.spinning) this.yaw += dt * 0.45;
-    if (!this.rig) return;
-    this.rig.root.rotation.y = this.yaw;
-    this.rig.update(this.clock, this.clock * WALK * this.rig.cadence, this.walk, false);
+    if (this.weapon) {
+      this.weapon.rotation.y = this.yaw;
+      this.weapon.position.y = Math.sin(this.clock * 1.6) * 0.04;
+    } else if (this.rig) {
+      this.rig.root.rotation.y = this.yaw;
+      this.rig.update(this.clock, this.clock * WALK * this.rig.cadence, this.walk, false);
+    } else return;
     this.renderer.render(this.scene, this.camera);
   };
 
   dispose() {
     cancelAnimationFrame(this.raf);
     this.resize.disconnect();
-    if (this.rig) disposeRig(this.rig);
+    this.clear();
     this.renderer.dispose();
     this.renderer.forceContextLoss();
   }
@@ -137,7 +186,7 @@ export function portraitsOf(skins: readonly SkinId[], width = 224): Map<SkinId, 
       rig.update(1.3, 0, 0, false);
       scene.add(rig.root);
       /* Plenty of room around it, so the tile reads as a card, not a crop. */
-      frame(camera, rig, 0.75);
+      frame(camera, rig.top, 0.75);
       renderer.render(scene, camera);
       portraits.set(skin, canvas.toDataURL("image/png"));
       scene.remove(rig.root);
@@ -147,4 +196,36 @@ export function portraitsOf(skins: readonly SkinId[], width = 224): Map<SkinId, 
     renderer.forceContextLoss();
   }
   return new Map(skins.map((s) => [s, portraits.get(s) as string]));
+}
+
+/* The same for the weapons: each stood up and turned three-quarters on. */
+const weaponPortraits = new Map<WeaponKind, string>();
+
+export function weaponPortraitsOf(
+  kinds: readonly WeaponKind[],
+  width = 224,
+): Map<WeaponKind, string> {
+  const missing = kinds.filter((k) => !weaponPortraits.has(k));
+  if (missing.length) {
+    const canvas = document.createElement("canvas");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(1);
+    renderer.setSize(width, Math.round(width * 1.25), false);
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
+    frame(camera, 2.3, 0.6);
+    for (const kind of missing) {
+      const root = displayWeapon(kind);
+      root.rotation.y = kind === "shield" ? 0.4 : 0.6;
+      scene.add(root);
+      renderer.render(scene, camera);
+      weaponPortraits.set(kind, canvas.toDataURL("image/png"));
+      scene.remove(root);
+      disposeWeapon(root);
+    }
+    renderer.dispose();
+    renderer.forceContextLoss();
+  }
+  return new Map(kinds.map((k) => [k, weaponPortraits.get(k) as string]));
 }

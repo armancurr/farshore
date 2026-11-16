@@ -137,7 +137,7 @@ export class Terrain implements Ground {
   readonly solids: Solid[] = [];
   readonly structures: Structure[] = [];
   readonly ladders: Ladder[] = [];
-  /* Walkable high places on the structures: where loose weapons like to lie. */
+  /* Walkable high places on the structures. */
   perches: readonly Perch[] = [];
   lighthouse: Spot = { x: 0, y: 0, z: 0 };
   /* Where a new arrival wakes up: a flat, open patch near the middle of the island. */
@@ -152,9 +152,18 @@ export class Terrain implements Ground {
   /* Solids added after generation (placed prefabs), by owner key. */
   private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
 
-  constructor(seed: number, shape: ShapeId = "headland", origin = { x: 0, z: 0 }) {
+  /* The Harbor: a lighthouse and jetties, whatever the features say. */
+  readonly harbor: boolean;
+
+  constructor(
+    seed: number,
+    shape: ShapeId = "headland",
+    origin = { x: 0, z: 0 },
+    opts: { harbor?: boolean } = {},
+  ) {
     this.seed = seed >>> 0;
     this.shape = shape;
+    this.harbor = !!opts.harbor;
     this.heights = islandHeights(shape, this.seed, GRID);
     this.raiseLighthouse();
     this.raiseStructures();
@@ -216,7 +225,7 @@ export class Terrain implements Ground {
     const z = this.oz - this.half + Math.floor(best / GRID) * this.cell;
     const top = this.heights[best];
 
-    if (FEATURES.lighthouse)
+    if (FEATURES.lighthouse || this.harbor)
       this.levelPad(x, z, LIGHTHOUSE.plinthRadius - 1, LIGHTHOUSE.plinthRadius + 5, top);
 
     this.lighthouse = { x, y: top, z };
@@ -246,8 +255,9 @@ export class Terrain implements Ground {
   /* Windmill, chapel, mast, henge, villages, watchtowers, aqueduct, wrecks, jetties. */
   private raiseStructures() {
     const plan = planStructures(this, this.seed, {
-      lighthouse: FEATURES.lighthouse,
+      lighthouse: FEATURES.lighthouse || this.harbor,
       landmarks: FEATURES.landmarks,
+      harbor: this.harbor,
     });
     this.structures.push(...plan.structures);
     this.perches = plan.perches;
@@ -293,86 +303,91 @@ export class Terrain implements Ground {
         z: p.z,
       };
     };
-    /* Board: two posts, a planked face, notices pinned to it, a little roof. */
-    const b = this.board;
-    for (const side of [-1, 1])
+    /* Only what's switched on is built: a bare plinth otherwise (the Harbor, for now). */
+    if (FEATURES.bounties) {
+      /* Board: two posts, a planked face, notices pinned to it, a little roof. */
+      const b = this.board;
+      for (const side of [-1, 1])
+        B.push(
+          block(b, side * 0.85, 0, {
+            bottom: base,
+            top: base + 2.3,
+            hx: 0.06,
+            hz: 0.06,
+            tone: "dark",
+          }),
+        );
+      B.push(block(b, 0, 0, { bottom: base + 0.75, top: base + 2.05, hx: 0.82, hz: 0.05 }));
       B.push(
-        block(b, side * 0.85, 0, {
-          bottom: base,
-          top: base + 2.3,
-          hx: 0.06,
-          hz: 0.06,
+        block(b, 0, 0.02, {
+          bottom: base + 2.3,
+          top: base + 2.38,
+          hx: 1.05,
+          hz: 0.28,
           tone: "dark",
+          solid: false,
         }),
       );
-    B.push(block(b, 0, 0, { bottom: base + 0.75, top: base + 2.05, hx: 0.82, hz: 0.05 }));
-    B.push(
-      block(b, 0, 0.02, {
-        bottom: base + 2.3,
-        top: base + 2.38,
-        hx: 1.05,
-        hz: 0.28,
-        tone: "dark",
-        solid: false,
-      }),
-    );
-    for (const [lx, ly, w, h] of [
-      [-0.45, 1.6, 0.17, 0.2],
-      [0.05, 1.68, 0.15, 0.22],
-      [0.5, 1.55, 0.18, 0.18],
-      [-0.2, 1.05, 0.2, 0.17],
-      [0.35, 1.08, 0.14, 0.2],
-    ])
+      for (const [lx, ly, w, h] of [
+        [-0.45, 1.6, 0.17, 0.2],
+        [0.05, 1.68, 0.15, 0.22],
+        [0.5, 1.55, 0.18, 0.18],
+        [-0.2, 1.05, 0.2, 0.17],
+        [0.35, 1.08, 0.14, 0.2],
+      ])
+        B.push(
+          block(b, lx, 0.065, {
+            bottom: base + ly - h,
+            top: base + ly + h,
+            hx: w,
+            hz: 0.012,
+            tone: "light",
+            solid: false,
+          }),
+        );
+      st.lamps.push({ x: b.x, y: base + 2.2, z: b.z });
+    }
+    if (FEATURES.shop) {
+      /* Stall: a counter, two posts holding up an awning, a crate beside it. */
+      const s = this.shop;
       B.push(
-        block(b, lx, 0.065, {
-          bottom: base + ly - h,
-          top: base + ly + h,
-          hx: w,
-          hz: 0.012,
+        block(s, 0, 0.05, { bottom: base, top: base + 1.05, hx: 1.0, hz: 0.38, standable: true }),
+      );
+      B.push(
+        block(s, 0, 0.05, {
+          bottom: base + 1.05,
+          top: base + 1.12,
+          hx: 1.08,
+          hz: 0.45,
+          tone: "dark",
+          standable: true,
+        }),
+      );
+      for (const side of [-1, 1])
+        B.push(
+          block(s, side * 0.95, -0.25, {
+            bottom: base,
+            top: base + 2.45,
+            hx: 0.06,
+            hz: 0.06,
+            tone: "dark",
+          }),
+        );
+      B.push(
+        block(s, 0, 0.1, {
+          bottom: base + 2.45,
+          top: base + 2.53,
+          hx: 1.2,
+          hz: 0.75,
           tone: "light",
           solid: false,
         }),
       );
-    st.lamps.push({ x: b.x, y: base + 2.2, z: b.z });
-    /* Stall: a counter, two posts holding up an awning, a crate beside it. */
-    const s = this.shop;
-    B.push(
-      block(s, 0, 0.05, { bottom: base, top: base + 1.05, hx: 1.0, hz: 0.38, standable: true }),
-    );
-    B.push(
-      block(s, 0, 0.05, {
-        bottom: base + 1.05,
-        top: base + 1.12,
-        hx: 1.08,
-        hz: 0.45,
-        tone: "dark",
-        standable: true,
-      }),
-    );
-    for (const side of [-1, 1])
       B.push(
-        block(s, side * 0.95, -0.25, {
-          bottom: base,
-          top: base + 2.45,
-          hx: 0.06,
-          hz: 0.06,
-          tone: "dark",
-        }),
+        block(s, 1.45, 0.2, { bottom: base, top: base + 0.6, hx: 0.3, hz: 0.3, standable: true }),
       );
-    B.push(
-      block(s, 0, 0.1, {
-        bottom: base + 2.45,
-        top: base + 2.53,
-        hx: 1.2,
-        hz: 0.75,
-        tone: "light",
-        solid: false,
-      }),
-    );
-    B.push(
-      block(s, 1.45, 0.2, { bottom: base, top: base + 0.6, hx: 0.3, hz: 0.3, standable: true }),
-    );
-    st.lamps.push({ x: s.x, y: base + 2.3, z: s.z });
+      st.lamps.push({ x: s.x, y: base + 2.3, z: s.z });
+    }
   }
 
   private scatterProps() {
