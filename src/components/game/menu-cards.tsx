@@ -11,7 +11,6 @@ import { Kbd } from "@/components/ui/kbd";
 import { PopoverTitle } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import { isEmail, joinWaitlist, signOut } from "@/lib/auth";
-import { flushIsland } from "@/lib/island";
 
 /*
  * The small pointer from a menu card up to its button. The card sits a little
@@ -47,11 +46,16 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Turn a piece", ["R"]],
     ["Take a piece back", ["RMB"]],
   ],
+  [
+    ["Creative mode", ["Shift+C"]],
+    ["Take off, or drop", ["Space ×2"]],
+    ["Fly flat out", ["W ×2"]],
+  ],
 ];
 
 const CONTROL_FOOT: [string, string][] = [
   ["C", "This card"],
-  ["N", "Music"],
+  ["N", "Map"],
   ["M", "Mute"],
   ["Esc", "Pause"],
 ];
@@ -213,14 +217,14 @@ export function PlayerCard(props: { username: string; email: string | null }) {
     <div className="px-[18px] pt-[18px] pb-4">
       <PopoverTitle className="break-all">{props.username}</PopoverTitle>
       <p className={`${sub} break-all`}>{props.email}</p>
-      <SignOutRow note="Your island is saved to your account" />
+      <SignOutRow note="Your island waits on the grand map" />
     </div>
   );
 }
 
 /*
  * Signing out means needing the invite link again to get back in, so it asks
- * once. Anything not yet stored goes up first.
+ * once.
  */
 function SignOutRow(props: { note: string }) {
   const [sure, setSure] = useState(false);
@@ -242,12 +246,10 @@ function SignOutRow(props: { note: string }) {
               return;
             }
             setBusy(true);
-            void flushIsland()
-              .then(signOut)
-              .finally(() => {
-                setBusy(false);
-                setSure(false);
-              });
+            void signOut().finally(() => {
+              setBusy(false);
+              setSure(false);
+            });
           }}
         >
           {busy ? <Spinner /> : <SignOutIcon size={13} weight="bold" />}

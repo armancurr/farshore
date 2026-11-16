@@ -1,5 +1,12 @@
 import * as THREE from "three";
-import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
+import {
+  EYE_HEIGHT,
+  FLY_BOOST,
+  HEALTH_MAX,
+  SEA_LEVEL,
+  STAMINA_MAX,
+  TICK_HZ,
+} from "../shared/constants";
 import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
 import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
 import { FEATURES } from "../shared/features";
@@ -11,8 +18,8 @@ import {
   WATERS_LABEL,
   watersFor,
 } from "../shared/fishing";
-import { clamp, lerp } from "../shared/math";
-import { type Body, createBody, FLOAT_DEPTH, stepBody } from "../shared/physics";
+import { clamp, lerp, wrapAngle } from "../shared/math";
+import { type Body, createBody, FLOAT_DEPTH, stepBody, stepFly } from "../shared/physics";
 import {
   ANIMAL_STATE,
   FLAG,
@@ -35,7 +42,9 @@ import {
   type Verdict,
 } from "../shared/prefabs";
 import { SHOP, SHOP_REACH } from "../shared/shop";
-import { blockSolid, overSolid, Terrain } from "../shared/terrain";
+import { Archipelago } from "../shared/archipelago";
+import { type IslandInfo, type ShapeId } from "../shared/islands";
+import { blockSolid, overSolid, type Solid } from "../shared/terrain";
 import {
   emptyInventory,
   HOTBAR,
@@ -52,20 +61,22 @@ import {
 import { COMBO_WINDOW, WEAPONS, weaponDef, weaponFromIndex } from "../shared/weapons";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
-import { type Connection, clearSave, LocalConnection, serverBase, WsConnection } from "./net";
+import { islandImage, type MapView } from "./map";
+import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
 import { BoatView } from "./scene/boats";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
-import { createTerrainMesh, createWater } from "./scene/land";
+import { createLand, OpenSea } from "./scene/land";
 import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
 import { Sky } from "./scene/sky";
 import { type RodPose, ViewModel, WeaponDrops } from "./scene/weapons";
 
-export type Mode = "attract" | "solo" | "online";
+/* The title screen, or the game: online, on the grand map. */
+export type Mode = "attract" | "online";
 
 export type FeedItem = { id: number; text: string; at: number };
 
@@ -121,16 +132,19 @@ type Focus = { kind: InteractKind | "board" | "shop" | "chest"; id: number; labe
 export type HudState = {
   mode: Mode;
   connecting: boolean;
+  /* Online and not yet settled: choosing where your island goes on the grand map. */
+  settling: { error: string | null; pending: boolean; islands: number } | null;
   notice: string | null;
   humans: number;
   name: string;
   player: boolean;
+  /* Creative mode: flying about, and nothing hurts you. */
+  creative: boolean;
   health: number;
   /* Fades from 1 when you get hurt. */
   hurt: number;
   /* Set while you're down, with what did it. */
   down: HurtCause | null;
-  breath: number;
   stamina: number;
   shove: number;
   underwater: boolean;
@@ -165,7 +179,6 @@ export type HudState = {
   /* Weapons on the ground, as screen positions (0..1) or edge arrows. */
   markers: { id: number; x: number; y: number; d: number; off: boolean; angle: number }[];
   target: { name: string; health: number | null } | null;
-  music: boolean;
 };
 
 type Sample = {
@@ -179,11 +192,21 @@ type Sample = {
 };
 type Remote = { avatar: Avatar; buf: Sample[]; name: string };
 
-type World = {
-  seed: number;
-  terrain: Terrain;
+/* One island as drawn: its meshes, its props, and its picture for the map. */
+type IslandView = {
+  info: IslandInfo;
   group: THREE.Group;
   props: WorldProps;
+  image: HTMLCanvasElement;
+};
+
+type World = {
+  /* The first island's seed: the title screen keeps showing the same island. */
+  seed: number | null;
+  ground: Archipelago;
+  islands: Map<number, IslandView>;
+  group: THREE.Group;
+  sea: OpenSea;
   drops: WeaponDrops;
 };
 
@@ -228,9 +251,12 @@ export class Game {
 
   private myId = -1;
   private myName = "";
+  /* Your island on the grand map, once you have one. */
+  private mine: number | null = null;
+  private settleError: string | null = null;
+  private settlePending = false;
   private roster: RosterEntry[] = [];
   private body: Body | null = null;
-  private breath = 100;
   private health = HEALTH_MAX;
   private hurtFlash = 0;
   private down: HurtCause | null = null;
@@ -287,6 +313,12 @@ export class Game {
   private under = 0;
   private fov = BASE_FOV;
   private wasUnder = false;
+  /* Creative mode, and whether you're up in the air with it. */
+  private creative = false;
+  private flying = false;
+  private lastJumpTap = 0;
+  /* Just left creative in mid-air: the fall down from there doesn't hurt. */
+  private safeFall = false;
 
   private raf = 0;
   private last = performance.now();
@@ -341,7 +373,7 @@ export class Game {
     this.raf = requestAnimationFrame(this.frame);
   }
 
-  /* Dev/test only: treat input as live (and solo as running) without pointer lock. */
+  /* Dev/test only: treat input as live without pointer lock. */
   get forceActive() {
     return this.forced;
   }
@@ -363,8 +395,8 @@ export class Game {
 
   /* ---------- lifecycle ---------- */
 
-  start(mode: Mode, fresh = false) {
-    const seed = fresh ? undefined : this.world?.seed;
+  start(mode: Mode) {
+    const seed = this.mode === "attract" ? (this.world?.seed ?? undefined) : undefined;
     this.conn?.close();
     this.conn = null;
     this.reset();
@@ -375,24 +407,23 @@ export class Game {
       message: (msg: ServerMsg) => this.onMessage(msg),
       closed: (reason: string) => {
         if (this.mode !== "online" || this.disposed) return;
-        this.say(`${reason}. Playing solo instead.`, 5);
-        this.start("solo");
+        this.input.unlock();
+        this.say(`${reason}.`, 5);
+        this.start("attract");
       },
     };
 
     if (mode === "online") {
       const base = serverBase();
       if (!base) {
-        this.say("Online play isn't available right now. Playing solo.", 5);
-        this.start("solo");
+        this.input.unlock();
+        this.say("The sea can't be reached right now.", 5);
+        this.start("attract");
         return;
       }
       this.connecting = true;
       this.conn = new WsConnection(base, handlers);
-    } else {
-      /* Solo picks up your saved island, or else the one you were just looking at. */
-      this.conn = new LocalConnection(mode, handlers, { seed, fresh });
-    }
+    } else this.conn = new LocalConnection(handlers, { seed });
     this.emitHud();
   }
 
@@ -413,6 +444,9 @@ export class Game {
     this.herd.clear();
     this.built.reset([]);
     this.boats.clear();
+    this.creative = false;
+    this.flying = false;
+    this.safeFall = false;
     this.boat = null;
     this.build = null;
     this.chestId = null;
@@ -426,16 +460,53 @@ export class Game {
     this.feed = [];
     this.haveClock = false;
     this.myId = -1;
+    this.mine = null;
+    this.settleError = null;
+    this.settlePending = false;
     this.input.clear();
   }
 
-  /* Throw the saved island away and wake up on a new one. */
-  newIsland() {
-    this.conn?.close();
-    this.conn = null;
-    clearSave();
-    this.start("solo", true);
-    this.lock();
+  /* Online, connected, and not on an island yet. */
+  get settling() {
+    return this.mode === "online" && this.myId >= 0 && !!this.world && this.mine === null;
+  }
+
+  /* Ask for your island at (x, z) on the grand map. */
+  settle(shape: ShapeId, seed: number, x: number, z: number) {
+    if (!this.settling || this.settlePending) return;
+    this.settlePending = true;
+    this.settleError = null;
+    this.conn?.send({ t: "settle", shape, seed, x, z });
+    this.emitHud();
+  }
+
+  /* Everything the grand map shows, as it is right now. */
+  mapView(): MapView {
+    const world = this.world;
+    const islands = world
+      ? [...world.islands.values()].map((o) => ({
+          info: o.info,
+          image: o.image,
+          mine: o.info.id === this.mine,
+        }))
+      : [];
+    const players: MapView["players"] = [];
+    for (const [id, r] of this.remotes) {
+      const last = r.buf[r.buf.length - 1];
+      if (!last || !r.avatar.group.visible) continue;
+      const p = r.avatar.group.position;
+      players.push({ id, name: r.name, x: p.x, z: p.z, yaw: last.yaw, me: false });
+    }
+    if (this.body)
+      players.push({
+        id: this.myId,
+        name: this.myName,
+        x: this.body.x,
+        z: this.body.z,
+        yaw: this.input.yaw,
+        me: true,
+      });
+    return { islands, players };
   }
 
   lock() {
@@ -448,15 +519,9 @@ export class Game {
     this.audio.setMuted(muted);
   }
 
-  toggleMusic() {
-    this.audio.setMusic(!this.audio.musicOn);
-    this.emitHud();
-  }
-
   private shouldPause() {
-    if (!this.visible || document.hidden) return true;
-    /* Solo waits for you when you let go of the mouse. */
-    return this.mode === "solo" && !this.touch && !this.input.locked && !this.forceActive;
+    /* Only the title screen's room can pause; the sea goes on without you. */
+    return !this.visible || document.hidden;
   }
 
   private onLockChange() {
@@ -524,26 +589,65 @@ export class Game {
   private dropWorld() {
     if (!this.world) return;
     this.scene.remove(this.world.group);
-    this.world.props.dispose();
-    this.world.group.remove(this.world.props.group);
+    for (const o of this.world.islands.values()) {
+      o.props.dispose();
+      o.group.remove(o.props.group);
+    }
     this.world.drops.dispose();
     this.world.group.remove(this.world.drops.group);
     disposeTree(this.world.group);
     this.world = null;
   }
 
-  private buildWorld(seed: number) {
+  /* An empty grand map: just the open sea, waiting for islands. */
+  private buildWorld() {
     this.dropWorld();
-    const terrain = new Terrain(seed);
     const group = new THREE.Group();
-    group.add(createTerrainMesh(terrain));
-    group.add(createWater(terrain));
-    const props = new WorldProps(terrain);
-    group.add(props.group);
+    const sea = new OpenSea();
+    group.add(sea.mesh);
     const drops = new WeaponDrops();
     group.add(drops.group);
     this.scene.add(group);
-    this.world = { seed, terrain, group, props, drops };
+    this.world = {
+      seed: null,
+      ground: new Archipelago(),
+      islands: new Map(),
+      group,
+      sea,
+      drops,
+    };
+  }
+
+  /* Raise an island in the world: its ground, its sea, its props and its map picture. */
+  private addIsland(info: IslandInfo) {
+    const world = this.world;
+    if (!world || world.islands.has(info.id)) return;
+    const { terrain } = world.ground.add(info);
+    const group = new THREE.Group();
+    group.add(...createLand(terrain));
+    const props = new WorldProps(terrain);
+    group.add(props.group);
+    world.group.add(group);
+    world.islands.set(info.id, {
+      info,
+      group,
+      props,
+      image: islandImage(terrain.heights, Math.round(Math.sqrt(terrain.heights.length))),
+    });
+    world.seed ??= info.seed;
+    world.sea.setTiles(world.ground.list());
+  }
+
+  /* Is the world we have drawn the same set of islands as this one, or a start on it? */
+  private sameWorld(islands: readonly IslandInfo[]) {
+    const world = this.world;
+    if (!world) return false;
+    for (const [id, o] of world.islands) {
+      const next = islands.find((i) => i.id === id);
+      if (!next || next.shape !== o.info.shape || next.seed !== o.info.seed) return false;
+      if (next.x !== o.info.x || next.z !== o.info.z) return false;
+    }
+    return true;
   }
 
   /* ---------- networking ---------- */
@@ -561,11 +665,22 @@ export class Game {
         if (this.mode === "online") this.pushFeed(`You are ${msg.name}`);
         break;
       case "full":
-        this.say("The online island is full. Playing solo.", 5);
-        this.start("solo");
+        this.input.unlock();
+        this.say("The sea is full right now. Try again soon.", 5);
+        this.start("attract");
         break;
       case "world":
         this.onWorld(msg);
+        break;
+      case "island":
+        /* The room announces it in the feed; here it just rises out of the sea. */
+        if (this.world && !this.world.islands.has(msg.island.id)) this.addIsland(msg.island);
+        break;
+      case "unsettled":
+        this.settlePending = false;
+        this.settleError = msg.reason;
+        this.input.unlock();
+        this.emitHud();
         break;
       case "roster":
         this.setRoster(msg.roster);
@@ -601,7 +716,7 @@ export class Game {
         this.downAt = performance.now() / 1000;
         this.input.clear();
         this.chargeStart = null;
-        this.audio.drowned();
+        this.audio.blackout();
         break;
       case "respawn":
         this.place(msg);
@@ -657,7 +772,7 @@ export class Game {
       case "unprefab":
         this.built.remove(msg.id);
         this.boats.remove(msg.id);
-        this.world?.terrain.removeSolids(msg.id);
+        this.world?.ground.removeSolids(msg.id);
         if (this.chestId === msg.id && this.panel === "chest") this.closePanel();
         break;
       case "paid":
@@ -710,6 +825,7 @@ export class Game {
       const p = this.built.get(id);
       if (!p) return;
       this.endBuild();
+      this.flying = false;
       this.boat = { id, x: p.x, z: p.z, rot: p.rot, speed: 0, turn: 0 };
       this.input.yaw = p.rot;
       this.audio.splash(0.4);
@@ -734,7 +850,7 @@ export class Game {
     ]) {
       const x = boat.x + lx * c + lz * s;
       const z = boat.z - lx * s + lz * c;
-      const g = world.terrain.groundAt(x, z, SEA_LEVEL + 1.6).ground;
+      const g = world.ground.groundAt(x, z, SEA_LEVEL + 1.6).ground;
       if (g > SEA_LEVEL + 0.15 && (!best || g < best.y)) best = { x, y: g, z };
     }
     const out = best ?? { x: boat.x + 1.3 * c, y: SEA_LEVEL - 1, z: boat.z - 1.3 * s };
@@ -756,7 +872,7 @@ export class Game {
     this.acc += dt;
     while (this.acc >= STEP) {
       this.acc -= STEP;
-      if (stepBoat(boat, intent, STEP, world.terrain)) this.audio.land(4);
+      if (stepBoat(boat, intent, STEP, world.ground)) this.audio.land(4);
     }
     const seat = seatOf(boat);
     b.vx = (seat.x - b.x) / Math.max(dt, 1e-3);
@@ -788,7 +904,7 @@ export class Game {
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
       .map(blockSolid);
-    if (solids.length) this.world?.terrain.addSolids(p.id, solids);
+    if (solids.length) this.world?.ground.addSolids(p.id, solids);
   }
 
   private onAnimalHit(msg: Extract<ServerMsg, { t: "ahit" }>) {
@@ -814,7 +930,7 @@ export class Game {
         this.myLine = null;
         this.bite = null;
       } else {
-        const depth = this.world ? depthAt(this.world.terrain.heightAt(msg.x, msg.z)) : 0;
+        const depth = this.world ? depthAt(this.world.ground.heightAt(msg.x, msg.z)) : 0;
         if (msg.state === "cast") this.audio.splash(0.25);
         this.myLine = { state: msg.state, depth };
       }
@@ -871,7 +987,7 @@ export class Game {
     const z = b.z + (dir.z / flat) * reach;
     this.viewmodel.swing(false);
     this.audio.swing(null, false);
-    if (depthAt(world.terrain.heightAt(x, z)) < MIN_CAST_DEPTH) {
+    if (depthAt(world.ground.heightAt(x, z)) < MIN_CAST_DEPTH) {
       this.say("Cast out over the water", 2);
       return;
     }
@@ -882,20 +998,26 @@ export class Game {
     this.body = createBody(s.x, s.y, s.z, s.yaw);
     this.input.yaw = s.yaw;
     this.input.pitch = -0.05;
-    this.breath = 100;
     this.health = HEALTH_MAX;
     this.smoothEye = s.y + EYE_HEIGHT;
+    this.flying = false;
   }
 
   private onWorld(info: WorldInfo) {
-    if (this.world?.seed !== info.seed) this.buildWorld(info.seed);
+    if (!this.sameWorld(info.islands)) this.buildWorld();
+    const world = this.world!;
+    for (const island of info.islands) this.addIsland(island);
+    this.mine = info.mine;
+    this.settlePending = false;
+    if (info.you) this.settleError = null;
+    /* Choosing where to settle needs the mouse. */
+    if (this.settling) this.input.unlock();
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
-    const world = this.world!;
     world.drops.clear();
     for (const w of info.weapons) world.drops.add(w);
     this.board = info.board;
-    for (const p of this.built.list()) world.terrain.removeSolids(p.id);
+    for (const p of this.built.list()) world.ground.removeSolids(p.id);
     this.built.reset([]);
     for (const p of info.prefabs) this.addPrefab(p);
     if (info.you) this.place(info.you);
@@ -931,7 +1053,7 @@ export class Game {
     this.haveClock = true;
 
     for (const p of msg.p as PlayerSnap[]) {
-      const [id, x, y, z, yaw, pitch, flags, , weapon, stagger] = p;
+      const [id, x, y, z, yaw, pitch, flags, weapon, stagger] = p;
       const r = this.remotes.get(id);
       if (!r) continue;
       r.avatar.setGear(weaponFromIndex(weapon ?? 0), stagger ?? 0);
@@ -959,7 +1081,6 @@ export class Game {
     }
 
     if (msg.me) {
-      this.breath = msg.me.breath;
       this.health = msg.me.health;
     }
   }
@@ -1010,8 +1131,8 @@ export class Game {
     for (const d of [0.65, 1]) {
       const px = b.x + fx * d;
       const pz = b.z + fz * d;
-      if (world.terrain.heightAt(px, pz) > b.y + 0.8) return true;
-      for (const s of world.terrain.solidsNear(px, pz)) {
+      if (world.ground.heightAt(px, pz) > b.y + 0.8) return true;
+      for (const s of world.ground.solidsNear(px, pz)) {
         if (s.bottom < b.y + 1.4 && s.top > b.y + 0.9 && overSolid(s, px, pz)) return true;
       }
     }
@@ -1070,7 +1191,7 @@ export class Game {
     this.update(dt);
 
     if (this.world) {
-      this.world.props.update(t);
+      for (const o of this.world.islands.values()) o.props.update(t);
       this.world.drops.update(t);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
@@ -1103,7 +1224,6 @@ export class Game {
     const u = this.post.uniforms;
     u.uTime.value = t;
     u.uUnder.value = this.under;
-    u.uBreath.value = this.body ? clamp(this.breath / 70, 0, 1) : 1;
     u.uFlash.value = this.flash;
     this.flash = Math.max(0, this.flash - dt * 3.5);
     /* Blacking out: the world fades, then comes back when you wake. */
@@ -1136,11 +1256,28 @@ export class Game {
       const def = weaponDef(this.weapon);
       this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
       const charging = this.chargeStart !== null;
+      if (active && this.input.take("creative")) this.toggleCreative(b);
+      const tapped = active && this.input.take("jump");
+      /* In creative, a double tap of Space takes off or comes down, as in the usual sandbox games. */
+      if (tapped && this.creative && !this.boat) {
+        const now = performance.now() / 1000;
+        if (now - this.lastJumpTap < 0.3) {
+          this.setFlying(b, !this.flying);
+          this.lastJumpTap = 0;
+        } else this.lastJumpTap = now;
+      }
+      const fly = {
+        forward: active ? this.input.forward : 0,
+        right: active ? this.input.right : 0,
+        up: active && this.input.jumpHeld,
+        down: active && this.input.sprint,
+        boost: active && this.input.boost,
+      };
       const intent = active
         ? {
             forward: this.input.forward,
             right: this.input.right,
-            jump: this.input.take("jump") || this.input.jumpHeld,
+            jump: tapped || this.input.jumpHeld,
             sprint: this.input.sprint,
             speedScale: (def.speed ?? 1) * (this.blocking ? 0.6 : 1),
             noSprint: charging || this.blocking,
@@ -1149,9 +1286,17 @@ export class Game {
 
       if (this.boat) this.row(dt, b, active);
       else this.acc += dt;
-      const stepWorld = { terrain: world.terrain };
+      const stepWorld = { terrain: world.ground };
       while (!this.boat && this.acc >= STEP) {
         this.acc -= STEP;
+        if (this.flying) {
+          if (stepFly(b, fly, STEP, stepWorld).landed) {
+            this.flying = false;
+            this.audio.land(4);
+          }
+          continue;
+        }
+        if (this.creative) b.stamina = STAMINA_MAX;
         const ev = stepBody(b, intent, STEP, stepWorld);
         if (ev.jumped) this.audio.jump();
         if (ev.landed > 3) {
@@ -1211,6 +1356,7 @@ export class Game {
       this.sendAcc += dt;
       if (this.sendAcc >= 1 / TICK_HZ) {
         this.sendAcc = 0;
+        if (this.safeFall && (b.grounded || b.y < SEA_LEVEL)) this.safeFall = false;
         this.conn?.send({
           t: "move",
           x: b.x,
@@ -1224,7 +1370,9 @@ export class Game {
           flags:
             (b.sprinting ? FLAG.sprint : 0) |
             (b.grounded ? FLAG.grounded : 0) |
-            (b.y < SEA_LEVEL ? FLAG.wet : 0),
+            (b.y < SEA_LEVEL ? FLAG.wet : 0) |
+            (this.flying ? FLAG.fly : 0) |
+            (this.creative || this.safeFall ? FLAG.creative : 0),
           boat: this.boat ? { rot: this.boat.rot, speed: this.boat.speed } : undefined,
         });
       }
@@ -1232,7 +1380,7 @@ export class Game {
       const depth = SEA_LEVEL - b.y;
       if (depth > FLOAT_DEPTH - 0.2 && !this.wasUnder) this.audio.splash(1);
       this.wasUnder = depth > FLOAT_DEPTH - 0.2;
-      const strain = Math.min(this.breath / 40, this.health / 30);
+      const strain = this.health / 30;
       if (strain < 1) this.audio.heartbeat(lerp(0.45, 1.1, strain));
       this.firstPerson(dt, b);
     } else {
@@ -1240,10 +1388,33 @@ export class Game {
       this.orbitCamera(dt);
     }
 
-    if (this.input.take("music")) this.toggleMusic();
-
     const above = this.camera.position.y - SEA_LEVEL;
     this.audio.ambience(above, this.under > 0.5, this.camera.position.y);
+  }
+
+  /* Shift+C: in or out of creative. Going in takes you up into the air. */
+  private toggleCreative(b: Body) {
+    this.creative = !this.creative;
+    if (this.creative) {
+      this.safeFall = false;
+      if (!this.boat) this.setFlying(b, true);
+      this.pushFeed("Creative mode");
+    } else {
+      this.flying = false;
+      this.safeFall = !b.grounded && b.y > SEA_LEVEL;
+      this.pushFeed("Survival mode");
+    }
+  }
+
+  private setFlying(b: Body, on: boolean) {
+    this.flying = on;
+    if (on) {
+      /* A little hop up off the ground to start with. */
+      b.vy = Math.max(b.vy, 6);
+      b.grounded = false;
+      b.climbing = false;
+      b.ladderCooldown = 0.5;
+    }
   }
 
   private dropInputs() {
@@ -1257,6 +1428,7 @@ export class Game {
       "build",
       "rotate",
       "jump",
+      "creative",
     ] as const)
       this.input.take(a);
     this.input.takeDigit();
@@ -1295,11 +1467,11 @@ export class Game {
       }
     };
     if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
-    const bd = world.terrain.board;
-    if (FEATURES.bounties)
+    const bd = world.ground.primary?.board;
+    if (FEATURES.bounties && bd)
       consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
-    const sh = world.terrain.shop;
-    if (FEATURES.shop)
+    const sh = world.ground.primary?.shop;
+    if (FEATURES.shop && sh)
       consider(sh.x, sh.y, sh.z, 3.4, () => ({
         kind: "shop",
         id: 0,
@@ -1417,8 +1589,8 @@ export class Game {
     for (let d = 0; d < BUILD_REACH + 2; d += 0.25) {
       p.addScaledVector(dir, d === 0 ? 0 : 0.25);
       let ground = def.onFloors
-        ? world.terrain.groundAt(p.x, p.z, p.y).ground
-        : world.terrain.heightAt(p.x, p.z);
+        ? world.ground.groundAt(p.x, p.z, p.y).ground
+        : world.ground.heightAt(p.x, p.z);
       if (def.placing !== "land") ground = Math.max(ground, SEA_LEVEL);
       if (p.y <= ground) {
         hit = { x: p.x, y: ground, z: p.z };
@@ -1430,7 +1602,7 @@ export class Game {
       const flat = Math.hypot(dir.x, dir.z) || 1;
       const x = b.x + (dir.x / flat) * reach;
       const z = b.z + (dir.z / flat) * reach;
-      hit = { x, y: world.terrain.heightAt(x, z), z };
+      hit = { x, y: world.ground.heightAt(x, z), z };
     }
     /* Something already built under the crosshair? Then that's what you're pointing at. */
     let target: Prefab | null = null;
@@ -1457,7 +1629,7 @@ export class Game {
       this.built.ghost.show(target.kind, target.x, target.y, target.z, target.rot, "pick");
       return;
     }
-    build.verdict = checkPlacement(world.terrain, kind, hit.x, hit.z, rot, b);
+    build.verdict = checkPlacement(world.ground, kind, hit.x, hit.z, rot, b);
     this.built.ghost.show(kind, hit.x, build.verdict.y, hit.z, rot, build.verdict.ok ? "ok" : "no");
   }
 
@@ -1527,7 +1699,7 @@ export class Game {
 
   private nearShop() {
     const b = this.body;
-    const s = this.world?.terrain.shop;
+    const s = this.world?.ground.primary?.shop;
     return !!b && !!s && Math.hypot(s.x - b.x, s.z - b.z) < SHOP_REACH && Math.abs(s.y - b.y) < 3;
   }
 
@@ -1564,7 +1736,7 @@ export class Game {
 
   private nearBoard() {
     const b = this.body;
-    const bd = this.world?.terrain.board;
+    const bd = this.world?.ground.primary?.board;
     return (
       !!b && !!bd && Math.hypot(bd.x - b.x, bd.z - b.z) < BOARD_REACH && Math.abs(bd.y - b.y) < 3
     );
@@ -1626,7 +1798,7 @@ export class Game {
     const eye = this.boat
       ? b.y + EYE_HEIGHT - 0.55 + Math.sin(t * 1.3 + this.boat.id) * 0.04
       : b.y + EYE_HEIGHT;
-    if (eye > this.smoothEye && eye - this.smoothEye < 5) {
+    if (eye > this.smoothEye && eye - this.smoothEye < 5 && !this.flying) {
       this.smoothEye += (eye - this.smoothEye) * Math.min(1, dt * 16);
     } else this.smoothEye = eye;
 
@@ -1644,7 +1816,9 @@ export class Game {
     );
     this.camera.translateX(bobX);
 
-    const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + Math.abs(this.kick) * 4;
+    /* The view widens as you pick up speed in the air. */
+    const rush = this.flying ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST) : 0;
+    const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + rush * 22 + Math.abs(this.kick) * 4;
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
     this.setFov(this.fov);
   }
@@ -1674,10 +1848,17 @@ export class Game {
     const world = this.world;
     if (!world) return;
     const t = performance.now() / 1000;
-    const lh = world.terrain.lighthouse;
+    /* Round the newest island (yours, once you've settled), or out over the open sea. */
+    const islands = [...world.islands.values()];
+    const focus = world.islands.get(this.mine ?? -1) ?? islands[islands.length - 1];
+    const lh = focus
+      ? world.ground.islands.get(focus.info.id)!.terrain.lighthouse
+      : { x: 0, y: 0, z: 0 };
     const a = t * 0.03;
     const radius = 210;
-    this.tmpV.set(lh.x * 0.5, lh.y * 0.4, lh.z * 0.5);
+    const cx = focus ? focus.info.x : 0;
+    const cz = focus ? focus.info.z : 0;
+    this.tmpV.set(cx + (lh.x - cx) * 0.5, lh.y * 0.4, cz + (lh.z - cz) * 0.5);
     this.camera.position.set(
       this.tmpV.x + Math.cos(a) * radius,
       lh.y * 0.55 + 52 + Math.sin(t * 0.07) * 8,
@@ -1739,7 +1920,6 @@ export class Game {
     this.feed = this.feed.filter((f) => now - f.at < 7);
     const playing = !!this.body && !this.down;
     const def = weaponDef(this.weapon);
-    this.audio.intensity(this.musicIntensity());
 
     /* Weapons on the ground: on screen, or an arrow at the edge pointing at them. */
     const markers: HudState["markers"] = [];
@@ -1800,14 +1980,21 @@ export class Game {
     this.onHud({
       mode: this.mode,
       connecting: this.connecting,
+      settling: this.settling
+        ? {
+            error: this.settleError,
+            pending: this.settlePending,
+            islands: this.world?.islands.size ?? 0,
+          }
+        : null,
       notice: this.notice,
       humans: this.roster.length,
       name: this.myName,
       player: playing,
+      creative: this.creative,
       health: this.health,
       hurt: this.hurtFlash,
       down: this.down,
-      breath: this.breath,
       stamina: this.body ? this.body.stamina / STAMINA_MAX : 1,
       shove: clamp((this.attackReadyAt - now) / def.cooldown, 0, 1),
       underwater: this.under > 0.5,
@@ -1815,13 +2002,15 @@ export class Game {
       locked: this.touch || this.input.locked || this.forceActive,
       inv: this.inventoryView(),
       panel: this.panel,
-      hint: this.boat
-        ? `W/S row · A/D turn · E get out${held && TOOLS[held.kind].rod ? ` · ${this.rodHint()}` : ""}`
-        : held && TOOLS[held.kind].rod
-          ? this.rodHint()
-          : held
-            ? def.hint
-            : null,
+      hint: this.flying
+        ? "Space up · Shift down · double-tap W to rush · double-tap Space to drop"
+        : this.boat
+          ? `W/S row · A/D turn · E get out${held && TOOLS[held.kind].rod ? ` · ${this.rodHint()}` : ""}`
+          : held && TOOLS[held.kind].rod
+            ? this.rodHint()
+            : held
+              ? def.hint
+              : null,
       fishing: this.myLine
         ? {
             state: this.myLine.state,
@@ -1851,21 +2040,6 @@ export class Game {
       prompt,
       markers,
       target,
-      music: this.audio.musicOn,
     });
-  }
-
-  /* How tense the score should be: low breath, low health, danger. */
-  private musicIntensity() {
-    if (this.mode === "attract") return 0.05;
-    if (!this.body || this.down) return 0.15;
-    let danger = 0;
-    for (const a of this.herd.list().values()) {
-      if (a.state !== ANIMAL_STATE.charge && a.state !== ANIMAL_STATE.alert) continue;
-      if (a.kind === "boar" && this.distanceTo(a.x, a.z) < 22) danger = 1;
-    }
-    const breath = clamp(1 - this.breath / 100, 0, 1);
-    const hurt = clamp(1 - this.health / HEALTH_MAX, 0, 1);
-    return clamp(0.12 + breath * 0.4 + hurt * 0.45 + danger * 0.4, 0, 1);
   }
 }

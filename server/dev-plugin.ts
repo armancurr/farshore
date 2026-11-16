@@ -1,10 +1,31 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
+import { dirname, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import type { Plugin } from "vite";
 import { type WebSocket, WebSocketServer } from "ws";
 import { Room } from "../src/game/server/room";
 import { TICK_HZ } from "../src/game/shared/constants";
 import { parseClientMsg, type ServerMsg } from "../src/game/shared/protocol";
+import { parseWorldSave, type WorldSave } from "../src/game/shared/save";
+
+/*
+ * The grand map survives dev-server restarts here. Delete the file for a fresh
+ * map; set FARSHORE_WORLD to keep a second dev server's map apart.
+ */
+const WORLD_FILE = resolve(
+  import.meta.dirname,
+  "..",
+  process.env.FARSHORE_WORLD ?? ".farshore/world.json",
+);
+
+function loadWorld(): WorldSave | null {
+  try {
+    return parseWorldSave(JSON.parse(readFileSync(WORLD_FILE, "utf8")));
+  } catch {
+    return null;
+  }
+}
 
 /*
  * Local multiplayer: the Vite dev server hosts the same Room the Cloudflare
@@ -16,7 +37,24 @@ export function tideDevServer(): Plugin {
     apply: "serve",
     configureServer(server) {
       const wss = new WebSocketServer({ noServer: true });
-      const room = new Room({ online: true });
+      let saveTimer: ReturnType<typeof setTimeout> | null = null;
+      const store = () => {
+        saveTimer = null;
+        try {
+          mkdirSync(dirname(WORLD_FILE), { recursive: true });
+          writeFileSync(WORLD_FILE, JSON.stringify(room.exportWorld(), null, 1));
+        } catch (error) {
+          console.warn("farshore: couldn't store the grand map", error);
+        }
+      };
+      const room = new Room({
+        online: true,
+        settle: true,
+        world: loadWorld(),
+        onChange: () => {
+          saveTimer ??= setTimeout(store, 500);
+        },
+      });
       const sockets = new Set<WebSocket>();
       const timer = setInterval(() => {
         if (room.active()) room.tick();
@@ -30,6 +68,10 @@ export function tideDevServer(): Plugin {
           const peer = {
             send: (msg: ServerMsg) => {
               if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+            },
+            close: () => {
+              id = -1;
+              ws.close(4000, "replaced");
             },
           };
           ws.on("message", (data) => {
@@ -56,6 +98,8 @@ export function tideDevServer(): Plugin {
 
       server.httpServer?.on("close", () => {
         clearInterval(timer);
+        if (saveTimer) clearTimeout(saveTimer);
+        store();
         for (const ws of sockets) ws.close();
         wss.close();
       });

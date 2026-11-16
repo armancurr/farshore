@@ -1,151 +1,313 @@
 import * as THREE from "three";
-import { CONTOUR, GRID, WORLD_SIZE } from "../../shared/constants";
+import { CONTOUR, GRAND_SIZE, GRID, MAX_ISLANDS, TILE_SIZE } from "../../shared/constants";
 import type { Terrain } from "../../shared/terrain";
 import { GLSL_COMMON, shared } from "./materials";
+import { bakeShoreDistance, SHORE_CELL, SHORE_GRID } from "./shore";
+
+/*
+ * Swash: every period a wave runs up the beach quickly, then drains back
+ * slowly. Only the drawn waterline moves; the game's sea level stays put.
+ * Needs uTime.
+ */
+const GLSL_SWASH = /* glsl */ `
+  const float SWASH_PERIOD = 8.0;
+  const float SWASH_LOW = -0.1;
+  const float SWASH_HIGH = 0.22;
+
+  float swashPhase() {
+    return fract(uTime / SWASH_PERIOD);
+  }
+
+  float swashLevel() {
+    float ph = swashPhase();
+    float l = ph < 0.22 ? sin(ph / 0.22 * 1.5707963) : 0.5 + 0.5 * cos((ph - 0.22) / 0.78 * 3.1415927);
+    return mix(SWASH_LOW, SWASH_HIGH, l);
+  }
+
+  float swashRecede() {
+    return smoothstep(0.22, 0.45, swashPhase());
+  }
+`;
+
+/*
+ * The ground as the shaders see it: a cubic B-spline over the heightmap, with
+ * its exact gradient. The mesh itself is only linear between samples, so lines
+ * drawn from its height would kink at every triangle; drawn from this they curve.
+ */
+const GLSL_FIELD = /* glsl */ `
+  uniform highp sampler2D uHeights;
+  /* The centre of this island's tile on the grand map. */
+  uniform vec2 uOrigin;
+  uniform float uHalf;
+  uniform float uCell;
+  uniform int uGrid;
+
+  void bspline(float t, out vec4 w, out vec4 d) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float u = 1.0 - t;
+    w = vec4(u * u * u, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
+    d = vec4(-0.5 * u * u, 1.5 * t2 - 2.0 * t, -1.5 * t2 + t + 0.5, 0.5 * t2);
+  }
+
+  /* (height, dh/dx, dh/dz) at a point on the ground. */
+  vec3 field(vec2 xz) {
+    vec2 g = (xz - uOrigin + uHalf) / uCell;
+    vec2 i = floor(g);
+    vec2 f = g - i;
+    vec4 wx, dx, wz, dz;
+    bspline(f.x, wx, dx);
+    bspline(f.y, wz, dz);
+    ivec2 base = ivec2(i) - 1;
+    ivec2 top = ivec2(uGrid - 1);
+    float h = 0.0, hx = 0.0, hz = 0.0;
+    for (int b = 0; b < 4; b++) {
+      float row = 0.0, rowD = 0.0;
+      for (int a = 0; a < 4; a++) {
+        float s = texelFetch(uHeights, clamp(base + ivec2(a, b), ivec2(0), top), 0).r;
+        row += wx[a] * s;
+        rowD += dx[a] * s;
+      }
+      h += wz[b] * row;
+      hx += wz[b] * rowD;
+      hz += dz[b] * row;
+    }
+    return vec3(h, hx / uCell, hz / uCell);
+  }
+
+  /* Iso-lines of v, a steady px pixels wide, given v's screen-space gradient; they fade before they'd alias. */
+  float isoPx(float v, vec2 dv, float px) {
+    float w = max(length(dv), 1e-6);
+    float d = abs(fract(v - 0.5) - 0.5) / w;
+    return (1.0 - smoothstep(px * 0.5 - 0.5, px * 0.5 + 0.5, d)) * (1.0 - smoothstep(0.12, 0.3, w));
+  }
+
+  /* The single line where v is zero, px pixels wide, given |screen gradient| g. */
+  float zeroPx(float v, float g, float px) {
+    return 1.0 - smoothstep(px * 0.5 - 0.6, px * 0.5 + 0.6, abs(v) / max(g, 1e-6));
+  }
+
+  float hash2(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash2(i), hash2(i + vec2(1.0, 0.0)), f.x), mix(hash2(i + vec2(0.0, 1.0)), hash2(i + 1.0), f.x), f.y);
+  }
+
+`;
 
 const TERRAIN_VERTEX = /* glsl */ `
   varying vec3 vWorld;
-  varying vec3 vNormal;
   void main() {
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
-    vNormal = normalize(mat3(modelMatrix) * normal);
     gl_Position = projectionMatrix * viewMatrix * world;
   }
 `;
 
 /*
- * The island is drawn as a survey map: near-black ground, a white contour every
- * 2.5 m, a heavier index contour every 10 m, and hachures where it's steep.
+ * The island is drawn as a survey map: grey ground, a white contour every
+ * 2.5 m and a heavier index contour every 10 m, all traced from the smooth
+ * field so they curve cleanly and hold one width. At the water's edge the
+ * ground draws the swash itself: wet sand, a sheen as the wave drains, and
+ * foam lace in thin lines.
  */
 const TERRAIN_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
+  ${GLSL_SWASH}
+  ${GLSL_FIELD}
   uniform float uContour;
   varying vec3 vWorld;
-  varying vec3 vNormal;
   void main() {
-    vec3 n = normalize(vNormal);
+    vec3 hf = field(vWorld.xz);
+    float h = hf.x;
+    float slope = length(hf.yz);
+    vec3 n = normalize(vec3(-hf.y, 1.0, -hf.z));
     float diff = sunlight(n);
-    float h = vWorld.y;
 
-    float minor = isoLine(h / uContour, 1.1);
-    float major = isoLine(h / (uContour * 4.0), 1.8);
-    float lines = max(minor * 0.5, major * 0.85);
+    /* How fast h changes per pixel, exactly, so every line holds its width. */
+    vec2 dh = vec2(dot(hf.yz, dFdx(vWorld).xz), dot(hf.yz, dFdy(vWorld).xz));
+    float gpx = max(length(dh), 1e-6);
+
+    float dist = length(cameraPosition - vWorld);
+    float weight = mix(1.4, 0.95, smoothstep(15.0, 220.0, dist));
+    float minor = isoPx(h / uContour, dh / uContour, 1.25 * weight);
+    float major = isoPx(h / (uContour * 4.0), dh / (uContour * 4.0), 2.3 * weight);
+    /* On level ground a contour would wander; let it go instead. */
+    float lines = max(minor * 0.5, major * 0.9) * smoothstep(0.004, 0.03, slope);
 
     float steep = smoothstep(0.9, 0.62, n.y);
-    float hatch = isoLine((vWorld.x * 0.62 + vWorld.z * 0.78) * 1.25, 0.9) * steep * 0.2;
 
     /* Fine stipple on flat ground so it doesn't read as a void. */
-    vec2 g = floor(vWorld.xz * 2.0);
-    float grain = fract(sin(dot(g, vec2(12.9898, 78.233))) * 43758.5453);
+    float grain = hash2(floor(vWorld.xz * 2.0));
     vec2 cellPos = fract(vWorld.xz * 2.0) - 0.5;
     float dotMask = 1.0 - smoothstep(0.05, 0.09, length(cellPos));
-    float dots = step(0.94, grain) * dotMask * 0.12 * (1.0 - steep);
+    float dots = step(0.94, grain) * dotMask * 0.1 * (1.0 - steep) * (1.0 - smoothstep(0.08, 0.25, gpx * 4.0));
 
-    float c = lift(0.04 + 0.12 * diff) + (lines + hatch) * (0.55 + 0.45 * diff) + dots;
+    float c = lift(0.04 + 0.12 * diff) * mix(1.0, 0.86, steep) + lines * (0.55 + 0.45 * diff) + dots;
 
-    /* Wet sand: a dark band just above the waterline. */
-    float above = h - SEA_LEVEL;
-    c *= mix(0.5, 1.0, smoothstep(0.0, 1.2, above));
-    c *= mix(1.0, 0.4, step(above, 0.0));
+    /* The shore. */
+    float waterY = swashLevel();
+    float recede = swashRecede();
+    float under = waterY - h;
+    float mpp = gpx / max(slope, 1e-4); /* metres per pixel, across the slope */
+
+    float wet = 1.0 - smoothstep(SWASH_HIGH - 0.02, SWASH_HIGH + 0.06, h);
+    c *= mix(1.0, 0.62, wet * (1.0 - smoothstep(0.0, 0.4, under)));
+    float sheen = exp(-max(-under, 0.0) / 0.035) * step(under, 0.0) * recede;
+    c += sheen * 0.07;
+    c = mix(c, 0.085 + lines * 0.12, smoothstep(0.0, 0.7, under));
+
+    float edge = zeroPx(under, gpx, max(1.8, 0.22 / mpp));
+    float lace = 0.0;
+    for (int i = 1; i <= 3; i++) {
+      float k = float(i);
+      float li = zeroPx(under - k * (0.05 + 0.03 * recede), gpx, max(1.1, 0.07 / mpp));
+      float broken = smoothstep(0.38, 0.62, vnoise(vWorld.xz * 1.1 + k * 17.3 + vec2(uTime * 0.2, -uTime * 0.13)));
+      lace = max(lace, li * broken * (1.0 - k * 0.2));
+    }
+    float wrack = zeroPx(h - SWASH_HIGH - 0.01, gpx, max(1.0, 0.05 / mpp)) * smoothstep(0.45, 0.7, vnoise(vWorld.xz * 2.5)) * 0.45;
+    float foam = max(max(edge * (1.0 - 0.45 * recede), lace * 0.7 * (1.0 - 0.55 * recede)), wrack);
+    c = mix(c, 0.97, foam);
 
     gl_FragColor = vec4(vec3(applyFog(c, vWorld)), 1.0);
   }
 `;
 
 const WATER_VERTEX = /* glsl */ `
+  uniform float uTime;
+  ${GLSL_SWASH}
   varying vec3 vWorld;
   void main() {
     vec4 world = modelMatrix * vec4(position, 1.0);
+    world.y += swashLevel();
     vWorld = world.xyz;
     gl_Position = projectionMatrix * viewMatrix * world;
   }
 `;
 
 /*
- * The sea reads the island's heightmap to know its own depth: a foam line hugs
- * the shore, iso-depth ripples roll inland, and long swells cross open water.
+ * The sea is engraved like an old chart: water-lines that follow the coast,
+ * close together at the beach and wider apart offshore. They roll in one per
+ * swash period, so each line that reaches the shore is the wave that runs up
+ * the sand. Shallow water stays clear and leaves the edge to the ground.
  */
 const WATER_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
-  uniform sampler2D uHeights;
-  uniform float uHalf;
-  uniform float uGrid;
-  uniform float uCell;
+  ${GLSL_SWASH}
+  ${GLSL_FIELD}
+  uniform sampler2D uShore;
+  uniform float uShoreGrid;
+  uniform float uShoreCell;
   varying vec3 vWorld;
+
+  float shoreDistance(vec2 local) {
+    vec2 uv = ((local + uHalf) / uShoreCell + 0.5) / uShoreGrid;
+    return texture2D(uShore, clamp(uv, 0.0, 1.0)).r + length(max(abs(local) - uHalf, 0.0));
+  }
+
   void main() {
-    vec2 uv = ((vWorld.xz + uHalf) / uCell + 0.5) / uGrid;
-    float ground = texture2D(uHeights, clamp(uv, 0.0, 1.0)).r;
-    float outside = step(1.0, max(abs(vWorld.x), abs(vWorld.z)) / uHalf);
-    ground = mix(ground, -30.0, outside);
-    float depth = SEA_LEVEL - ground;
+    vec2 xz = vWorld.xz;
+    vec2 local = xz - uOrigin;
+    float edge = max(abs(local.x), abs(local.y));
+    float inside = step(edge, uHalf);
+    float ground = mix(-30.0, field(xz).x, inside);
+    float depth = vWorld.y - ground;
+    float s = shoreDistance(local);
 
-    float lap = 0.28 + 0.14 * sin(uTime * 1.4 + vWorld.x * 0.21 + vWorld.z * 0.17);
-    float foam = 1.0 - smoothstep(0.0, lap, depth);
-    float foam2 = isoLine(depth * 1.6 - uTime * 0.5, 1.2) * (1.0 - smoothstep(0.1, 2.2, depth));
+    float ph = 7.0 * log(1.0 + s / 10.6) + uTime / SWASH_PERIOD;
+    float w = max(length(vec2(dFdx(ph), dFdy(ph))), 1e-5);
+    float id = floor(ph + 0.5);
+    float near = exp(-s / 18.0);
+    float px = mix(1.0, 2.6, near);
+    float line = (1.0 - smoothstep(px * 0.5 - 0.5, px * 0.5 + 0.5, abs(ph - id) / w)) * (1.0 - smoothstep(0.15, 0.35, w));
+    /* Offshore each line breaks into crests; inshore it runs the length of the beach. */
+    float gaps = smoothstep(0.3, 0.52, vnoise(xz * 0.03 + vec2(id * 7.31, id * 3.17)));
+    line *= mix(gaps, 1.0, smoothstep(28.0, 8.0, s));
+    line *= 1.0 - smoothstep(95.0, 165.0, s);
+    /* Toward the tile's edge the lines let go, so it meets the open sea (or a neighbour) without a seam. */
+    line *= 1.0 - smoothstep(uHalf - 80.0, uHalf - 8.0, edge);
+    float tone = mix(0.17, 0.6, near) + 0.3 * exp(-s / 2.5);
 
-    float ripples = isoLine(depth * 0.9 + uTime * 0.32, 1.0) * (1.0 - smoothstep(0.6, 9.0, depth));
-
-    float warp = sin(vWorld.x * 0.045 + uTime * 0.3) * 4.0 + sin(vWorld.x * 0.011 - uTime * 0.17) * 11.0;
-    float swell = isoLine((vWorld.z + warp) * 0.22 + uTime * 0.2, 0.9) * smoothstep(1.5, 10.0, depth);
-
-    /* The sun's path on the water, broken up by the swell. */
+    /* The sun's path on the water. */
     vec3 view = normalize(vWorld - cameraPosition);
     vec3 r = reflect(view, vec3(0.0, 1.0, 0.0));
     float glint = pow(max(dot(r, uSun), 0.0), 60.0) * uLight;
-    float sparkle = 0.5 + 0.5 * sin(vWorld.x * 2.7 + sin(vWorld.z * 1.9 + uTime * 1.3) * 2.0 + uTime * 2.2);
-    glint *= 0.3 + 0.7 * sparkle * sparkle;
+    /* Broken into drifting glitter rather than a regular pattern. */
+    float sparkle = vnoise(xz * 0.9 + uTime * vec2(0.4, 0.25)) * vnoise(xz * vec2(1.7, 2.3) - uTime * vec2(0.3, 0.5));
+    glint *= 0.15 + 0.85 * smoothstep(0.12, 0.45, sparkle);
 
-    /* Near-black, so the lighter land stands clear of it; the swell stays faint. */
-    float c = 0.08 + ripples * 0.32 + swell * 0.08 + foam2 * 0.4 + glint * 0.9;
-    c = max(c, foam * 0.95);
-    float alpha = mix(0.55, 0.95, smoothstep(0.0, 5.0, depth));
-    alpha = max(alpha, foam);
+    float c = mix(0.075 + glint * 0.9, tone, line);
+    /* Clear in the shallows, so the ground's edge shows; solid once it's deep. */
+    float alpha = 0.93 * smoothstep(0.25, 1.6, depth) + 0.07 * smoothstep(2.0, 6.0, depth);
+    alpha = max(alpha, line * smoothstep(0.02, 0.25, depth));
+    if (depth < 0.0) alpha = 0.0;
 
-    if (!gl_FrontFacing) { c = 0.12 + ripples * 0.2; alpha = 0.85; }
+    if (!gl_FrontFacing) { c = 0.12 + line * 0.15; alpha = 0.85; }
 
     gl_FragColor = vec4(vec3(applyFog(c, vWorld)), alpha);
   }
 `;
 
-export function createTerrainMesh(terrain: Terrain) {
-  const geo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, GRID - 1, GRID - 1);
+function heightTexture(terrain: Terrain) {
+  const tex = new THREE.DataTexture(
+    new Float32Array(terrain.heights),
+    GRID,
+    GRID,
+    THREE.RedFormat,
+    THREE.FloatType,
+  );
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/*
+ * One island: its ground and the sea over its tile, sharing one height
+ * texture, both placed at the island's spot on the grand map.
+ */
+export function createLand(terrain: Terrain) {
+  const heights = heightTexture(terrain);
+  const shore = bakeShoreDistance(terrain.heights);
+  const field = {
+    uHeights: { value: heights },
+    uOrigin: { value: new THREE.Vector2(terrain.ox, terrain.oz) },
+    uHalf: { value: TILE_SIZE / 2 },
+    uCell: { value: TILE_SIZE / (GRID - 1) },
+    uGrid: { value: GRID },
+  };
+
+  const geo = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, GRID - 1, GRID - 1);
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   for (let k = 0; k < pos.count; k++) pos.setY(k, terrain.heights[k]);
   geo.deleteAttribute("uv");
-  geo.computeVertexNormals();
+  geo.deleteAttribute("normal");
   geo.computeBoundingSphere();
-
-  const mat = new THREE.ShaderMaterial({
-    uniforms: { ...shared, uContour: { value: CONTOUR } },
+  const groundMat = new THREE.ShaderMaterial({
+    uniforms: { ...shared, ...field, uContour: { value: CONTOUR } },
     vertexShader: TERRAIN_VERTEX,
     fragmentShader: TERRAIN_FRAGMENT,
   });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.name = "terrain";
-  return mesh;
-}
+  const ground = new THREE.Mesh(geo, groundMat);
+  ground.name = "terrain";
+  ground.position.set(terrain.ox, 0, terrain.oz);
 
-export function createWater(terrain: Terrain) {
-  const data = new Uint16Array(GRID * GRID);
-  for (let k = 0; k < data.length; k++) data[k] = THREE.DataUtils.toHalfFloat(terrain.heights[k]);
-  const tex = new THREE.DataTexture(data, GRID, GRID, THREE.RedFormat, THREE.HalfFloatType);
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearFilter;
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.needsUpdate = true;
-
-  const geo = new THREE.PlaneGeometry(4000, 4000, 1, 1);
-  geo.rotateX(-Math.PI / 2);
-  const mat = new THREE.ShaderMaterial({
+  /* A touch wider than the tile, so it overlaps the open sea rather than leaving a crack. */
+  const seaGeo = new THREE.PlaneGeometry(TILE_SIZE + 1, TILE_SIZE + 1, 1, 1);
+  seaGeo.rotateX(-Math.PI / 2);
+  const seaMat = new THREE.ShaderMaterial({
     uniforms: {
       ...shared,
-      uHeights: { value: tex },
-      uHalf: { value: WORLD_SIZE / 2 },
-      uGrid: { value: GRID },
-      uCell: { value: WORLD_SIZE / (GRID - 1) },
+      ...field,
+      uShore: { value: shore },
+      uShoreGrid: { value: SHORE_GRID },
+      uShoreCell: { value: SHORE_CELL },
     },
     vertexShader: WATER_VERTEX,
     fragmentShader: WATER_FRAGMENT,
@@ -153,9 +315,87 @@ export function createWater(terrain: Terrain) {
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.name = "water";
-  mesh.renderOrder = 2;
-  mesh.frustumCulled = false;
-  return mesh;
+  const sea = new THREE.Mesh(seaGeo, seaMat);
+  sea.name = "water";
+  sea.renderOrder = 2;
+  sea.position.set(terrain.ox, 0, terrain.oz);
+
+  /* The textures go when the ground does: the world tears down by disposing materials. */
+  groundMat.addEventListener("dispose", () => {
+    heights.dispose();
+    shore.dispose();
+  });
+
+  return [ground, sea] as const;
+}
+
+/*
+ * The open sea between the islands: plain deep water out to the horizon. It
+ * steps aside wherever an island's own tile of sea is drawn.
+ */
+const OPEN_SEA_FRAGMENT = /* glsl */ `
+  ${GLSL_COMMON}
+  ${GLSL_SWASH}
+  uniform vec4 uTiles[${MAX_ISLANDS}];
+  uniform int uTileCount;
+  varying vec3 vWorld;
+
+  float hash2(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash2(i), hash2(i + vec2(1.0, 0.0)), f.x), mix(hash2(i + vec2(0.0, 1.0)), hash2(i + 1.0), f.x), f.y);
+  }
+
+  void main() {
+    vec2 xz = vWorld.xz;
+    for (int i = 0; i < ${MAX_ISLANDS}; i++) {
+      if (i >= uTileCount) break;
+      vec4 t = uTiles[i];
+      if (max(abs(xz.x - t.x), abs(xz.y - t.y)) < t.z) discard;
+    }
+    vec3 view = normalize(vWorld - cameraPosition);
+    vec3 r = reflect(view, vec3(0.0, 1.0, 0.0));
+    float glint = pow(max(dot(r, uSun), 0.0), 60.0) * uLight;
+    float sparkle = vnoise(xz * 0.9 + uTime * vec2(0.4, 0.25)) * vnoise(xz * vec2(1.7, 2.3) - uTime * vec2(0.3, 0.5));
+    glint *= 0.15 + 0.85 * smoothstep(0.12, 0.45, sparkle);
+    float c = 0.075 + glint * 0.9;
+    float alpha = 1.0;
+    if (!gl_FrontFacing) { c = 0.12; alpha = 0.85; }
+    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), alpha);
+  }
+`;
+
+export class OpenSea {
+  readonly mesh: THREE.Mesh;
+  private tiles = Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector4());
+  private count = { value: 0 };
+
+  constructor() {
+    const geo = new THREE.PlaneGeometry(GRAND_SIZE + 6400, GRAND_SIZE + 6400, 1, 1);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { ...shared, uTiles: { value: this.tiles }, uTileCount: this.count },
+      vertexShader: WATER_VERTEX,
+      fragmentShader: OPEN_SEA_FRAGMENT,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.mesh = new THREE.Mesh(geo, mat);
+    this.mesh.name = "open-sea";
+    this.mesh.renderOrder = 2;
+    this.mesh.frustumCulled = false;
+  }
+
+  /* Where the islands' own seas are. */
+  setTiles(centres: readonly { x: number; z: number }[]) {
+    const n = Math.min(centres.length, MAX_ISLANDS);
+    for (let i = 0; i < n; i++) this.tiles[i].set(centres[i].x, centres[i].z, TILE_SIZE / 2, 0);
+    this.count.value = n;
+  }
 }

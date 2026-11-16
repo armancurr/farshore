@@ -6,7 +6,6 @@ import { Belt } from "./belt";
 import { needleAt, type Strike } from "../../game/shared/fishing";
 
 const DOWN_TEXT: Record<string, string> = {
-  drowned: "The sea took your breath",
   fall: "You fell too far",
   boar: "The boar got the better of you",
   hit: "You were struck down",
@@ -42,42 +41,10 @@ function ActiveBounty(props: { hud: HudState }) {
   );
 }
 
-function BreathRing(props: { breath: number }) {
-  const r = 22;
-  const c = 2 * Math.PI * r;
-  return (
-    <svg
-      className="absolute top-1/2 left-1/2 size-16 -translate-1/2"
-      viewBox="0 0 64 64"
-      aria-hidden="true"
-    >
-      <circle cx="32" cy="32" r={r} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="2" />
-      <circle
-        cx="32"
-        cy="32"
-        r={r}
-        fill="none"
-        stroke="white"
-        strokeWidth="2"
-        strokeDasharray={`${(c * props.breath) / 100} ${c}`}
-        transform="rotate(-90 32 32)"
-      />
-    </svg>
-  );
-}
-
 function Crosshair(props: { hud: HudState }) {
   const h = props.hud;
   return (
     <div className="pointer-events-none absolute top-1/2 left-1/2 size-16 -translate-1/2">
-      {h.breath < 99.5 && (
-        <>
-          <BreathRing breath={h.breath} />
-          <div className="absolute top-full left-1/2 mt-1 -translate-x-1/2 font-mono text-[9px] tracking-[0.3em] text-white/70">
-            AIR
-          </div>
-        </>
-      )}
       <span className="absolute top-1/2 left-1/2 h-px w-3 -translate-1/2 bg-white/80 mix-blend-difference" />
       <span className="absolute top-1/2 left-1/2 h-3 w-px -translate-1/2 bg-white/80 mix-blend-difference" />
       {h.hitMarker > 0 && (
@@ -238,9 +205,9 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
         </div>
       )}
 
-      <div className="absolute top-40 right-5 flex flex-col items-end gap-1 font-mono text-[11px] sm:top-16">
+      <div className="absolute top-40 right-5 flex flex-col items-end gap-1.5 font-sans text-xs font-bold text-white/70 sm:top-16 sm:right-6">
         {h.feed.map((item, i) => (
-          <div key={i} className="bg-black/50 px-2 py-0.5 text-white/80">
+          <div key={i} className="[text-shadow:0_1px_3px_rgba(0,0,0,0.8)]">
             {item.text}
           </div>
         ))}
