@@ -79,6 +79,7 @@ import {
   type WorldSave,
 } from "../shared/save";
 import { SHOP_REACH, shopEntry } from "../shared/shop";
+import { canWear, DEFAULT_SKIN, type SkinId } from "../shared/skins";
 import { blockSolid, overSolid } from "../shared/terrain";
 import {
   COMBO_WINDOW,
@@ -107,6 +108,8 @@ type Profile = SavedProfile;
 type Member = {
   id: number;
   name: string;
+  /* What everyone else sees you as. */
+  skin: SkinId;
   peer: Peer;
   spectator: boolean; // joined only to watch
   /* Online: who this is across visits, and their island. */
@@ -349,7 +352,10 @@ export class Room {
     return fresh;
   }
 
-  join(peer: Peer, hello: { spectate?: boolean; token?: string; own?: boolean } = {}) {
+  join(
+    peer: Peer,
+    hello: { spectate?: boolean; token?: string; own?: boolean; skin?: SkinId } = {},
+  ) {
     const spectator = !!hello.spectate;
     const profile = this.opts.settle && !spectator ? this.claim(hello.token, !!hello.own) : null;
     if (!spectator && this.humans() >= (this.opts.maxHumans ?? MAX_PLAYERS)) {
@@ -359,9 +365,13 @@ export class Room {
     const id = this.nextId++;
     const placed = !spectator && (!this.opts.settle || profile?.island != null);
     const h = this.homeFor(profile);
+    /* The browser's choice wins: you may have changed skins on the title screen. */
+    const skin = hello.skin && canWear(hello.skin) ? hello.skin : (profile?.skin ?? DEFAULT_SKIN);
+    if (profile) profile.skin = skin;
     const member: Member = {
       id,
       name: profile?.name ?? randomName(Math.random),
+      skin,
       peer,
       spectator,
       profile,
@@ -434,9 +444,24 @@ export class Room {
       this.settle(m, msg.shape, msg.seed, msg.x, msg.z);
       return;
     }
+    /* What you wear can change anywhere: before settling, or while down. */
+    if (msg.t === "skin") {
+      this.dress(m, msg.skin);
+      return;
+    }
     if (!m.placed || m.respawnAt !== null) return;
     this.apply(m, msg);
     this.flush(m);
+  }
+
+  private dress(m: Member, skin: SkinId) {
+    if (m.skin === skin || !canWear(skin)) return;
+    m.skin = skin;
+    if (m.profile) {
+      m.profile.skin = skin;
+      this.opts.onChange?.();
+    }
+    this.broadcastRoster();
   }
 
   /* ---------- the grand map ---------- */
@@ -1380,7 +1405,7 @@ export class Room {
   private roster() {
     return [...this.members.values()]
       .filter((o) => !o.spectator)
-      .map((o) => ({ id: o.id, name: o.name }));
+      .map((o) => ({ id: o.id, name: o.name, skin: o.skin }));
   }
 
   private worldInfo(m: Member): WorldInfo {

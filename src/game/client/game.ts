@@ -42,6 +42,7 @@ import {
   type Verdict,
 } from "../shared/prefabs";
 import { SHOP, SHOP_REACH } from "../shared/shop";
+import { canWear, type SkinId } from "../shared/skins";
 import { Archipelago } from "../shared/archipelago";
 import { type IslandInfo, type ShapeId } from "../shared/islands";
 import { blockSolid, overSolid, type Solid } from "../shared/terrain";
@@ -62,7 +63,14 @@ import { COMBO_WINDOW, WEAPONS, weaponDef, weaponFromIndex } from "../shared/wea
 import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { islandImage, type MapView } from "./map";
-import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
+import {
+  type Connection,
+  keepSkin,
+  LocalConnection,
+  readSkin,
+  serverBase,
+  WsConnection,
+} from "./net";
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
 import { BoatView } from "./scene/boats";
@@ -190,7 +198,7 @@ type Sample = {
   pitch: number;
   flags: number;
 };
-type Remote = { avatar: Avatar; buf: Sample[]; name: string };
+type Remote = { avatar: Avatar; buf: Sample[]; name: string; skin: SkinId };
 
 /* One island as drawn: its meshes, its props, and its picture for the map. */
 type IslandView = {
@@ -1037,11 +1045,20 @@ export class Game {
       this.remotes.delete(id);
     }
     for (const entry of roster) {
-      if (entry.id === this.myId || this.remotes.has(entry.id)) continue;
-      const avatar = new Avatar(entry.id, entry.name);
+      if (entry.id === this.myId) continue;
+      const known = this.remotes.get(entry.id);
+      if (known) {
+        /* Someone changed skins in the marketplace. */
+        if (known.skin !== entry.skin) {
+          known.skin = entry.skin;
+          known.avatar.setSkin(entry.skin);
+        }
+        continue;
+      }
+      const avatar = new Avatar(entry.id, entry.name, entry.skin);
       avatar.group.visible = false;
       this.scene.add(avatar.group);
-      this.remotes.set(entry.id, { avatar, buf: [], name: entry.name });
+      this.remotes.set(entry.id, { avatar, buf: [], name: entry.name, skin: entry.skin });
     }
   }
 
@@ -1673,6 +1690,21 @@ export class Game {
 
   buy(item: string) {
     this.conn?.send({ t: "buy", item });
+  }
+
+  /* What you wear, as others see you. */
+  get skin(): SkinId {
+    return readSkin();
+  }
+
+  /*
+   * Wear a skin from the marketplace. This browser remembers it for next
+   * time; when online, everyone else sees the change straight away.
+   */
+  wear(skin: SkinId) {
+    if (!canWear(skin)) return;
+    keepSkin(skin);
+    if (this.conn?.kind === "online") this.conn.send({ t: "skin", skin });
   }
 
   /* Into the open chest (n > 0) or out of it (n < 0). */
