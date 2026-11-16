@@ -1,6 +1,7 @@
 import { Room } from "../server/room";
 import { TICK_HZ } from "../shared/constants";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
+import { DEFAULT_SKIN, isSkinId, type SkinId } from "../shared/skins";
 
 export type ConnectionKind = "attract" | "online";
 
@@ -100,6 +101,29 @@ function keepToken(token: string) {
   }
 }
 
+/* ---------- what you wear ---------- */
+
+const SKIN_KEY = "farshore:skin";
+
+/* The skin this browser last chose in the marketplace. */
+export function readSkin(): SkinId {
+  try {
+    const saved = localStorage.getItem(SKIN_KEY);
+    if (isSkinId(saved)) return saved;
+  } catch {
+    /* Storage unavailable. */
+  }
+  return DEFAULT_SKIN;
+}
+
+export function keepSkin(skin: SkinId) {
+  try {
+    localStorage.setItem(SKIN_KEY, skin);
+  } catch {
+    /* Storage unavailable: it lasts until the tab closes. */
+  }
+}
+
 export function serverBase() {
   const configured = import.meta.env.VITE_TIDE_SERVER as string | undefined;
   if (configured) return configured.replace(/\/$/, "");
@@ -128,7 +152,9 @@ export class WsConnection implements Connection {
     this.ws = new WebSocket(wsUrl(base, "party/public"));
     this.ws.onopen = () => {
       this.open = true;
-      this.ws.send(JSON.stringify({ t: "hello", ...readToken() } satisfies ClientMsg));
+      this.ws.send(
+        JSON.stringify({ t: "hello", ...readToken(), skin: readSkin() } satisfies ClientMsg),
+      );
       for (const msg of this.queue) this.ws.send(JSON.stringify(msg));
       this.queue = [];
     };
