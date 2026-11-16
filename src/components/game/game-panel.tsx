@@ -1,3 +1,4 @@
+import { Keyboard, Play } from "phosphor-solid";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
@@ -8,7 +9,9 @@ type Status = "loading" | "ready" | "failed";
 
 const ONLINE_ENABLED = false;
 
-const pill = "px-3.5 py-2 font-mono text-[11px] tracking-[0.2em] uppercase transition-colors";
+/* Menu buttons: plain text and an icon, growing a little under the pointer. */
+const menuButton =
+  "flex origin-right items-center gap-2.5 font-sans text-xl text-white transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none";
 
 const CONTROLS = [
   ["WASD", "Move"],
@@ -176,49 +179,48 @@ export function GamePanel(props: { onPress?: () => void }) {
       </Show>
 
       <Show when={status() === "ready" && !playing()}>
-        <div class="absolute bottom-6 left-6 flex items-center gap-2 sm:bottom-8 sm:left-8">
-          <button
-            type="button"
-            class={`bg-white text-black hover:opacity-85 ${pill}`}
-            onClick={() => play("solo")}
-          >
-            Play
-          </button>
-          {/* Multiplayer is parked for now; the online path still builds. */}
-          <Show when={ONLINE_ENABLED && onlineAvailable()}>
-            <button
-              type="button"
-              class={`border border-white/40 bg-black/60 text-white hover:bg-white hover:text-black ${pill}`}
-              onClick={() => play("online")}
-            >
-              Online
-              <Show when={online()}>
-                <span class="ml-1.5 opacity-50">{online()}</span>
-              </Show>
+        <div class="absolute top-6 right-6 flex flex-col items-end gap-5 sm:top-8 sm:right-8">
+          <div class="font-display text-5xl leading-none text-white select-none sm:text-6xl">
+            farshore
+          </div>
+          <div class="flex flex-col items-end gap-3">
+            <button type="button" class={menuButton} onClick={() => play("solo")}>
+              Play
+              <Play size={22} weight="fill" />
             </button>
-          </Show>
-          <Show when={!touch()}>
-            <div ref={controlsRoot} class="relative">
-              <button
-                type="button"
-                aria-expanded={controlsOpen()}
-                class={`border border-white/40 bg-black/60 text-white/70 hover:text-white ${pill}`}
-                onClick={() => setControlsOpen(!controlsOpen())}
-              >
-                Controls
+            {/* Multiplayer is parked for now; the online path still builds. */}
+            <Show when={ONLINE_ENABLED && onlineAvailable()}>
+              <button type="button" class={menuButton} onClick={() => play("online")}>
+                Online
+                <Show when={online()}>
+                  <span class="opacity-50">{online()}</span>
+                </Show>
               </button>
-              <Show when={controlsOpen()}>
-                <dl class="absolute bottom-full left-0 mb-2 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
-                  {CONTROLS.map(([key, action]) => (
-                    <>
-                      <dt class="text-white">{key}</dt>
-                      <dd class="text-white/50">{action}</dd>
-                    </>
-                  ))}
-                </dl>
-              </Show>
-            </div>
-          </Show>
+            </Show>
+            <Show when={!touch()}>
+              <div ref={controlsRoot} class="relative flex flex-col items-end">
+                <button
+                  type="button"
+                  aria-expanded={controlsOpen()}
+                  class={menuButton}
+                  onClick={() => setControlsOpen(!controlsOpen())}
+                >
+                  Controls
+                  <Keyboard size={22} />
+                </button>
+                <Show when={controlsOpen()}>
+                  <dl class="absolute top-full right-0 mt-3 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
+                    {CONTROLS.map(([key, action]) => (
+                      <>
+                        <dt class="text-white">{key}</dt>
+                        <dd class="text-white/50">{action}</dd>
+                      </>
+                    ))}
+                  </dl>
+                </Show>
+              </div>
+            </Show>
+          </div>
         </div>
         <Show when={hud()?.notice}>
           <div class="absolute top-5 left-1/2 -translate-x-1/2 border border-white/30 bg-black/80 px-4 py-2 text-sm text-white">

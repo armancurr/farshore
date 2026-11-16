@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@400;500;600&family=Manrope:wght@300;400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=Google+Sans+Code:wght@400;500;600&family=Irish+Grover&display=swap");
 @import "tailwindcss";
 
 :root {
@@ -36,7 +36,8 @@
   --sidebar-accent-foreground: #fff;
   --sidebar-border: #262626;
   --sidebar-ring: #fff;
-  --font-sans: "Manrope", sans-serif;
+  --font-sans: "Almarai", sans-serif;
+  --font-display: "Irish Grover", system-ui;
   --font-mono: "Google Sans Code", monospace;
   --font-serif: Georgia, serif;
   --radius: 0rem;
@@ -129,6 +130,7 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
   --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
   --font-mono: var(--font-mono);
   --font-serif: var(--font-serif);
   --radius-sm: calc(var(--radius) - 4px);
@@ -156,7 +158,7 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
-  font-weight: 500;
+  font-weight: 400;
   margin: 0;
   overflow-x: hidden;
   scrollbar-width: none;
