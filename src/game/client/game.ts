@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
+import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
 import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
 import { clockLabel, daylight, isNight } from "../shared/daylight";
 import {
@@ -55,6 +56,7 @@ import { Input } from "./input";
 import { type Connection, LocalConnection, serverBase, WsConnection } from "./net";
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
+import { BoatView } from "./scene/boats";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
 import { createTerrainMesh, createWater } from "./scene/land";
@@ -239,6 +241,10 @@ export class Game {
   private lines = new FishingLines();
   private herd = new HerdView();
   private built = new PrefabView();
+  private boats = new BoatView();
+  /* The rowboat you're in, rowed here and reported to the room. */
+  private boat: (BoatState & { id: number }) | null = null;
+  private strokeAt = 0;
   private chestId: number | null = null;
   /* Build mode: which kit, how it's turned, and what's under the crosshair. */
   private build: {
@@ -319,6 +325,7 @@ export class Game {
     this.scene.add(this.lines.group);
     this.scene.add(this.herd.group);
     this.scene.add(this.built.group);
+    this.scene.add(this.boats.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -405,6 +412,8 @@ export class Game {
     this.lines.clear();
     this.herd.clear();
     this.built.reset([]);
+    this.boats.clear();
+    this.boat = null;
     this.build = null;
     this.chestId = null;
     this.boarStates.clear();
@@ -484,6 +493,7 @@ export class Game {
     this.lines.dispose();
     this.herd.dispose();
     this.built.dispose();
+    this.boats.dispose();
     this.dropWorld();
     this.sky.dispose();
     this.post.dispose();
@@ -578,6 +588,7 @@ export class Game {
         break;
       case "died":
         this.endBuild();
+        this.boat = null;
         this.down = msg.cause;
         this.downAt = performance.now() / 1000;
         this.input.clear();
@@ -632,8 +643,12 @@ export class Game {
           this.audio.thud();
         break;
       }
+      case "aboard":
+        this.onAboard(msg.boat);
+        break;
       case "unprefab":
         this.built.remove(msg.id);
+        this.boats.remove(msg.id);
         this.world?.terrain.removeSolids(msg.id);
         if (this.chestId === msg.id && this.panel === "chest") this.closePanel();
         break;
@@ -678,8 +693,89 @@ export class Game {
     }
   }
 
+  /* Into a boat (facing the bow), or out of it onto whatever's nearest. */
+  private onAboard(id: number | null) {
+    const b = this.body;
+    const world = this.world;
+    if (!b || !world) return;
+    if (id !== null) {
+      const p = this.built.get(id);
+      if (!p) return;
+      this.endBuild();
+      this.boat = { id, x: p.x, z: p.z, rot: p.rot, speed: 0, turn: 0 };
+      this.input.yaw = p.rot;
+      this.audio.splash(0.4);
+      return;
+    }
+    const boat = this.boat;
+    this.boat = null;
+    if (!boat) return;
+    /* Step out onto land or a dock beside the boat if there is any, otherwise into the sea. */
+    const c = Math.cos(boat.rot);
+    const s = Math.sin(boat.rot);
+    let best: { x: number; y: number; z: number } | null = null;
+    for (const [lx, lz] of [
+      [1.4, 0],
+      [-1.4, 0],
+      [0, 2.6],
+      [0, -2.7],
+      [1.6, 1.4],
+      [-1.6, 1.4],
+      [1.6, -1.4],
+      [-1.6, -1.4],
+    ]) {
+      const x = boat.x + lx * c + lz * s;
+      const z = boat.z - lx * s + lz * c;
+      const g = world.terrain.groundAt(x, z, SEA_LEVEL + 1.6).ground;
+      if (g > SEA_LEVEL + 0.15 && (!best || g < best.y)) best = { x, y: g, z };
+    }
+    const out = best ?? { x: boat.x + 1.3 * c, y: SEA_LEVEL - 1, z: boat.z - 1.3 * s };
+    b.x = out.x;
+    b.y = out.y;
+    b.z = out.z;
+    b.vx = b.vy = b.vz = 0;
+    this.smoothEye = b.y + EYE_HEIGHT;
+    this.audio.splash(best ? 0.3 : 0.9);
+  }
+
+  /* Row: the oars drive the boat, and you sit in it. */
+  private row(dt: number, b: Body, active: boolean) {
+    const boat = this.boat!;
+    const world = this.world!;
+    const intent = active
+      ? { forward: this.input.forward, right: this.input.right }
+      : { forward: 0, right: 0 };
+    this.acc += dt;
+    while (this.acc >= STEP) {
+      this.acc -= STEP;
+      if (stepBoat(boat, intent, STEP, world.terrain)) this.audio.land(4);
+    }
+    const seat = seatOf(boat);
+    b.vx = (seat.x - b.x) / Math.max(dt, 1e-3);
+    b.vz = (seat.z - b.z) / Math.max(dt, 1e-3);
+    b.x = seat.x;
+    b.y = seat.y;
+    b.z = seat.z;
+    b.vy = 0;
+    b.grounded = true;
+    b.sprinting = false;
+    b.stamina = Math.min(STAMINA_MAX, b.stamina + 10 * dt);
+    this.bobAmp = 0;
+    const now = performance.now() / 1000;
+    if (Math.abs(boat.speed) > 0.8 && intent.forward && now - this.strokeAt > 1.3) {
+      this.strokeAt = now;
+      this.audio.splash(0.22);
+    }
+    this.boats.set(boat.id, boat.x, boat.z, boat.rot, boat.speed, true);
+  }
+
   /* Draw it, and make it solid for our own footsteps too. */
   private addPrefab(p: Prefab) {
+    if (p.kind === "rowboat") {
+      this.built.set(p);
+      if (this.boat?.id !== p.id) this.boats.set(p.id, p.x, p.z, p.rot, 0, true);
+      return;
+    }
     this.built.set(p);
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
@@ -836,6 +932,15 @@ export class Game {
     }
 
     this.herd.set(msg.a);
+    for (const [id, x, z, rot, speed] of msg.b) {
+      const p = this.built.get(id);
+      if (p) {
+        p.x = x;
+        p.z = z;
+        p.rot = rot;
+      }
+      if (this.boat?.id !== id) this.boats.set(id, x, z, rot, speed);
+    }
     /* A boar squaring up nearby snorts before it charges. */
     for (const [id, kind, x, , z, , state] of msg.a) {
       if (kind !== 1) continue;
@@ -983,6 +1088,7 @@ export class Game {
     this.lines.update(t, this.tipOf);
     this.herd.update(dt);
     this.built.update(t);
+    this.boats.update(t, dt);
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
@@ -1034,9 +1140,10 @@ export class Game {
           }
         : { forward: 0, right: 0, jump: false, sprint: false };
 
-      this.acc += dt;
+      if (this.boat) this.row(dt, b, active);
+      else this.acc += dt;
       const stepWorld = { terrain: world.terrain };
-      while (this.acc >= STEP) {
+      while (!this.boat && this.acc >= STEP) {
         this.acc -= STEP;
         const ev = stepBody(b, intent, STEP, stepWorld);
         if (ev.jumped) this.audio.jump();
@@ -1111,6 +1218,7 @@ export class Game {
             (b.sprinting ? FLAG.sprint : 0) |
             (b.grounded ? FLAG.grounded : 0) |
             (b.y < SEA_LEVEL ? FLAG.wet : 0),
+          boat: this.boat ? { rot: this.boat.rot, speed: this.boat.speed } : undefined,
         });
       }
 
@@ -1179,6 +1287,7 @@ export class Game {
         best = f();
       }
     };
+    if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
     const bd = world.terrain.board;
     consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
     const sh = world.terrain.shop;
@@ -1188,7 +1297,13 @@ export class Game {
       label: "E · The keeper's stall",
     }));
     for (const p of this.built.list()) {
-      if (p.kind === "chest")
+      if (p.kind === "rowboat")
+        consider(p.x, b.y, p.z, BOAT_REACH, () => ({
+          kind: "prefab",
+          id: p.id,
+          label: "E · Get in the rowboat",
+        }));
+      else if (p.kind === "chest")
         consider(p.x, p.y, p.z, 2.4, () => ({
           kind: "chest",
           id: p.id,
@@ -1221,12 +1336,16 @@ export class Game {
   /* ---------- building ---------- */
 
   private ownedKits() {
-    return KIT_IDS.filter((k) => (this.inv.items[k] ?? 0) > 0 && k !== "rowboat");
+    return KIT_IDS.filter((k) => (this.inv.items[k] ?? 0) > 0);
   }
 
   private toggleBuild() {
     if (this.build) {
       this.endBuild();
+      return;
+    }
+    if (this.boat) {
+      this.say("Not from a boat", 2);
       return;
     }
     if (!this.ownedKits().length) {
@@ -1490,7 +1609,11 @@ export class Game {
   }
 
   private firstPerson(dt: number, b: Body) {
-    const eye = b.y + EYE_HEIGHT;
+    /* Sitting in a boat, lower, and rocking with it. */
+    const t = performance.now() / 1000;
+    const eye = this.boat
+      ? b.y + EYE_HEIGHT - 0.55 + Math.sin(t * 1.3 + this.boat.id) * 0.04
+      : b.y + EYE_HEIGHT;
     if (eye > this.smoothEye && eye - this.smoothEye < 5) {
       this.smoothEye += (eye - this.smoothEye) * Math.min(1, dt * 16);
     } else this.smoothEye = eye;
@@ -1681,7 +1804,13 @@ export class Game {
       locked: this.touch || this.input.locked || this.forceActive,
       inv: this.inventoryView(),
       panel: this.panel,
-      hint: held && TOOLS[held.kind].rod ? this.rodHint() : held ? def.hint : null,
+      hint: this.boat
+        ? `W/S row · A/D turn · E get out${held && TOOLS[held.kind].rod ? ` · ${this.rodHint()}` : ""}`
+        : held && TOOLS[held.kind].rod
+          ? this.rodHint()
+          : held
+            ? def.hint
+            : null,
       fishing: this.myLine
         ? {
             state: this.myLine.state,

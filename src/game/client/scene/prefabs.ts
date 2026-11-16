@@ -118,6 +118,19 @@ function decor(kind: KitId): (Part & { tone: Tone })[] {
         tone: "glow",
       });
       break;
+    case "rowboat":
+      /* Only ever seen as a ghost: the real boats are drawn by the boat view. */
+      out.push({
+        geo: new THREE.BoxGeometry(1.3, 0.5, 2.6),
+        matrix: compose(0, 0.05, 0.35),
+        tone: "mid",
+      });
+      out.push({
+        geo: new THREE.ConeGeometry(0.65, 1.2, 4, 1),
+        matrix: compose(0, 0.05, -1.55, Math.PI / 4, 1, 1, 0.7, -Math.PI / 2),
+        tone: "mid",
+      });
+      break;
     default:
       break;
   }
@@ -199,7 +212,6 @@ class Ghost {
       }
     }
     const group = new THREE.Group();
-    if (kind === "rowboat") return group;
     const fill = new THREE.Mesh(mergeGeometries(fills), this.fill);
     fill.renderOrder = 4;
     const line = new THREE.LineSegments(mergeGeometries(lines), this.line);

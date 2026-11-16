@@ -42,6 +42,9 @@ export type PlayerSnap = [
 /* Compact per-animal state: [id, kind, x, y, z, yaw, state, health 0..100]. */
 export type AnimalSnap = [number, number, number, number, number, number, number, number];
 
+/* Compact per-boat state: [id, x, z, heading, speed]. */
+export type BoatSnap = [number, number, number, number, number];
+
 export const ANIMAL_STATE = {
   graze: 0,
   walk: 1,
@@ -88,6 +91,7 @@ export type ServerMsg =
       time: number;
       p: PlayerSnap[];
       a: AnimalSnap[];
+      b: BoatSnap[];
       me: {
         health: number;
         breath: number;
@@ -99,6 +103,8 @@ export type ServerMsg =
   | { t: "board"; offers: Bounty[] }
   /* Something built, or changed (a chest's contents). */
   | { t: "prefab"; prefab: Prefab }
+  /* You're in this boat now (or out of it, with null). */
+  | { t: "aboard"; boat: number | null }
   | { t: "unprefab"; id: number }
   | { t: "paid"; bounty: Bounty }
   /* Someone's fishing line: where the float sits, and whether something's biting. */
@@ -144,6 +150,8 @@ export type ClientMsg =
       vy: number;
       vz: number;
       flags: number;
+      /* Rowing: the boat's heading and speed (its position is yours). */
+      boat?: { rot: number; speed: number };
     }
   | { t: "attack"; charge: number; climb: boolean }
   | { t: "stance"; block: boolean; charge: boolean }
@@ -171,6 +179,12 @@ export const round2 = (v: number) => Math.round(v * 100) / 100;
 
 const finite = (v: unknown, limit: number): v is number =>
   typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= limit;
+
+function boatOf(v: unknown) {
+  if (!v || typeof v !== "object") return undefined;
+  const b = v as Record<string, unknown>;
+  return finite(b.rot, 100) && finite(b.speed, 20) ? { rot: b.rot, speed: b.speed } : undefined;
+}
 
 const isInt = (v: unknown, min: number, max: number): v is number =>
   typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
@@ -246,6 +260,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         vy: m.vy as number,
         vz: m.vz as number,
         flags: (m.flags as number) | 0,
+        boat: boatOf(m.boat),
       };
     }
     default:

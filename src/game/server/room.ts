@@ -28,6 +28,7 @@ import {
   makeBounty,
   progress,
 } from "../shared/bounties";
+import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
 import { isNight, untilDawn } from "../shared/daylight";
 import {
   BITE_WINDOW,
@@ -44,6 +45,7 @@ import { type Body, createBody } from "../shared/physics";
 import {
   type ClientMsg,
   FLAG,
+  type BoatSnap,
   type GroundWeapon,
   type HurtCause,
   type PlayerSnap,
@@ -113,6 +115,8 @@ type Member = {
   shoveFlagUntil: number;
   inv: Inventory;
   line: Line | null;
+  /* The rowboat you're in. */
+  boat: number | null;
   /* Something in the inventory changed; send it at the end of the step. */
   invDirty: boolean;
   stagger: number;
@@ -191,6 +195,7 @@ export class Room {
   private board: Bounty[] = [];
   private posted = new Map<number, number>();
   private prefabs = new Map<number, Prefab>();
+  private boatSpeed = new Map<number, number>();
   private prefabId = 1;
   private bountyId = 1;
   private prey: Prey[] = [];
@@ -255,6 +260,7 @@ export class Room {
       shoveFlagUntil: 0,
       inv: emptyInventory(),
       line: null,
+      boat: null,
       invDirty: true,
       stagger: 0,
       lastHitAt: 0,
@@ -279,6 +285,7 @@ export class Room {
   leave(id: number) {
     const m = this.members.get(id);
     if (!m) return;
+    m.boat = null;
     this.members.delete(id);
     if (!m.spectator) {
       this.broadcastRoster();
@@ -297,6 +304,7 @@ export class Room {
     switch (msg.t) {
       case "move": {
         this.landing(m, msg.vy, msg.flags);
+        if (m.boat !== null) this.row(m, msg.x, msg.z, msg.boat);
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
@@ -502,7 +510,7 @@ export class Room {
   /* Take something you built back into your pack, with whatever was in it. */
   private pickupPrefab(m: Member, id: number) {
     const p = this.prefabs.get(id);
-    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14) return;
+    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
     this.prefabs.delete(id);
     this.terrain.removeSolids(id);
     this.addItem(m, p.kind, 1);
@@ -519,8 +527,51 @@ export class Room {
 
   private usePrefab(m: Member, id: number) {
     const p = this.prefabs.get(id);
-    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 4) return;
+    if (!p) return;
+    if (p.kind === "rowboat") {
+      this.boatInteract(m, p);
+      return;
+    }
+    if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > 4) return;
     if (p.kind === "bed") this.sleep(m, p);
+  }
+
+  /* ---------- boats ---------- */
+
+  private aboard(id: number) {
+    for (const o of this.members.values()) if (o.boat === id) return o;
+    return null;
+  }
+
+  private boatInteract(m: Member, p: Prefab) {
+    if (m.boat === p.id) {
+      m.boat = null;
+      m.peer.send({ t: "aboard", boat: null });
+      return;
+    }
+    if (m.boat !== null || this.aboard(p.id)) return;
+    if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > BOAT_REACH + 1) return;
+    this.reelIn(m);
+    m.boat = p.id;
+    m.peer.send({ t: "aboard", boat: p.id });
+  }
+
+  /*
+   * The rower says where they are; the boat goes with them, as long as that's
+   * a plausible step over water.
+   */
+  private row(m: Member, x: number, z: number, b: { rot: number; speed: number } | undefined) {
+    const p = m.boat === null ? null : this.prefabs.get(m.boat);
+    if (!p || !b) return;
+    /* They sit aft of the middle. */
+    const cx = x - SEAT.lz * Math.sin(b.rot);
+    const cz = z - SEAT.lz * Math.cos(b.rot);
+    const step = Math.hypot(cx - p.x, cz - p.z);
+    if (step > 4 || this.terrain.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
+    p.x = round2(cx);
+    p.z = round2(cz);
+    p.rot = round2(b.rot);
+    this.boatSpeed.set(p.id, b.speed);
   }
 
   /*
@@ -786,7 +837,7 @@ export class Room {
       yaw: m.body.yaw,
       running: (m.flags & FLAG.sprint) !== 0,
       blocking: m.blocking && this.weaponOf(m) === "shield",
-      away: m.respawnAt !== null,
+      away: m.respawnAt !== null || m.boat !== null,
     };
   }
 
@@ -834,6 +885,10 @@ export class Room {
     if (m.health > 0) return;
     m.respawnAt = this.now() + RESPAWN_DELAY;
     this.reelIn(m);
+    if (m.boat !== null) {
+      m.boat = null;
+      m.peer.send({ t: "aboard", boat: null });
+    }
     m.blocking = false;
     m.charging = false;
     m.peer.send({ t: "died", cause });
@@ -1182,12 +1237,24 @@ export class Room {
     }
     const time = round2(this.time);
     const a = this.herd.snapshot();
+    const b: BoatSnap[] = [];
+    for (const p of this.prefabs.values()) {
+      if (p.kind === "rowboat")
+        b.push([
+          p.id,
+          p.x,
+          p.z,
+          p.rot,
+          round2(this.aboard(p.id) ? (this.boatSpeed.get(p.id) ?? 0) : 0),
+        ]);
+    }
     for (const m of this.members.values()) {
       m.peer.send({
         t: "snap",
         time,
         p,
         a,
+        b,
         me: m.spectator
           ? null
           : {
