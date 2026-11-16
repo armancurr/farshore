@@ -4,9 +4,16 @@ import {
   BREATH_REGEN,
   BREATH_UNDER,
   BREATH_WADE,
+  DROWN_DAMAGE,
+  FALL_DAMAGE,
+  FALL_SAFE_SPEED,
+  HEALTH_MAX,
+  HEALTH_REGEN,
   ISLAND_RADIUS,
   MAX_PLAYERS,
   PLAYER_HEIGHT,
+  REGEN_DELAY,
+  RESPAWN_DELAY,
   SEA_FLOOR,
   SEA_LEVEL,
   TICK_HZ,
@@ -19,6 +26,7 @@ import {
   FLAG,
   type GroundWeapon,
   type Held,
+  type HurtCause,
   type PlayerSnap,
   round2,
   type ServerMsg,
@@ -52,6 +60,12 @@ type Member = {
   pitch: number;
   flags: number;
   breath: number;
+  health: number;
+  lastHurtAt: number;
+  /* Falling speed from the last airborne report, for landing damage. */
+  airVy: number;
+  /* While down: when you get back up. */
+  respawnAt: number | null;
   attackReadyAt: number;
   shoveFlagUntil: number;
   weapon: Held | null;
@@ -138,6 +152,10 @@ export class Room {
       pitch: 0,
       flags: 0,
       breath: BREATH_MAX,
+      health: HEALTH_MAX,
+      lastHurtAt: -1e9,
+      airVy: 0,
+      respawnAt: null,
       attackReadyAt: 0,
       shoveFlagUntil: 0,
       weapon: null,
@@ -171,9 +189,10 @@ export class Room {
 
   handle(id: number, msg: ClientMsg) {
     const m = this.members.get(id);
-    if (!m || m.spectator) return;
+    if (!m || m.spectator || m.respawnAt !== null) return;
     switch (msg.t) {
       case "move": {
+        this.landing(m, msg.vy, msg.flags);
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
@@ -229,6 +248,14 @@ export class Room {
               ? -BREATH_WADE * 0.35
               : BREATH_REGEN;
       m.breath = clamp(m.breath + rate * dt, 0, BREATH_MAX);
+      if (m.respawnAt !== null) {
+        if (now >= m.respawnAt) this.respawn(m);
+        continue;
+      }
+
+      if (m.breath <= 0) this.hurt(m, DROWN_DAMAGE * dt, "drowned");
+      else if (now - m.lastHurtAt > REGEN_DELAY && m.health < HEALTH_MAX)
+        m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * dt);
 
       /* Stagger wears off a few seconds after the last hit. */
       if (now - m.lastHitAt > STAGGER_GRACE)
@@ -241,7 +268,7 @@ export class Room {
         if (w) this.take(m, w);
       }
 
-      if (m.breath <= 0 || m.body.y < SEA_FLOOR - 8) this.respawn(m);
+      if (m.body.y < SEA_FLOOR - 8) this.hurt(m, HEALTH_MAX, "drowned");
     }
 
     if (this.weapons.length < GROUND_WEAPONS && this.time >= this.nextWeaponAt) {
@@ -255,9 +282,39 @@ export class Room {
     return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
   }
 
+  /* Damage from any source. At zero you black out, and wake up somewhere safe. */
+  private hurt(m: Member, amount: number, cause: HurtCause) {
+    if (m.respawnAt !== null || amount <= 0) return;
+    m.health = Math.max(0, m.health - amount);
+    m.lastHurtAt = this.now();
+    /* Drowning ticks every frame; only report the bigger knocks. */
+    if (cause !== "drowned") m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
+    if (m.health > 0) return;
+    m.respawnAt = this.now() + RESPAWN_DELAY;
+    m.blocking = false;
+    m.charging = false;
+    m.peer.send({ t: "died", cause });
+  }
+
+  /* Hitting the ground hard hurts; landing in water doesn't. */
+  private landing(m: Member, vy: number, flags: number) {
+    const grounded = (flags & FLAG.grounded) !== 0;
+    if (!grounded) {
+      m.airVy = vy;
+      return;
+    }
+    const impact = -m.airVy;
+    m.airVy = 0;
+    if (impact > FALL_SAFE_SPEED && !(flags & FLAG.wet))
+      this.hurt(m, (impact - FALL_SAFE_SPEED) * FALL_DAMAGE, "fall");
+  }
+
   private respawn(m: Member) {
     const s = this.spawnPoint(m);
     m.body = createBody(s.x, s.y, s.z, s.yaw);
+    m.respawnAt = null;
+    m.health = HEALTH_MAX;
+    m.airVy = 0;
     m.breath = BREATH_MAX;
     m.stagger = 0;
     m.blocking = false;
@@ -406,7 +463,7 @@ export class Room {
       const fx = -Math.sin(p.yaw);
       const fz = -Math.cos(p.yaw);
       for (const o of this.members.values()) {
-        if (o === m || o.spectator) continue;
+        if (o === m || o.spectator || o.respawnAt !== null) continue;
         const dx = o.body.x - m.body.x;
         const dz = o.body.z - m.body.z;
         const d = Math.hypot(dx, dz);
@@ -536,7 +593,7 @@ export class Room {
         round2(m.body.yaw),
         round2(m.pitch),
         m.flags |
-          FLAG.alive |
+          (m.respawnAt === null ? FLAG.alive : 0) |
           (now < m.shoveFlagUntil ? FLAG.shove : 0) |
           (m.blocking ? FLAG.block : 0) |
           (m.charging ? FLAG.charge : 0),
@@ -554,9 +611,11 @@ export class Room {
         me: m.spectator
           ? null
           : {
+              health: Math.ceil(m.health),
               breath: Math.round(m.breath),
               weapon: m.weapon ? { ...m.weapon } : null,
               stagger: Math.round(m.stagger),
+              dead: m.respawnAt !== null,
             },
       });
     }

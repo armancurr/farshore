@@ -1,10 +1,47 @@
 import { For, Index, Show } from "solid-js";
 import type { HudState } from "../../game/client/game";
 
-const clock = (seconds: number) => {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+const DOWN_TEXT: Record<string, string> = {
+  drowned: "The sea took your breath",
+  fall: "You fell too far",
+  boar: "The boar got the better of you",
+  hit: "You were struck down",
 };
+
+function Clock(props: { hud: HudState }) {
+  const c = () => props.hud.clock;
+  return (
+    <div class="space-y-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+      <div class="flex items-baseline gap-2">
+        <span class="text-[15px] font-medium tracking-[0.12em] tabular-nums">{c().time}</span>
+        <span class="text-white/55">{c().part}</span>
+      </div>
+      <div class="text-white/40">
+        Day {c().day}
+        {props.hud.mode === "online" ? ` · ${props.hud.humans} on the island` : ""}
+      </div>
+    </div>
+  );
+}
+
+function Health(props: { hud: HudState }) {
+  const pct = () => Math.max(0, Math.min(100, props.hud.health));
+  return (
+    <div class="w-48">
+      <div class="flex items-baseline justify-between font-mono text-[10px] tracking-[0.25em] text-white/50 uppercase">
+        <span>Health</span>
+        <span class="text-[13px] tracking-[0.1em] text-white tabular-nums">{Math.ceil(pct())}</span>
+      </div>
+      <div class="mt-1.5 h-1.5 w-full border border-white/40 p-px">
+        <div
+          class="h-full bg-white transition-[width] duration-200"
+          classList={{ "animate-pulse": pct() < 25 }}
+          style={{ width: `${pct()}%` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 function BreathRing(props: { breath: number }) {
   const r = 22;
@@ -160,11 +197,8 @@ export function Hud(props: { hud: HudState; touch: boolean }) {
   const h = () => props.hud;
   return (
     <div class="pointer-events-none absolute inset-0 select-none text-white">
-      <div class="absolute top-5 left-5 space-y-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-        <div class="text-white/45">
-          {h().mode === "online" ? `Online · ${h().humans} on the island` : "Solo"} ·{" "}
-          {clock(h().time)}
-        </div>
+      <div class="absolute top-5 left-5">
+        <Clock hud={h()} />
       </div>
 
       <div class="absolute top-40 right-5 flex flex-col items-end gap-1 font-mono text-[11px] sm:top-16">
@@ -181,6 +215,15 @@ export function Hud(props: { hud: HudState; touch: boolean }) {
             {props.touch ? h().prompt?.replace("R · ", "Swap · ") : h().prompt}
           </div>
         </Show>
+        <div class={props.touch ? "absolute top-24 left-5" : "absolute bottom-6 left-6"}>
+          <Health hud={h()} />
+        </div>
+        <Show when={h().hurt > 0}>
+          <div
+            class="absolute inset-0 shadow-[inset_0_0_120px_40px_rgba(255,255,255,0.35)]"
+            style={{ opacity: h().hurt }}
+          />
+        </Show>
         <Show when={h().stamina < 0.99}>
           <div class="absolute bottom-6 left-1/2 h-px w-40 -translate-x-1/2 bg-white/15">
             <div class="h-px bg-white/80" style={{ width: `${h().stamina * 100}%` }} />
@@ -192,6 +235,17 @@ export function Hud(props: { hud: HudState; touch: boolean }) {
         >
           <Weapon hud={h()} touch={props.touch} />
         </div>
+      </Show>
+
+      <Show when={h().down}>
+        {(cause) => (
+          <div class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
+            <div class="text-2xl font-semibold tracking-tight">You blacked out.</div>
+            <div class="font-mono text-[11px] tracking-[0.2em] text-white/55 uppercase">
+              {DOWN_TEXT[cause()] ?? ""}
+            </div>
+          </div>
+        )}
       </Show>
 
       <Show when={h().notice}>

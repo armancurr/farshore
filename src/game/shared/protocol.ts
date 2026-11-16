@@ -40,6 +40,8 @@ export const FLAG = {
 
 export type Spawn = { x: number; y: number; z: number; yaw: number };
 
+export type HurtCause = "drowned" | "fall" | "boar" | "hit";
+
 export type WorldInfo = {
   seed: number;
   /* World clock: seconds the island has been running. */
@@ -59,11 +61,15 @@ export type ServerMsg =
       time: number;
       p: PlayerSnap[];
       me: {
+        health: number;
         breath: number;
         weapon: Held | null;
         stagger: number;
+        dead: boolean;
       } | null;
     }
+  | { t: "hurt"; amount: number; cause: HurtCause }
+  | { t: "died"; cause: HurtCause }
   | { t: "impulse"; vx: number; vy: number; vz: number }
   | ({ t: "respawn" } & Spawn)
   | { t: "swing"; by: number; kind: WeaponKind | null; heavy: boolean }

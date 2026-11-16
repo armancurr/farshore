@@ -1,10 +1,12 @@
 import * as THREE from "three";
-import { EYE_HEIGHT, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
+import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
+import { clockLabel, daylight } from "../shared/daylight";
 import { clamp, lerp } from "../shared/math";
 import { type Body, createBody, FLOAT_DEPTH, stepBody } from "../shared/physics";
 import {
   FLAG,
   type Held,
+  type HurtCause,
   type PlayerSnap,
   type RosterEntry,
   type ServerMsg,
@@ -38,10 +40,15 @@ export type HudState = {
   mode: Mode;
   connecting: boolean;
   notice: string | null;
-  time: number;
+  clock: { day: number; time: string; part: string };
   humans: number;
   name: string;
   player: boolean;
+  health: number;
+  /* Fades from 1 when you get hurt. */
+  hurt: number;
+  /* Set while you're down, with what did it. */
+  down: HurtCause | null;
   breath: number;
   stamina: number;
   shove: number;
@@ -117,6 +124,10 @@ export class Game {
   private roster: RosterEntry[] = [];
   private body: Body | null = null;
   private breath = 100;
+  private health = HEALTH_MAX;
+  private hurtFlash = 0;
+  private down: HurtCause | null = null;
+  private downAt = 0;
   private weapon: Held | null = null;
   private chargeStart: number | null = null;
   private blocking = false;
@@ -253,6 +264,8 @@ export class Game {
     this.remotes.clear();
     this.roster = [];
     this.body = null;
+    this.down = null;
+    this.health = HEALTH_MAX;
     this.weapon = null;
     this.chargeStart = null;
     this.blocking = false;
@@ -404,10 +417,24 @@ export class Game {
         navigator.vibrate?.(60);
         break;
       }
+      case "hurt":
+        this.hurtFlash = 1;
+        this.flash = Math.max(this.flash, 0.6);
+        this.kick = Math.max(this.kick, 0.6);
+        this.audio.shoved();
+        navigator.vibrate?.(80);
+        break;
+      case "died":
+        this.down = msg.cause;
+        this.downAt = performance.now() / 1000;
+        this.input.clear();
+        this.chargeStart = null;
+        this.audio.drowned();
+        break;
       case "respawn":
         this.place(msg);
-        this.audio.drowned();
-        this.pushFeed("You wake up on dry land");
+        if (this.down) this.pushFeed("You come to, everything you own still with you");
+        this.down = null;
         break;
       case "swing":
         if (msg.by !== this.myId) {
@@ -453,6 +480,7 @@ export class Game {
     this.input.yaw = s.yaw;
     this.input.pitch = -0.05;
     this.breath = 100;
+    this.health = HEALTH_MAX;
     this.smoothEye = s.y + EYE_HEIGHT;
   }
 
@@ -506,6 +534,7 @@ export class Game {
 
     if (msg.me) {
       this.breath = msg.me.breath;
+      this.health = msg.me.health;
       this.weapon = msg.me.weapon;
     }
   }
@@ -612,6 +641,7 @@ export class Game {
 
     const t = now / 1000;
     shared.uTime.value = t;
+    if (this.haveClock) this.sky.update(this.worldTime());
 
     this.update(dt);
 
@@ -619,7 +649,8 @@ export class Game {
       this.world.props.update(t);
       this.world.drops.update(t);
     }
-    const holding = this.body ? (this.weapon?.kind ?? null) : null;
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
+    const holding = this.body && !this.down ? (this.weapon?.kind ?? null) : null;
     this.viewmodel.set(holding);
     const def = weaponDef(holding);
     this.viewmodel.update(dt, {
@@ -645,7 +676,9 @@ export class Game {
     u.uBreath.value = this.body ? clamp(this.breath / 70, 0, 1) : 1;
     u.uFlash.value = this.flash;
     this.flash = Math.max(0, this.flash - dt * 3.5);
-    u.uFade.value = this.world ? 1 : 0;
+    /* Blacking out: the world fades, then comes back when you wake. */
+    const out = this.down ? clamp((t - this.downAt) / 1.2, 0, 1) : 0;
+    u.uFade.value = this.world ? 1 - out * 0.85 : 0;
     this.post.render(
       this.renderer,
       this.scene,
@@ -664,7 +697,10 @@ export class Game {
     const world = this.world;
     const active = this.touch || this.input.locked || this.forceActive;
 
-    if (world && this.body) {
+    if (world && this.body && this.down) {
+      this.dropInputs();
+      this.fallen(dt, this.body);
+    } else if (world && this.body) {
       const b = this.body;
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon?.kind ?? null);
@@ -749,7 +785,8 @@ export class Game {
       const depth = SEA_LEVEL - b.y;
       if (depth > FLOAT_DEPTH - 0.2 && !this.wasUnder) this.audio.splash(1);
       this.wasUnder = depth > FLOAT_DEPTH - 0.2;
-      if (this.breath < 40) this.audio.heartbeat(lerp(0.45, 1.1, this.breath / 40));
+      const strain = Math.min(this.breath / 40, this.health / 30);
+      if (strain < 1) this.audio.heartbeat(lerp(0.45, 1.1, strain));
       this.firstPerson(dt, b);
     } else {
       this.dropInputs();
@@ -790,6 +827,22 @@ export class Game {
 
     const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + Math.abs(this.kick) * 4;
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
+    this.setFov(this.fov);
+  }
+
+  /* Down: the view slumps to the ground and tips over. */
+  private fallen(dt: number, b: Body) {
+    const k = clamp((performance.now() / 1000 - this.downAt) / 1.1, 0, 1);
+    const ease = 1 - (1 - k) ** 3;
+    const floor = Math.max(b.y + 0.35, SEA_LEVEL + 0.25);
+    this.camera.position.set(b.x, lerp(this.smoothEye, floor, ease), b.z);
+    this.camera.rotation.set(
+      lerp(this.input.pitch, -0.35, ease),
+      this.input.yaw,
+      ease * 1.1,
+      "YXZ",
+    );
+    this.fov += (BASE_FOV - this.fov) * Math.min(1, dt * 4);
     this.setFov(this.fov);
   }
 
@@ -860,7 +913,7 @@ export class Game {
     const now = performance.now() / 1000;
     if (this.notice && now > this.noticeUntil) this.notice = null;
     this.feed = this.feed.filter((f) => now - f.at < 7);
-    const playing = !!this.body;
+    const playing = !!this.body && !this.down;
     const def = weaponDef(this.weapon?.kind ?? null);
     this.audio.intensity(this.musicIntensity());
 
@@ -915,10 +968,13 @@ export class Game {
       mode: this.mode,
       connecting: this.connecting,
       notice: this.notice,
-      time: this.haveClock ? this.worldTime() : 0,
+      clock: clockLabel(this.haveClock ? this.worldTime() : 0),
       humans: this.roster.length,
       name: this.myName,
       player: playing,
+      health: this.health,
+      hurt: this.hurtFlash,
+      down: this.down,
       breath: this.breath,
       stamina: this.body ? this.body.stamina / STAMINA_MAX : 1,
       shove: clamp((this.attackReadyAt - now) / def.cooldown, 0, 1),
@@ -948,11 +1004,13 @@ export class Game {
     });
   }
 
-  /* How tense the score should be. */
+  /* How tense the score should be: night, low breath, low health. */
   private musicIntensity() {
     if (this.mode === "attract") return 0.05;
-    if (!this.body) return 0.15;
+    if (!this.body || this.down) return 0.15;
+    const night = this.haveClock ? 1 - daylight(this.worldTime()) : 0;
     const breath = clamp(1 - this.breath / 100, 0, 1);
-    return clamp(0.15 + breath * 0.5, 0, 1);
+    const hurt = clamp(1 - this.health / HEALTH_MAX, 0, 1);
+    return clamp(0.12 + night * 0.12 + breath * 0.4 + hurt * 0.45, 0, 1);
   }
 }

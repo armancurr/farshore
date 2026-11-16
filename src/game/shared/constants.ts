@@ -37,3 +37,16 @@ export const BREATH_MAX = 100;
 export const BREATH_WADE = 7;
 export const BREATH_UNDER = 30;
 export const BREATH_REGEN = 14;
+
+/* Health: drowning, falls and animals wear it down; it comes back slowly once you're safe. */
+export const HEALTH_MAX = 100;
+export const DROWN_DAMAGE = 14; // per second with no breath left
+export const FALL_SAFE_SPEED = 13; // m/s at impact, about a 3.5 m drop
+export const FALL_DAMAGE = 7; // per m/s beyond that
+export const HEALTH_REGEN = 1.2; // per second
+export const REGEN_DELAY = 8; // seconds after the last hurt
+export const RESPAWN_DELAY = 3.5;
+
+/* Day and night: one full day, in seconds, and where on it a new island starts (0 = midnight). */
+export const DAY_LENGTH = 20 * 60;
+export const DAY_START = 0.3;
