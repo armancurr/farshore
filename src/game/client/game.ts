@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
 import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
-import { clockLabel, daylight } from "../shared/daylight";
+import { clockLabel, daylight, isNight } from "../shared/daylight";
 import {
   BITE_TEXT,
   depthAt,
@@ -24,13 +24,26 @@ import {
   type Spawn,
   type WorldInfo,
 } from "../shared/protocol";
-import { overSolid, Terrain } from "../shared/terrain";
+import {
+  BUILD_REACH,
+  checkPlacement,
+  overPrefab,
+  PREFABS,
+  type Prefab,
+  prefabBlocks,
+  type Verdict,
+} from "../shared/prefabs";
+import { SHOP, SHOP_REACH } from "../shared/shop";
+import { blockSolid, overSolid, Terrain } from "../shared/terrain";
 import {
   emptyInventory,
   HOTBAR,
   heldTool,
   type Inventory,
+  isKitId,
   ITEMS,
+  KIT_IDS,
+  type KitId,
   type ItemId,
   type Rarity,
   TOOLS,
@@ -43,6 +56,7 @@ import { type Connection, LocalConnection, serverBase, WsConnection } from "./ne
 import { Avatar } from "./scene/avatars";
 import { FishingLines } from "./scene/fishing";
 import { HerdView } from "./scene/herd";
+import { PrefabView } from "./scene/prefabs";
 import { createTerrainMesh, createWater } from "./scene/land";
 import { shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
@@ -54,7 +68,25 @@ export type Mode = "attract" | "solo" | "online";
 
 export type FeedItem = { id: number; text: string; at: number };
 
-export type PanelKind = "inventory" | "board";
+export type PanelKind = "inventory" | "board" | "shop" | "chest";
+
+export type ShopView = {
+  id: string;
+  section: string;
+  name: string;
+  note: string;
+  price: number;
+  owned: number;
+};
+
+export type BuildView = {
+  kits: { id: KitId; name: string; count: number }[];
+  index: number;
+  ok: boolean;
+  reason: string | null;
+  /* Aiming at something already built: right-click takes it back. */
+  target: string | null;
+};
 
 export type BountyView = {
   id: number;
@@ -83,7 +115,7 @@ export type InventoryView = {
 };
 
 /* Something you could press E on: in the room's world, or a panel to open here. */
-type Focus = { kind: InteractKind | "board"; id: number; label: string };
+type Focus = { kind: InteractKind | "board" | "shop" | "chest"; id: number; label: string };
 
 export type HudState = {
   mode: Mode;
@@ -116,6 +148,11 @@ export type HudState = {
   bounty: BountyView | null;
   board: BountyView[];
   nearBoard: boolean;
+  shop: ShopView[];
+  nearShop: boolean;
+  /* The open chest's contents. */
+  chest: { id: ItemId; name: string; count: number }[] | null;
+  build: BuildView | null;
   /* 0..1 while winding up a hammer or flail. */
   charge: number | null;
   blocking: boolean;
@@ -149,6 +186,14 @@ type World = {
 };
 
 const STEP = 1 / 60;
+
+/* What bought tools are good for, for the shop. */
+const TOOL_NOTES: Partial<Record<ToolKind, string>> = {
+  rod2: "Casts further, bites sooner, a wider strike, and better luck with rare fish.",
+  sword2: "Hits harder than anything you'll find lying about, and never breaks.",
+  spear2: "Long reach, made for deer. Never breaks.",
+  axe2: "The heaviest blow you can buy. Never breaks.",
+};
 const BASE_FOV = 76;
 
 function disposeTree(root: THREE.Object3D) {
@@ -193,6 +238,16 @@ export class Game {
   private focus: Focus | null = null;
   private lines = new FishingLines();
   private herd = new HerdView();
+  private built = new PrefabView();
+  private chestId: number | null = null;
+  /* Build mode: which kit, how it's turned, and what's under the crosshair. */
+  private build: {
+    index: number;
+    turn: number;
+    aim: { x: number; y: number; z: number } | null;
+    verdict: Verdict | null;
+    target: Prefab | null;
+  } | null = null;
   private boarStates = new Map<number, number>();
   private myLine: { state: LineState; depth: number } | null = null;
   private bite: { strike: Strike; at: number } | null = null;
@@ -263,6 +318,7 @@ export class Game {
     this.scene.add(this.sky.group);
     this.scene.add(this.lines.group);
     this.scene.add(this.herd.group);
+    this.scene.add(this.built.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -348,6 +404,9 @@ export class Game {
     this.focus = null;
     this.lines.clear();
     this.herd.clear();
+    this.built.reset([]);
+    this.build = null;
+    this.chestId = null;
     this.boarStates.clear();
     this.myLine = null;
     this.bite = null;
@@ -384,7 +443,11 @@ export class Game {
 
   private onLockChange() {
     this.conn?.setPaused(this.shouldPause());
-    if (!this.input.locked) this.input.clear();
+    if (!this.input.locked) {
+      this.input.clear();
+      /* Esc: out of build mode. */
+      this.endBuild();
+    }
     this.emitHud();
   }
 
@@ -420,6 +483,7 @@ export class Game {
     this.viewmodel.dispose();
     this.lines.dispose();
     this.herd.dispose();
+    this.built.dispose();
     this.dropWorld();
     this.sky.dispose();
     this.post.dispose();
@@ -513,6 +577,7 @@ export class Game {
         navigator.vibrate?.(80);
         break;
       case "died":
+        this.endBuild();
         this.down = msg.cause;
         this.downAt = performance.now() / 1000;
         this.input.clear();
@@ -560,6 +625,18 @@ export class Game {
       case "board":
         this.board = msg.offers;
         break;
+      case "prefab": {
+        const fresh = !this.built.get(msg.prefab.id);
+        this.addPrefab(msg.prefab);
+        if (fresh && this.body && this.distanceTo(msg.prefab.x, msg.prefab.z) < 30)
+          this.audio.thud();
+        break;
+      }
+      case "unprefab":
+        this.built.remove(msg.id);
+        this.world?.terrain.removeSolids(msg.id);
+        if (this.chestId === msg.id && this.panel === "chest") this.closePanel();
+        break;
       case "paid":
         this.audio.reward();
         this.banner = {
@@ -599,6 +676,15 @@ export class Game {
         this.pushFeed(msg.text);
         break;
     }
+  }
+
+  /* Draw it, and make it solid for our own footsteps too. */
+  private addPrefab(p: Prefab) {
+    this.built.set(p);
+    const solids = prefabBlocks(p)
+      .filter((b) => b.solid)
+      .map(blockSolid);
+    if (solids.length) this.world?.terrain.addSolids(p.id, solids);
   }
 
   private onAnimalHit(msg: Extract<ServerMsg, { t: "ahit" }>) {
@@ -705,6 +791,9 @@ export class Game {
     world.drops.clear();
     for (const w of info.weapons) world.drops.add(w);
     this.board = info.board;
+    for (const p of this.built.list()) world.terrain.removeSolids(p.id);
+    this.built.reset([]);
+    for (const p of info.prefabs) this.addPrefab(p);
     if (info.you) this.place(info.you);
     else this.body = null;
     this.setRoster(info.roster);
@@ -893,6 +982,7 @@ export class Game {
     this.updateRemotes(dt);
     this.lines.update(t, this.tipOf);
     this.herd.update(dt);
+    this.built.update(t);
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
@@ -931,7 +1021,7 @@ export class Game {
       const b = this.body;
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
-      this.blocking = this.weapon === "shield" && active && this.input.altHeld;
+      this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
       const charging = this.chargeStart !== null;
       const intent = active
         ? {
@@ -971,7 +1061,8 @@ export class Game {
       /* Attack: instant swings on press; hammers and flails charge until release. */
       const now = performance.now() / 1000;
       const fishing = !!(heldTool(this.inv) && TOOLS[heldTool(this.inv)!.kind].rod);
-      if (fishing && this.input.take("attack")) this.castOrStrike();
+      if (this.build) this.buildInput(b);
+      else if (fishing && this.input.take("attack")) this.castOrStrike();
       else if (this.input.take("attack") && !this.blocking) {
         if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
@@ -984,14 +1075,19 @@ export class Game {
       if (!def.charge) this.chargeStart = null;
       this.input.take("alt");
       this.input.take("altUp");
-      this.hotbarInput();
-      this.focus = this.findFocus(b);
+      if (!this.build) this.hotbarInput();
+      this.focus = this.build ? null : this.findFocus(b);
       if (this.input.take("interact") && this.focus) {
         const f = this.focus;
-        if (f.kind === "board") this.openPanel("board");
-        else this.conn?.send({ t: "interact", kind: f.kind, id: f.id });
+        if (f.kind === "board" || f.kind === "shop") this.openPanel(f.kind);
+        else if (f.kind === "chest") {
+          this.chestId = f.id;
+          this.openPanel("chest");
+        } else this.conn?.send({ t: "interact", kind: f.kind, id: f.id });
       }
       if (this.input.take("inventory")) this.openPanel("inventory");
+      if (this.input.take("build")) this.toggleBuild();
+      this.input.take("rotate");
       const stance = { block: this.blocking, charge: this.chargeStart !== null };
       if (stance.block !== this.sentStance.block || stance.charge !== this.sentStance.charge) {
         this.sentStance = stance;
@@ -1085,6 +1181,28 @@ export class Game {
     };
     const bd = world.terrain.board;
     consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
+    const sh = world.terrain.shop;
+    consider(sh.x, sh.y, sh.z, 3.4, () => ({
+      kind: "shop",
+      id: 0,
+      label: "E · The keeper's stall",
+    }));
+    for (const p of this.built.list()) {
+      if (p.kind === "chest")
+        consider(p.x, p.y, p.z, 2.4, () => ({
+          kind: "chest",
+          id: p.id,
+          label: "E · Open the chest",
+        }));
+      else if (p.kind === "bed") {
+        const night = this.haveClock && isNight(this.worldTime());
+        consider(p.x, p.y, p.z, 2.6, () => ({
+          kind: "prefab",
+          id: p.id,
+          label: night ? "E · Sleep until morning" : "E · Rest (you'll wake here)",
+        }));
+      }
+    }
     for (const w of world.drops.list()) {
       consider(w.x, w.y, w.z, 2.6, () => ({
         kind: "weapon",
@@ -1100,9 +1218,143 @@ export class Game {
     return "Click to cast · deeper water, rarer fish";
   }
 
+  /* ---------- building ---------- */
+
+  private ownedKits() {
+    return KIT_IDS.filter((k) => (this.inv.items[k] ?? 0) > 0 && k !== "rowboat");
+  }
+
+  private toggleBuild() {
+    if (this.build) {
+      this.endBuild();
+      return;
+    }
+    if (!this.ownedKits().length) {
+      this.say("Nothing to build yet. The keeper's stall at the lighthouse sells kits.", 3);
+      return;
+    }
+    if (this.myLine) this.conn?.send({ t: "reel", at: -1 });
+    this.build = { index: 0, turn: 0, aim: null, verdict: null, target: null };
+  }
+
+  private endBuild() {
+    this.build = null;
+    this.built.ghost.show(null);
+  }
+
+  /* Number keys or the wheel pick a kit, R turns it, click places, right-click takes back. */
+  private buildInput(b: Body) {
+    const build = this.build!;
+    const kits = this.ownedKits();
+    if (!kits.length) {
+      this.endBuild();
+      return;
+    }
+    const digit = this.input.takeDigit();
+    const wheel = this.input.takeWheel();
+    if (digit !== null && digit < kits.length) build.index = digit;
+    else if (wheel)
+      build.index = (((build.index + wheel) % kits.length) + kits.length) % kits.length;
+    build.index = Math.min(build.index, kits.length - 1);
+    if (this.input.take("rotate")) build.turn += Math.PI / 4;
+    const kind = kits[build.index];
+    const rot = b.yaw + build.turn;
+    this.aimBuild(b, kind, rot);
+
+    if (this.input.take("attack")) {
+      if (build.target) this.say("Right-click to take that back first", 2);
+      else if (build.aim && build.verdict?.ok)
+        this.conn?.send({ t: "place", kind, x: build.aim.x, z: build.aim.z, rot });
+      else if (build.verdict?.reason) this.say(build.verdict.reason, 2);
+    }
+    this.input.take("attackUp");
+    if (this.input.take("alt") && build.target)
+      this.conn?.send({ t: "pickup", id: build.target.id });
+  }
+
+  /*
+   * Walk a ray out from the eye until it meets the ground (or a floor, or the
+   * sea for things that go on water), and judge the spot.
+   */
+  private aimBuild(b: Body, kind: KitId, rot: number) {
+    const build = this.build!;
+    const world = this.world!;
+    const def = PREFABS[kind];
+    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const p = this.tmpV.copy(this.camera.position);
+    let hit: { x: number; y: number; z: number } | null = null;
+    for (let d = 0; d < BUILD_REACH + 2; d += 0.25) {
+      p.addScaledVector(dir, d === 0 ? 0 : 0.25);
+      let ground = def.onFloors
+        ? world.terrain.groundAt(p.x, p.z, p.y).ground
+        : world.terrain.heightAt(p.x, p.z);
+      if (def.placing !== "land") ground = Math.max(ground, SEA_LEVEL);
+      if (p.y <= ground) {
+        hit = { x: p.x, y: ground, z: p.z };
+        break;
+      }
+    }
+    if (!hit) {
+      const reach = BUILD_REACH - 0.5;
+      const flat = Math.hypot(dir.x, dir.z) || 1;
+      const x = b.x + (dir.x / flat) * reach;
+      const z = b.z + (dir.z / flat) * reach;
+      hit = { x, y: world.terrain.heightAt(x, z), z };
+    }
+    /* Something already built under the crosshair? Then that's what you're pointing at. */
+    let target: Prefab | null = null;
+    let best = Number.POSITIVE_INFINITY;
+    for (const q of this.built.list()) {
+      if (!overPrefab(q, hit.x, hit.z, 0.25) || Math.abs(hit.y - q.y) > 4) continue;
+      const d = Math.hypot(q.x - hit.x, q.z - hit.z);
+      if (d < best) {
+        best = d;
+        target = q;
+      }
+    }
+    /* A bed in a hut is pointed at the bed, not the hut. */
+    if (
+      target &&
+      def.onFloors &&
+      (target.kind === "hut" || target.kind === "cabin" || target.kind === "dock")
+    )
+      target = this.smallestAt(hit.x, hit.z) ?? null;
+    build.target = target;
+    build.aim = hit;
+    if (target) {
+      build.verdict = null;
+      this.built.ghost.show(target.kind, target.x, target.y, target.z, target.rot, "pick");
+      return;
+    }
+    build.verdict = checkPlacement(world.terrain, kind, hit.x, hit.z, rot, b);
+    this.built.ghost.show(kind, hit.x, build.verdict.y, hit.z, rot, build.verdict.ok ? "ok" : "no");
+  }
+
+  /* The small things (chest, bed, campfire) at a spot, if any. */
+  private smallestAt(x: number, z: number) {
+    for (const q of this.built.list()) {
+      if (PREFABS[q.kind].onFloors && overPrefab(q, x, z, 0.25)) return q;
+    }
+    return null;
+  }
+
+  private buildView(): BuildView | null {
+    const build = this.build;
+    if (!build) return null;
+    const kits = this.ownedKits();
+    return {
+      kits: kits.map((k) => ({ id: k, name: ITEMS[k].name, count: this.inv.items[k] ?? 0 })),
+      index: Math.min(build.index, kits.length - 1),
+      ok: !!build.verdict?.ok,
+      reason: build.verdict?.reason ?? null,
+      target: build.target ? ITEMS[build.target.kind].name : null,
+    };
+  }
+
   /* ---------- panels ---------- */
 
   openPanel(kind: PanelKind) {
+    this.endBuild();
     this.panel = kind;
     this.input.clear();
     this.input.unlock();
@@ -1114,6 +1366,46 @@ export class Game {
     this.panel = null;
     this.emitHud();
     this.lock();
+  }
+
+  buy(item: string) {
+    this.conn?.send({ t: "buy", item });
+  }
+
+  /* Into the open chest (n > 0) or out of it (n < 0). */
+  stash(item: ItemId, n: number) {
+    if (this.chestId !== null) this.conn?.send({ t: "stash", chest: this.chestId, item, n });
+  }
+
+  private shopView(): ShopView[] {
+    return SHOP.map((e) => {
+      const kit = "kit" in e.give ? e.give.kit : null;
+      const tool = "tool" in e.give ? e.give.tool : null;
+      return {
+        id: e.id,
+        section: e.section,
+        name: kit ? ITEMS[kit].name : TOOLS[tool!].name,
+        note: kit ? ITEMS[kit].note : (TOOL_NOTES[tool!] ?? ""),
+        price: e.price,
+        owned: kit
+          ? (this.inv.items[kit] ?? 0) + [...this.built.list()].filter((p) => p.kind === kit).length
+          : this.inv.tools.filter((t) => t.kind === tool).length,
+      };
+    });
+  }
+
+  private nearShop() {
+    const b = this.body;
+    const s = this.world?.terrain.shop;
+    return !!b && !!s && Math.hypot(s.x - b.x, s.z - b.z) < SHOP_REACH && Math.abs(s.y - b.y) < 3;
+  }
+
+  private chestView() {
+    if (this.panel !== "chest" || this.chestId === null) return null;
+    const store = this.built.get(this.chestId)?.store ?? {};
+    return (Object.entries(store) as [ItemId, number][])
+      .filter(([, n]) => n > 0)
+      .map(([id, count]) => ({ id, name: ITEMS[id].name, count }));
   }
 
   acceptBounty(id: number) {
@@ -1404,6 +1696,10 @@ export class Game {
       bounty: this.inv.bounty ? this.bountyView(this.inv.bounty) : null,
       board: this.board.map((b) => this.bountyView(b)),
       nearBoard: this.nearBoard(),
+      shop: this.panel === "shop" ? this.shopView() : [],
+      nearShop: this.nearShop(),
+      chest: this.chestView(),
+      build: this.buildView(),
       charge:
         this.chargeStart !== null && def.charge
           ? Math.min(1, (now - this.chargeStart) / def.charge.max)

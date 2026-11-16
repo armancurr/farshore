@@ -215,3 +215,122 @@ export function BoardPanel(props: { hud: HudState; game: Game }) {
     </PanelFrame>
   );
 }
+
+export function ShopPanel(props: { hud: HudState; game: Game }) {
+  const sections = () => [...new Set(props.hud.shop.map((e) => e.section))];
+  return (
+    <PanelFrame
+      title="The keeper's stall"
+      aside={<Coins coins={props.hud.inv.coins} />}
+      onClose={() => props.game.closePanel()}
+    >
+      <p class="text-[13px] text-white/50">
+        Coins only come from bounties. Kits go in your pack; press B to build them.
+      </p>
+      <For each={sections()}>
+        {(section) => (
+          <section>
+            <h3 class={heading}>{section}</h3>
+            <ul class="mt-2">
+              <For each={props.hud.shop.filter((e) => e.section === section)}>
+                {(e) => (
+                  <li class="flex items-center justify-between gap-4 border-b border-white/10 py-2.5">
+                    <div class="min-w-0">
+                      <div class="text-[14px]">
+                        {e.name}
+                        <Show when={e.owned}>
+                          <span class="ml-2 font-mono text-[10px] text-white/40">
+                            OWNED ×{e.owned}
+                          </span>
+                        </Show>
+                      </div>
+                      <div class="mt-0.5 text-[12px] text-white/45">{e.note}</div>
+                    </div>
+                    <div class="flex shrink-0 items-center gap-3">
+                      <span class="font-mono text-[12px] tabular-nums">{e.price} ◎</span>
+                      <button
+                        type="button"
+                        class={button}
+                        disabled={props.hud.inv.coins < e.price || !props.hud.nearShop}
+                        onClick={() => props.game.buy(e.id)}
+                      >
+                        Buy
+                      </button>
+                    </div>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </section>
+        )}
+      </For>
+    </PanelFrame>
+  );
+}
+
+/* Click to move one; shift-click moves them all. */
+export function ChestPanel(props: { hud: HudState; game: Game }) {
+  const moveAll = (e: MouseEvent, n: number) => (e.shiftKey ? n * 9999 : n);
+  const pack = () => props.hud.inv.items.filter((i) => i.kind !== "kit");
+  return (
+    <PanelFrame title="Chest" onClose={() => props.game.closePanel()}>
+      <div class="grid gap-6 sm:grid-cols-2">
+        <section>
+          <h3 class={heading}>In the chest</h3>
+          <Show
+            when={props.hud.chest?.length}
+            fallback={<p class="mt-2 text-[13px] text-white/40">Empty.</p>}
+          >
+            <ul class="mt-2">
+              <For each={props.hud.chest ?? []}>
+                {(item) => (
+                  <li class="flex items-center justify-between gap-2 border-b border-white/10 py-1.5">
+                    <span class="truncate text-[13px]">
+                      {item.name}{" "}
+                      <span class="font-mono text-[11px] text-white/50">×{item.count}</span>
+                    </span>
+                    <button
+                      type="button"
+                      class={button}
+                      onClick={(e) => props.game.stash(item.id, -moveAll(e, 1))}
+                    >
+                      Take
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </section>
+        <section>
+          <h3 class={heading}>In your pack</h3>
+          <Show
+            when={pack().length}
+            fallback={<p class="mt-2 text-[13px] text-white/40">Nothing to store.</p>}
+          >
+            <ul class="mt-2">
+              <For each={pack()}>
+                {(item) => (
+                  <li class="flex items-center justify-between gap-2 border-b border-white/10 py-1.5">
+                    <span class="truncate text-[13px]">
+                      {item.name}{" "}
+                      <span class="font-mono text-[11px] text-white/50">×{item.count}</span>
+                    </span>
+                    <button
+                      type="button"
+                      class={button}
+                      onClick={(e) => props.game.stash(item.id, moveAll(e, 1))}
+                    >
+                      Store
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </section>
+      </div>
+      <p class="text-[12px] text-white/40">Shift-click to move the lot.</p>
+    </PanelFrame>
+  );
+}

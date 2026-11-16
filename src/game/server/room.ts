@@ -28,7 +28,7 @@ import {
   makeBounty,
   progress,
 } from "../shared/bounties";
-import { isNight } from "../shared/daylight";
+import { isNight, untilDawn } from "../shared/daylight";
 import {
   BITE_WINDOW,
   depthAt,
@@ -59,13 +59,22 @@ import {
   HOTBAR,
   heldTool,
   type Inventory,
+  isKitId,
   type ItemId,
   MAX_TOOLS,
   type Tool,
   type ToolKind,
   TOOLS,
 } from "../shared/items";
-import { Terrain } from "../shared/terrain";
+import {
+  CAMPFIRE_WARMTH,
+  checkPlacement,
+  MAX_PREFABS,
+  type Prefab,
+  prefabBlocks,
+} from "../shared/prefabs";
+import { SHOP_REACH, shopEntry } from "../shared/shop";
+import { blockSolid, overSolid, Terrain } from "../shared/terrain";
 import {
   COMBO_WINDOW,
   knockScale,
@@ -145,6 +154,15 @@ export type RoomOptions = {
   seed?: number;
 };
 
+/* Points round a body's centre, to test whether it fits somewhere. */
+const PROBES = [
+  [0, 0],
+  [0.4, 0],
+  [-0.4, 0],
+  [0, 0.4],
+  [0, -0.4],
+] as const;
+
 /* Loose weapons lying about the island; a fresh one washes up when the count drops. */
 const GROUND_WEAPONS = 8;
 const WEAPON_RESPAWN = 45;
@@ -172,6 +190,8 @@ export class Room {
   /* The bounty board: offers, and when each was posted (world time). */
   private board: Bounty[] = [];
   private posted = new Map<number, number>();
+  private prefabs = new Map<number, Prefab>();
+  private prefabId = 1;
   private bountyId = 1;
   private prey: Prey[] = [];
   private rng: Rng;
@@ -299,6 +319,18 @@ export class Room {
         m.charging = msg.charge && !!weapon && !!weaponDef(weapon).charge;
         return;
       }
+      case "buy":
+        this.buy(m, msg.item);
+        return;
+      case "place":
+        this.place(m, msg.kind, msg.x, msg.z, msg.rot);
+        return;
+      case "pickup":
+        this.pickupPrefab(m, msg.id);
+        return;
+      case "stash":
+        this.stash(m, msg.chest, msg.item, msg.n);
+        return;
       case "accept":
         this.accept(m, msg.id);
         return;
@@ -334,6 +366,7 @@ export class Room {
         return;
       case "interact":
         if (msg.kind === "weapon") this.pickUp(m, msg.id);
+        else this.usePrefab(m, msg.id);
         return;
       default:
         return;
@@ -415,6 +448,120 @@ export class Room {
     m.inv.items[id] = Math.max(0, (m.inv.items[id] ?? 0) + n);
     if (!m.inv.items[id]) delete m.inv.items[id];
     m.invDirty = true;
+  }
+
+  /* ---------- shop and building ---------- */
+
+  private buy(m: Member, id: string) {
+    const entry = shopEntry(id);
+    const s = this.terrain.shop;
+    const near =
+      Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH && Math.abs(s.y - m.body.y) < 3;
+    if (!entry || !near || m.inv.coins < entry.price) return;
+    if ("tool" in entry.give) {
+      if (!this.giveTool(m, entry.give.tool, 1)) {
+        m.peer.send({ t: "feed", text: "Your pack is full" });
+        return;
+      }
+    } else this.addItem(m, entry.give.kit);
+    m.inv.coins -= entry.price;
+    m.invDirty = true;
+  }
+
+  private build(p: Prefab) {
+    this.prefabs.set(p.id, p);
+    const solids = prefabBlocks(p)
+      .filter((b) => b.solid)
+      .map(blockSolid);
+    if (solids.length) this.terrain.addSolids(p.id, solids);
+  }
+
+  private place(m: Member, kind: Prefab["kind"], x: number, z: number, rot: number) {
+    if (!isKitId(kind) || (m.inv.items[kind] ?? 0) < 1) return;
+    if (this.prefabs.size >= MAX_PREFABS) {
+      m.peer.send({ t: "feed", text: "The island can't hold any more" });
+      return;
+    }
+    const v = checkPlacement(this.terrain, kind, x, z, rot, m.body);
+    if (!v.ok) return;
+    const p: Prefab = {
+      id: this.prefabId++,
+      kind,
+      x: round2(x),
+      y: round2(v.y),
+      z: round2(z),
+      rot: round2(rot),
+    };
+    if (kind === "chest") p.store = {};
+    this.build(p);
+    this.addItem(m, kind, -1);
+    if (kind === "bed") m.inv.bed = p.id;
+    this.broadcast({ t: "prefab", prefab: p });
+  }
+
+  /* Take something you built back into your pack, with whatever was in it. */
+  private pickupPrefab(m: Member, id: number) {
+    const p = this.prefabs.get(id);
+    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14) return;
+    this.prefabs.delete(id);
+    this.terrain.removeSolids(id);
+    this.addItem(m, p.kind, 1);
+    for (const [item, n] of Object.entries(p.store ?? {}) as [ItemId, number][])
+      this.addItem(m, item, n);
+    for (const o of this.members.values()) {
+      if (o.inv.bed === id) {
+        o.inv.bed = null;
+        o.invDirty = true;
+      }
+    }
+    this.broadcast({ t: "unprefab", id });
+  }
+
+  private usePrefab(m: Member, id: number) {
+    const p = this.prefabs.get(id);
+    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 4) return;
+    if (p.kind === "bed") this.sleep(m, p);
+  }
+
+  /*
+   * A bed is where you wake from now on. At night, if you're the only one
+   * here, you sleep straight through to the morning.
+   */
+  private sleep(m: Member, bed: Prefab) {
+    m.inv.bed = bed.id;
+    m.invDirty = true;
+    if (isNight(this.time) && this.humans() === 1) {
+      this.time += untilDawn(this.time);
+      m.health = HEALTH_MAX;
+      m.peer.send({ t: "feed", text: "You sleep until morning" });
+      this.broadcastWorld();
+    } else {
+      m.peer.send({ t: "feed", text: "You'll wake here from now on" });
+    }
+  }
+
+  private stash(m: Member, chestId: number, item: ItemId, n: number) {
+    const chest = this.prefabs.get(chestId);
+    if (!chest?.store || Math.hypot(chest.x - m.body.x, chest.z - m.body.z) > 4) return;
+    const store = chest.store;
+    const amount = n > 0 ? Math.min(n, m.inv.items[item] ?? 0) : -Math.min(-n, store[item] ?? 0);
+    if (!amount) return;
+    this.addItem(m, item, -amount);
+    store[item] = (store[item] ?? 0) + amount;
+    if (!store[item]) delete store[item];
+    this.broadcast({ t: "prefab", prefab: chest });
+  }
+
+  private nearCampfire(m: Member) {
+    for (const p of this.prefabs.values()) {
+      if (p.kind !== "campfire") continue;
+      if (
+        Math.hypot(p.x - m.body.x, p.z - m.body.z) < CAMPFIRE_WARMTH &&
+        Math.abs(p.y - m.body.y) < 3
+      )
+        return true;
+    }
+    return false;
   }
 
   /* ---------- bounties ---------- */
@@ -595,8 +742,13 @@ export class Room {
       }
 
       if (m.breath <= 0) this.hurt(m, DROWN_DAMAGE * dt, "drowned");
-      else if (now - m.lastHurtAt > REGEN_DELAY && m.health < HEALTH_MAX)
-        m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * dt);
+      else if (m.health < HEALTH_MAX) {
+        /* A campfire warms you back quickly; otherwise it takes a while. */
+        const warm = this.nearCampfire(m);
+        const quiet = now - m.lastHurtAt;
+        if (warm && quiet > 2) m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * 4 * dt);
+        else if (quiet > REGEN_DELAY) m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * dt);
+      }
 
       this.tickLine(m, now);
 
@@ -646,7 +798,28 @@ export class Room {
     this.hurt(m, damage, "boar");
   }
 
-  private spawnPoint(_m: Member): Spawn {
+  /* Beside your bed if you have one, otherwise where everyone first wakes up. */
+  private spawnPoint(m: Member): Spawn {
+    const bed = m.inv.bed === null ? null : this.prefabs.get(m.inv.bed);
+    if (bed) {
+      const c = Math.cos(bed.rot);
+      const s = Math.sin(bed.rot);
+      for (const side of [1, -1]) {
+        const x = bed.x + side * 0.95 * c;
+        const z = bed.z - side * 0.95 * s;
+        const { ground } = this.terrain.groundAt(x, z, bed.y + 0.3);
+        const blocked = this.terrain
+          .solidsNear(x, z)
+          .some(
+            (o) =>
+              o.top > ground + 0.6 &&
+              o.bottom < ground + 1.7 &&
+              PROBES.some(([px, pz]) => overSolid(o, x + px, z + pz)),
+          );
+        if (!blocked) return { x, y: ground, z, yaw: bed.rot };
+      }
+      return { x: bed.x, y: bed.y + 0.45, z: bed.z, yaw: bed.rot };
+    }
     const h = this.terrain.home;
     return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
   }
@@ -964,8 +1137,14 @@ export class Room {
       roster: this.roster(),
       weapons: this.weapons,
       board: this.board,
+      prefabs: [...this.prefabs.values()],
       you: m.spectator ? null : { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw },
     };
+  }
+
+  /* Everyone gets the world afresh: after a jump in time, say. */
+  private broadcastWorld() {
+    for (const o of this.members.values()) o.peer.send({ t: "world", ...this.worldInfo(o) });
   }
 
   private broadcastRoster() {

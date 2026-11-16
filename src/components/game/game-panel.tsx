@@ -1,7 +1,7 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
-import { BoardPanel, InventoryPanel } from "./panels";
+import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
@@ -19,6 +19,7 @@ const CONTROLS = [
   ["E", "Interact"],
   ["1–5 / Wheel", "Hotbar"],
   ["Tab / I", "Pack"],
+  ["B", "Build · R turn · right-click take back"],
   ["N", "Music"],
   ["M", "Mute"],
   ["Esc", "Pause"],
@@ -167,6 +168,12 @@ export function GamePanel(props: { onPress?: () => void }) {
       <Show when={playing() && hud()?.panel === "board" && game}>
         <BoardPanel hud={hud()!} game={game!} />
       </Show>
+      <Show when={playing() && hud()?.panel === "shop" && game}>
+        <ShopPanel hud={hud()!} game={game!} />
+      </Show>
+      <Show when={playing() && hud()?.panel === "chest" && game}>
+        <ChestPanel hud={hud()!} game={game!} />
+      </Show>
 
       <Show when={status() === "ready" && !playing()}>
         <div class="absolute bottom-6 left-6 flex items-center gap-2 sm:bottom-8 sm:left-8">
@@ -276,7 +283,7 @@ export function GamePanel(props: { onPress?: () => void }) {
               WASD move · Space jump · Shift sprint
               <br />
               Click / F attack, hold to charge · right-click block
-              <br />E interact · 1–5 hotbar · Tab pack · N music · M mute
+              <br />E interact · 1–5 hotbar · Tab pack · B build · N music · M mute
             </div>
           </div>
         </div>

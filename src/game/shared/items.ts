@@ -238,6 +238,8 @@ export type Inventory = {
   slot: number;
   /* The bounty you've taken from the board. */
   bounty: Bounty | null;
+  /* The bed you last slept in or set down: where you wake after blacking out. */
+  bed: number | null;
 };
 
 export function emptyInventory(): Inventory {
@@ -248,6 +250,7 @@ export function emptyInventory(): Inventory {
     hotbar: [null, null, null, null, null],
     slot: 0,
     bounty: null,
+    bed: null,
   };
 }
 

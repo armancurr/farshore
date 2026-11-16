@@ -1,6 +1,16 @@
 import type { Bounty } from "./bounties";
 import type { Strike } from "./fishing";
-import { type AnimalKind, type FishId, HOTBAR, type Inventory } from "./items";
+import {
+  type AnimalKind,
+  type FishId,
+  HOTBAR,
+  type Inventory,
+  isItemId,
+  isKitId,
+  type ItemId,
+  type KitId,
+} from "./items";
+import type { Prefab } from "./prefabs";
 import { WEAPON_KINDS, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string };
@@ -64,6 +74,7 @@ export type WorldInfo = {
   roster: RosterEntry[];
   weapons: GroundWeapon[];
   board: Bounty[];
+  prefabs: Prefab[];
   /* Where you stand right now; null when only watching. */
   you: Spawn | null;
 };
@@ -86,6 +97,9 @@ export type ServerMsg =
     }
   | { t: "inv"; inv: Inventory }
   | { t: "board"; offers: Bounty[] }
+  /* Something built, or changed (a chest's contents). */
+  | { t: "prefab"; prefab: Prefab }
+  | { t: "unprefab"; id: number }
   | { t: "paid"; bounty: Bounty }
   /* Someone's fishing line: where the float sits, and whether something's biting. */
   | { t: "line"; by: number; x: number; z: number; state: LineState }
@@ -138,6 +152,11 @@ export type ClientMsg =
   /* Move a tool into a hotbar slot (1-4), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
   | { t: "drop"; tool: number }
+  | { t: "buy"; item: string }
+  | { t: "place"; kind: KitId; x: number; z: number; rot: number }
+  | { t: "pickup"; id: number }
+  /* Move `n` of an item into a chest (or out of it, with a negative n). */
+  | { t: "stash"; chest: number; item: ItemId; n: number }
   | { t: "accept"; id: number }
   | { t: "turnin" }
   | { t: "abandon" }
@@ -187,6 +206,17 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "equip":
       if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
       return { t: "equip", tool: m.tool, slot: m.slot };
+    case "buy":
+      return typeof m.item === "string" && m.item.length < 32 ? { t: "buy", item: m.item } : null;
+    case "place":
+      if (!isKitId(m.kind) || !finite(m.x, 1000) || !finite(m.z, 1000) || !finite(m.rot, 100))
+        return null;
+      return { t: "place", kind: m.kind, x: m.x, z: m.z, rot: m.rot };
+    case "pickup":
+      return isId(m.id) ? { t: "pickup", id: m.id } : null;
+    case "stash":
+      if (!isId(m.chest) || !isItemId(m.item) || !isInt(m.n, -9999, 9999) || m.n === 0) return null;
+      return { t: "stash", chest: m.chest, item: m.item, n: m.n };
     case "accept":
       return isId(m.id) ? { t: "accept", id: m.id } : null;
     case "turnin":

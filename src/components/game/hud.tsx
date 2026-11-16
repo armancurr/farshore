@@ -250,6 +250,52 @@ function Fishing(props: { hud: HudState }) {
   );
 }
 
+/* Build mode: the kits you own, which one's chosen, and whether it fits here. */
+function BuildBar(props: { hud: HudState; touch: boolean }) {
+  const b = () => props.hud.build!;
+  return (
+    <div class="flex flex-col items-center gap-2">
+      <div
+        class="font-mono text-[11px] tracking-[0.18em] uppercase"
+        classList={{
+          "text-white": b().ok || !!b().target,
+          "text-white/60": !b().ok && !b().target,
+        }}
+      >
+        {b().target
+          ? `Right-click · take back the ${b().target!.toLowerCase()}`
+          : b().ok
+            ? "Click to place"
+            : (b().reason ?? "Look at the ground")}
+      </div>
+      <div class="flex gap-1.5">
+        <Index each={b().kits}>
+          {(kit, i) => (
+            <div
+              class="flex h-14 w-20 flex-col justify-between border p-1.5 font-mono"
+              classList={{
+                "border-white bg-white/10": b().index === i,
+                "border-white/25 bg-black/40": b().index !== i,
+              }}
+            >
+              <span class="flex justify-between text-[9px] text-white/45">
+                <span>{i + 1}</span>
+                <span>×{kit().count}</span>
+              </span>
+              <span class="truncate text-[9px] tracking-[0.08em] uppercase">{kit().name}</span>
+            </div>
+          )}
+        </Index>
+      </div>
+      <Show when={!props.touch}>
+        <div class="font-mono text-[10px] tracking-[0.12em] text-white/45">
+          1–{b().kits.length} / wheel choose · R turn · click place · right-click take back · B done
+        </div>
+      </Show>
+    </div>
+  );
+}
+
 function Hotbar(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   return (
     <div class="flex flex-col items-center gap-2">
@@ -343,7 +389,12 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           class="absolute bottom-6 left-1/2 -translate-x-1/2"
           classList={{ "bottom-auto top-5": props.touch }}
         >
-          <Hotbar hud={h()} touch={props.touch} onSelect={props.onSelect} />
+          <Show
+            when={h().build}
+            fallback={<Hotbar hud={h()} touch={props.touch} onSelect={props.onSelect} />}
+          >
+            <BuildBar hud={h()} touch={props.touch} />
+          </Show>
         </div>
       </Show>
 

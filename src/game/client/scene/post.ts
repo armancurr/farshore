@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 /*
- * The last pass: everything to grey, a fine ordered dither so gradients break
+ * The last pass: everything to grey (but the build ghost), a fine ordered dither so gradients break
  * into texture, a vignette, and the moods — underwater murk, a gasping pulse
  * when breath runs low, a white flash when someone shoves you.
  */
@@ -33,6 +33,8 @@ const FRAGMENT = /* glsl */ `
     }
     vec3 col = texture2D(tScene, uv).rgb;
     float l = dot(col, vec3(0.299, 0.587, 0.114));
+    /* The world is grey; the only colour that ever reaches here is the build ghost's, kept as is. */
+    vec3 chroma = col - vec3(l);
 
     /* Underwater: lifted blacks, crushed highlights, a murky falloff. */
     float murk = mix(l, 0.09 + l * 0.45, uUnder);
@@ -58,7 +60,7 @@ const FRAGMENT = /* glsl */ `
     float levels = 28.0;
     l = floor(l * levels + bayer4(gl_FragCoord.xy)) / levels;
     l *= uFade;
-    gl_FragColor = vec4(vec3(clamp(l, 0.0, 1.0)), 1.0);
+    gl_FragColor = vec4(clamp(vec3(l) + chroma * uFade, 0.0, 1.0), 1.0);
   }
 `;
 
