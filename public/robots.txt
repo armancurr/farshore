@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://armancurr.vercel.app/sitemap.xml

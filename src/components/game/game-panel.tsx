@@ -1,4 +1,4 @@
-import { Keyboard, Play } from "phosphor-solid";
+import { GameController, Play } from "phosphor-solid";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
@@ -11,7 +11,7 @@ const ONLINE_ENABLED = false;
 
 /* Menu buttons: plain text and an icon, growing a little under the pointer. */
 const menuButton =
-  "flex origin-right items-center gap-2.5 font-sans text-xl text-white transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none";
+  "flex cursor-pointer items-center gap-2.5 font-sans text-lg font-normal tracking-[0.12em] text-white uppercase transition-transform duration-150 ease-out hover:scale-110 focus-visible:scale-110 focus-visible:outline-none";
 
 const CONTROLS = [
   ["WASD", "Move"],
@@ -179,11 +179,11 @@ export function GamePanel(props: { onPress?: () => void }) {
       </Show>
 
       <Show when={status() === "ready" && !playing()}>
-        <div class="absolute top-6 right-6 flex flex-col items-end gap-5 sm:top-8 sm:right-8">
+        <div class="absolute inset-x-6 top-6 flex items-center justify-between gap-6 sm:inset-x-8 sm:top-8">
           <div class="font-display text-5xl leading-none text-white select-none sm:text-6xl">
             farshore
           </div>
-          <div class="flex flex-col items-end gap-3">
+          <div class="flex items-center gap-8">
             <button type="button" class={menuButton} onClick={() => play("solo")}>
               Play
               <Play size={22} weight="fill" />
@@ -206,7 +206,7 @@ export function GamePanel(props: { onPress?: () => void }) {
                   onClick={() => setControlsOpen(!controlsOpen())}
                 >
                   Controls
-                  <Keyboard size={22} />
+                  <GameController size={22} />
                 </button>
                 <Show when={controlsOpen()}>
                   <dl class="absolute top-full right-0 mt-3 grid w-max grid-cols-[auto_auto] gap-x-6 gap-y-1.5 border border-white/20 bg-black/90 p-4 font-mono text-[10px] tracking-[0.15em] uppercase">
