@@ -1,3 +1,4 @@
+import type { Bounty } from "./bounties";
 import type { Strike } from "./fishing";
 import { type AnimalKind, type FishId, HOTBAR, type Inventory } from "./items";
 import { WEAPON_KINDS, type WeaponKind } from "./weapons";
@@ -62,6 +63,7 @@ export type WorldInfo = {
   time: number;
   roster: RosterEntry[];
   weapons: GroundWeapon[];
+  board: Bounty[];
   /* Where you stand right now; null when only watching. */
   you: Spawn | null;
 };
@@ -83,6 +85,8 @@ export type ServerMsg =
       } | null;
     }
   | { t: "inv"; inv: Inventory }
+  | { t: "board"; offers: Bounty[] }
+  | { t: "paid"; bounty: Bounty }
   /* Someone's fishing line: where the float sits, and whether something's biting. */
   | { t: "line"; by: number; x: number; z: number; state: LineState }
   /* To the angler alone: strike while the needle is in the window. */
@@ -134,6 +138,9 @@ export type ClientMsg =
   /* Move a tool into a hotbar slot (1-4), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
   | { t: "drop"; tool: number }
+  | { t: "accept"; id: number }
+  | { t: "turnin" }
+  | { t: "abandon" }
   | { t: "cast"; x: number; z: number }
   /* Strike, `at` seconds after the bite as the angler saw it. */
   | { t: "reel"; at: number };
@@ -180,6 +187,12 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "equip":
       if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
       return { t: "equip", tool: m.tool, slot: m.slot };
+    case "accept":
+      return isId(m.id) ? { t: "accept", id: m.id } : null;
+    case "turnin":
+      return { t: "turnin" };
+    case "abandon":
+      return { t: "abandon" };
     case "cast":
       if (!finite(m.x, 1000) || !finite(m.z, 1000)) return null;
       return { t: "cast", x: m.x, z: m.z };

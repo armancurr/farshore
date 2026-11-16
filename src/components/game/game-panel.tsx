@@ -1,7 +1,7 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { Hud } from "./hud";
-import { InventoryPanel } from "./panels";
+import { BoardPanel, InventoryPanel } from "./panels";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
@@ -163,6 +163,9 @@ export function GamePanel(props: { onPress?: () => void }) {
 
       <Show when={playing() && hud()?.panel === "inventory" && game}>
         <InventoryPanel hud={hud()!} game={game!} />
+      </Show>
+      <Show when={playing() && hud()?.panel === "board" && game}>
+        <BoardPanel hud={hud()!} game={game!} />
       </Show>
 
       <Show when={status() === "ready" && !playing()}>

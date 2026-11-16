@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { EYE_HEIGHT, HEALTH_MAX, SEA_LEVEL, STAMINA_MAX, TICK_HZ } from "../shared/constants";
+import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
 import { clockLabel, daylight } from "../shared/daylight";
 import {
   BITE_TEXT,
@@ -53,7 +54,16 @@ export type Mode = "attract" | "solo" | "online";
 
 export type FeedItem = { id: number; text: string; at: number };
 
-export type PanelKind = "inventory";
+export type PanelKind = "inventory" | "board";
+
+export type BountyView = {
+  id: number;
+  title: string;
+  note: string;
+  reward: number;
+  have: number;
+  need: number;
+};
 
 export type ToolView = {
   id: number;
@@ -72,8 +82,8 @@ export type InventoryView = {
   items: { id: ItemId; name: string; count: number; kind: string; rarity?: Rarity }[];
 };
 
-/* Something you could press E on. */
-type Focus = { kind: InteractKind; id: number; label: string };
+/* Something you could press E on: in the room's world, or a panel to open here. */
+type Focus = { kind: InteractKind | "board"; id: number; label: string };
 
 export type HudState = {
   mode: Mode;
@@ -100,8 +110,12 @@ export type HudState = {
   hint: string | null;
   /* Your line in the water; with a strike once something bites (`at` in performance seconds). */
   fishing: { state: LineState; text: string; strike: Strike | null; at: number } | null;
-  /* Fades from 1 after a catch (or a fish getting away). */
-  caught: { name: string | null; rarity: Rarity | null; at: number } | null;
+  /* A big line of news for a moment: a catch, a fish getting away, a payout. */
+  banner: { title: string; sub: string | null; at: number } | null;
+  /* The bounty you've taken, and the board's offers. */
+  bounty: BountyView | null;
+  board: BountyView[];
+  nearBoard: boolean;
   /* 0..1 while winding up a hammer or flail. */
   charge: number | null;
   blocking: boolean;
@@ -182,7 +196,8 @@ export class Game {
   private boarStates = new Map<number, number>();
   private myLine: { state: LineState; depth: number } | null = null;
   private bite: { strike: Strike; at: number } | null = null;
-  private caught: HudState["caught"] = null;
+  private banner: HudState["banner"] = null;
+  private board: Bounty[] = [];
   private chargeStart: number | null = null;
   private blocking = false;
   private sentStance = { block: false, charge: false };
@@ -336,7 +351,8 @@ export class Game {
     this.boarStates.clear();
     this.myLine = null;
     this.bite = null;
-    this.caught = null;
+    this.banner = null;
+    this.board = [];
     this.chargeStart = null;
     this.blocking = false;
     this.feed = [];
@@ -541,15 +557,27 @@ export class Game {
         this.audio.bite();
         navigator.vibrate?.(40);
         break;
+      case "board":
+        this.board = msg.offers;
+        break;
+      case "paid":
+        this.audio.reward();
+        this.banner = {
+          title: `+${msg.bounty.reward} coins`,
+          sub: `Bounty paid · ${bountyTitle(msg.bounty)}`,
+          at: performance.now() / 1000,
+        };
+        this.pushFeed(`Bounty paid: ${msg.bounty.reward} coins`);
+        break;
       case "ahit":
         this.onAnimalHit(msg);
         break;
       case "catch":
         if (msg.by !== this.myId) break;
         this.bite = null;
-        this.caught = {
-          name: msg.fish ? ITEMS[msg.fish].name : null,
-          rarity: msg.fish ? (ITEMS[msg.fish].rarity ?? null) : null,
+        this.banner = {
+          title: msg.fish ? ITEMS[msg.fish].name : "It got away.",
+          sub: msg.fish ? (ITEMS[msg.fish].rarity ?? null) : null,
           at: performance.now() / 1000,
         };
         if (msg.fish) {
@@ -676,6 +704,7 @@ export class Game {
     const world = this.world!;
     world.drops.clear();
     for (const w of info.weapons) world.drops.add(w);
+    this.board = info.board;
     if (info.you) this.place(info.you);
     else this.body = null;
     this.setRoster(info.roster);
@@ -958,7 +987,9 @@ export class Game {
       this.hotbarInput();
       this.focus = this.findFocus(b);
       if (this.input.take("interact") && this.focus) {
-        this.conn?.send({ t: "interact", kind: this.focus.kind, id: this.focus.id });
+        const f = this.focus;
+        if (f.kind === "board") this.openPanel("board");
+        else this.conn?.send({ t: "interact", kind: f.kind, id: f.id });
       }
       if (this.input.take("inventory")) this.openPanel("inventory");
       const stance = { block: this.blocking, charge: this.chargeStart !== null };
@@ -1052,6 +1083,8 @@ export class Game {
         best = f();
       }
     };
+    const bd = world.terrain.board;
+    consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
     for (const w of world.drops.list()) {
       consider(w.x, w.y, w.z, 2.6, () => ({
         kind: "weapon",
@@ -1081,6 +1114,37 @@ export class Game {
     this.panel = null;
     this.emitHud();
     this.lock();
+  }
+
+  acceptBounty(id: number) {
+    this.conn?.send({ t: "accept", id });
+  }
+
+  turnIn() {
+    this.conn?.send({ t: "turnin" });
+  }
+
+  abandonBounty() {
+    this.conn?.send({ t: "abandon" });
+  }
+
+  private bountyView(b: Bounty): BountyView {
+    return {
+      id: b.id,
+      title: bountyTitle(b),
+      note: bountyNote(b),
+      reward: b.reward,
+      have: progress(this.inv, b),
+      need: b.count,
+    };
+  }
+
+  private nearBoard() {
+    const b = this.body;
+    const bd = this.world?.terrain.board;
+    return (
+      !!b && !!bd && Math.hypot(bd.x - b.x, bd.z - b.z) < BOARD_REACH && Math.abs(bd.y - b.y) < 3
+    );
   }
 
   equip(tool: number, slot: number) {
@@ -1336,7 +1400,10 @@ export class Game {
             at: this.bite?.at ?? 0,
           }
         : null,
-      caught: this.caught && now - this.caught.at < 2.6 ? this.caught : null,
+      banner: this.banner && now - this.banner.at < 2.8 ? this.banner : null,
+      bounty: this.inv.bounty ? this.bountyView(this.inv.bounty) : null,
+      board: this.board.map((b) => this.bountyView(b)),
+      nearBoard: this.nearBoard(),
       charge:
         this.chargeStart !== null && def.charge
           ? Math.min(1, (now - this.chargeStart) / def.charge.max)

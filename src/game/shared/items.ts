@@ -1,3 +1,4 @@
+import type { Bounty } from "./bounties";
 import { WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
@@ -235,10 +236,19 @@ export type Inventory = {
   /* Tool ids per hotbar slot. Slot 0 is always your fists. */
   hotbar: (number | null)[];
   slot: number;
+  /* The bounty you've taken from the board. */
+  bounty: Bounty | null;
 };
 
 export function emptyInventory(): Inventory {
-  return { coins: 0, items: {}, tools: [], hotbar: [null, null, null, null, null], slot: 0 };
+  return {
+    coins: 0,
+    items: {},
+    tools: [],
+    hotbar: [null, null, null, null, null],
+    slot: 0,
+    bounty: null,
+  };
 }
 
 export function count(inv: Inventory, id: ItemId) {

@@ -7,6 +7,7 @@ import {
   type Perch,
   planStructures,
   type Structure,
+  toWorld,
 } from "./structures";
 
 export { LIGHTHOUSE };
@@ -44,6 +45,9 @@ export type Solid = {
 };
 
 export type Spot = { x: number; y: number; z: number };
+
+/* A place on the lighthouse plinth: its centre and the way its front faces. */
+export type Site = Spot & { rot: number };
 
 const BUCKET = 12;
 const NO_SOLIDS: Solid[] = [];
@@ -115,6 +119,9 @@ export class Terrain {
   lighthouse: Spot = { x: 0, y: 0, z: 0 };
   /* Where a new arrival wakes up: a flat, open patch near the middle of the island. */
   home: Spot & { yaw: number } = { x: 0, y: 0, z: 0, yaw: 0 };
+  /* The bounty board and the keeper's stall, either side of the lighthouse door. */
+  board: Site = { x: 0, y: 0, z: 0, rot: 0 };
+  shop: Site = { x: 0, y: 0, z: 0, rot: 0 };
   peak = 0;
   private taken: { x: number; z: number; r: number }[] = [];
   private buckets: Solid[][] = [];
@@ -231,10 +238,127 @@ export class Terrain {
     this.structures.push(...plan.structures);
     this.perches = plan.perches;
     this.taken = plan.footprints;
+    const lighthouse = plan.structures.find((st) => st.kind === "lighthouse");
+    if (lighthouse) this.furnishPlinth(lighthouse);
     for (const st of plan.structures) {
       for (const b of st.blocks) if (b.solid) this.solids.push(blockSolid(b));
       this.ladders.push(...st.ladders);
     }
+  }
+
+  /*
+   * The board and the stall stand on the plinth either side of the door,
+   * facing out. Their front (local +z) points away from the tower.
+   */
+  private furnishPlinth(st: Structure) {
+    const base = st.y + LIGHTHOUSE.plinthHeight;
+    const site = (a: number): Site => ({
+      x: st.x + Math.cos(a) * 5.05,
+      y: base,
+      z: st.z + Math.sin(a) * 5.05,
+      rot: Math.PI / 2 - a,
+    });
+    this.board = site(st.rot + 0.78);
+    this.shop = site(st.rot - 0.78);
+    const B = st.blocks;
+    const block = (
+      s: Site,
+      lx: number,
+      lz: number,
+      b: Partial<Block> & Pick<Block, "bottom" | "top" | "hx" | "hz">,
+    ): Block => {
+      const p = toWorld(s.x, s.z, s.rot, lx, lz);
+      return {
+        shape: "box",
+        rot: s.rot,
+        tone: "mid",
+        solid: true,
+        standable: false,
+        ...b,
+        x: p.x,
+        z: p.z,
+      };
+    };
+    /* Board: two posts, a planked face, notices pinned to it, a little roof. */
+    const b = this.board;
+    for (const side of [-1, 1])
+      B.push(
+        block(b, side * 0.85, 0, {
+          bottom: base,
+          top: base + 2.3,
+          hx: 0.06,
+          hz: 0.06,
+          tone: "dark",
+        }),
+      );
+    B.push(block(b, 0, 0, { bottom: base + 0.75, top: base + 2.05, hx: 0.82, hz: 0.05 }));
+    B.push(
+      block(b, 0, 0.02, {
+        bottom: base + 2.3,
+        top: base + 2.38,
+        hx: 1.05,
+        hz: 0.28,
+        tone: "dark",
+        solid: false,
+      }),
+    );
+    for (const [lx, ly, w, h] of [
+      [-0.45, 1.6, 0.17, 0.2],
+      [0.05, 1.68, 0.15, 0.22],
+      [0.5, 1.55, 0.18, 0.18],
+      [-0.2, 1.05, 0.2, 0.17],
+      [0.35, 1.08, 0.14, 0.2],
+    ])
+      B.push(
+        block(b, lx, 0.065, {
+          bottom: base + ly - h,
+          top: base + ly + h,
+          hx: w,
+          hz: 0.012,
+          tone: "light",
+          solid: false,
+        }),
+      );
+    st.lamps.push({ x: b.x, y: base + 2.2, z: b.z });
+    /* Stall: a counter, two posts holding up an awning, a crate beside it. */
+    const s = this.shop;
+    B.push(
+      block(s, 0, 0.05, { bottom: base, top: base + 1.05, hx: 1.0, hz: 0.38, standable: true }),
+    );
+    B.push(
+      block(s, 0, 0.05, {
+        bottom: base + 1.05,
+        top: base + 1.12,
+        hx: 1.08,
+        hz: 0.45,
+        tone: "dark",
+        standable: true,
+      }),
+    );
+    for (const side of [-1, 1])
+      B.push(
+        block(s, side * 0.95, -0.25, {
+          bottom: base,
+          top: base + 2.45,
+          hx: 0.06,
+          hz: 0.06,
+          tone: "dark",
+        }),
+      );
+    B.push(
+      block(s, 0, 0.1, {
+        bottom: base + 2.45,
+        top: base + 2.53,
+        hx: 1.2,
+        hz: 0.75,
+        tone: "light",
+        solid: false,
+      }),
+    );
+    B.push(
+      block(s, 1.45, 0.2, { bottom: base, top: base + 0.6, hx: 0.3, hz: 0.3, standable: true }),
+    );
+    st.lamps.push({ x: s.x, y: base + 2.3, z: s.z });
   }
 
   private scatterProps() {

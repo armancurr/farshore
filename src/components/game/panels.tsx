@@ -145,3 +145,73 @@ export function InventoryPanel(props: { hud: HudState; game: Game }) {
     </PanelFrame>
   );
 }
+
+export function BoardPanel(props: { hud: HudState; game: Game }) {
+  const active = () => props.hud.bounty;
+  return (
+    <PanelFrame
+      title="Bounty board"
+      aside={<Coins coins={props.hud.inv.coins} />}
+      onClose={() => props.game.closePanel()}
+    >
+      <Show when={active()}>
+        {(b) => (
+          <section>
+            <h3 class={heading}>Your bounty</h3>
+            <div class="mt-2 flex items-center justify-between gap-4 border border-white/30 p-3">
+              <div class="min-w-0">
+                <div class="text-[15px]">{b().title}</div>
+                <div class="mt-0.5 text-[12px] text-white/50">{b().note}</div>
+                <div class="mt-1 font-mono text-[11px] tracking-[0.12em] text-white/70 tabular-nums">
+                  {b().have}/{b().need} · pays {b().reward} ◎
+                </div>
+              </div>
+              <div class="flex shrink-0 flex-col gap-2">
+                <button
+                  type="button"
+                  class={button}
+                  disabled={b().have < b().need || !props.hud.nearBoard}
+                  onClick={() => props.game.turnIn()}
+                >
+                  Hand in
+                </button>
+                <button type="button" class={button} onClick={() => props.game.abandonBounty()}>
+                  Abandon
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+      </Show>
+      <section>
+        <h3 class={heading}>Posted</h3>
+        <ul class="mt-2">
+          <For each={props.hud.board}>
+            {(b) => (
+              <li class="flex items-center justify-between gap-4 border-b border-white/10 py-2.5">
+                <div class="min-w-0">
+                  <div class="text-[14px]">{b.title}</div>
+                  <div class="mt-0.5 text-[12px] text-white/45">{b.note}</div>
+                </div>
+                <div class="flex shrink-0 items-center gap-3">
+                  <span class="font-mono text-[12px] tabular-nums">{b.reward} ◎</span>
+                  <button
+                    type="button"
+                    class={button}
+                    disabled={!!active() || !props.hud.nearBoard}
+                    onClick={() => props.game.acceptBounty(b.id)}
+                  >
+                    Take
+                  </button>
+                </div>
+              </li>
+            )}
+          </For>
+        </ul>
+        <Show when={active()}>
+          <p class="mt-3 text-[12px] text-white/40">One bounty at a time.</p>
+        </Show>
+      </section>
+    </PanelFrame>
+  );
+}

@@ -25,6 +25,36 @@ function Clock(props: { hud: HudState }) {
   );
 }
 
+/* The bounty you've taken, and how far along it is. */
+function ActiveBounty(props: { hud: HudState }) {
+  return (
+    <div class="flex flex-col items-center gap-1 font-mono text-[11px] tracking-[0.2em] uppercase">
+      <Show
+        when={props.hud.bounty}
+        fallback={<div class="text-white/40">No bounty · the board is at the lighthouse</div>}
+      >
+        {(b) => (
+          <>
+            <div class="flex items-baseline gap-3">
+              <span class="text-white/45">Bounty</span>
+              <span>{b().title}</span>
+              <span class="tabular-nums">
+                {b().have}/{b().need}
+              </span>
+            </div>
+            <div class="h-px w-56 bg-white/20">
+              <div class="h-px bg-white" style={{ width: `${(b().have / b().need) * 100}%` }} />
+            </div>
+            <Show when={b().have >= b().need}>
+              <div class="text-[10px] text-white/70">Done · hand it in at the board</div>
+            </Show>
+          </>
+        )}
+      </Show>
+    </div>
+  );
+}
+
 function Health(props: { hud: HudState }) {
   const pct = () => Math.max(0, Math.min(100, props.hud.health));
   return (
@@ -204,13 +234,13 @@ function Fishing(props: { hud: HudState }) {
           </div>
         )}
       </Show>
-      <Show when={props.hud.caught}>
+      <Show when={props.hud.banner}>
         {(c) => (
           <div class="absolute top-[30%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-1 text-center">
-            <div class="text-2xl font-semibold tracking-tight">{c().name ?? "It got away."}</div>
-            <Show when={c().rarity}>
+            <div class="text-2xl font-semibold tracking-tight">{c().title}</div>
+            <Show when={c().sub}>
               <div class="font-mono text-[10px] tracking-[0.3em] text-white/55 uppercase">
-                {c().rarity}
+                {c().sub}
               </div>
             </Show>
           </div>
@@ -265,9 +295,20 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
   const h = () => props.hud;
   return (
     <div class="pointer-events-none absolute inset-0 select-none text-white">
-      <div class="absolute top-5 left-5">
+      <div class="absolute top-5 left-5 space-y-3">
         <Clock hud={h()} />
+        <Show when={h().player}>
+          <div class="font-mono text-[13px] tracking-[0.12em] tabular-nums">
+            <span class="mr-1.5 text-white/45">◎</span>
+            {h().inv.coins}
+          </div>
+        </Show>
       </div>
+      <Show when={h().player}>
+        <div class="absolute top-5 left-1/2 -translate-x-1/2" classList={{ "top-24": props.touch }}>
+          <ActiveBounty hud={h()} />
+        </div>
+      </Show>
 
       <div class="absolute top-40 right-5 flex flex-col items-end gap-1 font-mono text-[11px] sm:top-16">
         <For each={h().feed}>

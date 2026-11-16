@@ -18,6 +18,16 @@ import {
   SEA_LEVEL,
   TICK_HZ,
 } from "../shared/constants";
+import {
+  BOARD_REACH,
+  BOARD_REFRESH,
+  BOARD_SIZE,
+  type Bounty,
+  consume,
+  isEasy,
+  makeBounty,
+  progress,
+} from "../shared/bounties";
 import { isNight } from "../shared/daylight";
 import {
   BITE_WINDOW,
@@ -159,6 +169,10 @@ export class Room {
   private nextWeaponAt = 0;
   private pending: PendingHit[] = [];
   private herd: Herd;
+  /* The bounty board: offers, and when each was posted (world time). */
+  private board: Bounty[] = [];
+  private posted = new Map<number, number>();
+  private bountyId = 1;
   private prey: Prey[] = [];
   private rng: Rng;
   private readonly now: () => number;
@@ -186,6 +200,7 @@ export class Room {
         { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
       ],
     );
+    this.fillBoard();
     for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
   }
 
@@ -284,6 +299,18 @@ export class Room {
         m.charging = msg.charge && !!weapon && !!weaponDef(weapon).charge;
         return;
       }
+      case "accept":
+        this.accept(m, msg.id);
+        return;
+      case "turnin":
+        this.turnIn(m);
+        return;
+      case "abandon":
+        if (m.inv.bounty) {
+          m.inv.bounty = null;
+          m.invDirty = true;
+        }
+        return;
       case "cast":
         this.cast(m, msg.x, msg.z);
         return;
@@ -388,6 +415,62 @@ export class Room {
     m.inv.items[id] = Math.max(0, (m.inv.items[id] ?? 0) + n);
     if (!m.inv.items[id]) delete m.inv.items[id];
     m.invDirty = true;
+  }
+
+  /* ---------- bounties ---------- */
+
+  private nearBoard(m: Member) {
+    const b = this.terrain.board;
+    return Math.hypot(b.x - m.body.x, b.z - m.body.z) < BOARD_REACH && Math.abs(b.y - m.body.y) < 3;
+  }
+
+  /* Top the board up to its full set of offers. Returns true if anything changed. */
+  private fillBoard() {
+    let changed = false;
+    while (this.board.length < BOARD_SIZE) {
+      const held = [...this.members.values()].map((m) => m.inv.bounty).filter((b) => !!b);
+      const easy = !this.board.some(isEasy);
+      const b = makeBounty(this.rng, this.bountyId++, [...this.board, ...held], easy);
+      this.board.push(b);
+      this.posted.set(b.id, this.time);
+      changed = true;
+    }
+    return changed;
+  }
+
+  private postBoard() {
+    this.broadcast({ t: "board", offers: this.board });
+  }
+
+  /* Offers nobody takes come down after a while, and new ones go up. */
+  private refreshBoard() {
+    const stale = this.board.find((b) => this.time - (this.posted.get(b.id) ?? 0) > BOARD_REFRESH);
+    if (!stale) return;
+    this.board = this.board.filter((b) => b !== stale);
+    this.posted.delete(stale.id);
+    this.fillBoard();
+    this.postBoard();
+  }
+
+  private accept(m: Member, id: number) {
+    const offer = this.board.find((b) => b.id === id);
+    if (!offer || m.inv.bounty || !this.nearBoard(m)) return;
+    this.board = this.board.filter((b) => b !== offer);
+    this.posted.delete(offer.id);
+    m.inv.bounty = offer;
+    m.invDirty = true;
+    this.fillBoard();
+    this.postBoard();
+  }
+
+  private turnIn(m: Member) {
+    const b = m.inv.bounty;
+    if (!b || !this.nearBoard(m) || progress(m.inv, b) < b.count) return;
+    consume(m.inv, b);
+    m.inv.coins += b.reward;
+    m.inv.bounty = null;
+    m.invDirty = true;
+    m.peer.send({ t: "paid", bounty: b });
   }
 
   /* ---------- fishing ---------- */
@@ -523,6 +606,8 @@ export class Room {
 
       if (m.body.y < SEA_FLOOR - 8) this.hurt(m, HEALTH_MAX, "drowned");
     }
+
+    this.refreshBoard();
 
     if (this.weapons.length < GROUND_WEAPONS && this.time >= this.nextWeaponAt) {
       this.nextWeaponAt = this.time + WEAPON_RESPAWN;
@@ -878,6 +963,7 @@ export class Room {
       time: this.time,
       roster: this.roster(),
       weapons: this.weapons,
+      board: this.board,
       you: m.spectator ? null : { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw },
     };
   }
