@@ -1,7 +1,7 @@
 import { Room } from "../server/room";
 import { TICK_HZ } from "../shared/constants";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
-import { parseSave, type SaveData } from "../shared/save";
+import { clearIsland, readIsland, writeIsland } from "../../lib/island";
 
 export type ConnectionKind = "attract" | "solo" | "online";
 
@@ -13,42 +13,16 @@ export interface Connection {
   setPaused(paused: boolean): void;
 }
 
-/* ---------- the island, kept in this browser ---------- */
+/* ---------- the island, kept with the player's account ---------- */
 
-const SAVE_KEY = "rising-tide:island";
 /* Save at least this often while playing, and this soon after anything worth keeping. */
 const AUTOSAVE = 20;
 const SOON = 1.5;
 
 /* The saved island, or null if there isn't one (or it can't be read, or doesn't make sense). */
-export function loadSave(): SaveData | null {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const save = parseSave(JSON.parse(raw));
-    if (!save) console.warn("Rising Tide: ignoring a damaged or outdated save; starting fresh.");
-    return save;
-  } catch {
-    return null;
-  }
-}
+export const loadSave = readIsland;
 
-function writeSave(save: SaveData) {
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function clearSave() {
-  try {
-    localStorage.removeItem(SAVE_KEY);
-  } catch {
-    /* Storage unavailable: nothing to clear. */
-  }
-}
+export const clearSave = clearIsland;
 
 type Handlers = {
   message: (msg: ServerMsg) => void;
@@ -58,7 +32,8 @@ type Handlers = {
 /*
  * A room that lives in this tab. Messages are cloned on the way through so the
  * client can never reach into the room's state, exactly as if it were remote.
- * Solo keeps the island in localStorage; the idle background only reads it.
+ * Solo keeps the island with the player's account (see lib/island); the idle
+ * background only reads it.
  */
 export class LocalConnection implements Connection {
   private room: Room;
@@ -70,10 +45,11 @@ export class LocalConnection implements Connection {
   private closed = false;
   private sinceSave = 0;
   private sinceSoon = 0;
+  /* The page may be going away: these push the island up straight away. */
   private saveOnHide = () => {
-    if (document.visibilityState === "hidden") this.save();
+    if (document.visibilityState === "hidden") this.save(true);
   };
-  private saveNow = () => this.save();
+  private saveNow = () => this.save(true);
 
   constructor(
     readonly kind: "attract" | "solo",
@@ -104,11 +80,11 @@ export class LocalConnection implements Connection {
   }
 
   /* Write the island down (solo only). */
-  save() {
+  save(urgent = false) {
     if (this.kind !== "solo" || this.closed) return;
     this.sinceSave = 0;
     this.room.saveSoon = false;
-    writeSave(this.room.exportSave());
+    writeIsland(this.room.exportSave(), { urgent });
   }
 
   private tick() {
@@ -129,12 +105,12 @@ export class LocalConnection implements Connection {
   }
 
   setPaused(paused: boolean) {
-    if (paused && !this.paused) this.save();
+    if (paused && !this.paused) this.save(true);
     this.paused = paused;
   }
 
   close() {
-    this.save();
+    this.save(true);
     document.removeEventListener("visibilitychange", this.saveOnHide);
     window.removeEventListener("pagehide", this.saveNow);
     this.closed = true;

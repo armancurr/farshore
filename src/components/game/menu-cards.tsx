@@ -1,5 +1,6 @@
-import { CheckIcon, EnvelopeSimpleIcon } from "@phosphor-icons/react";
+import { CheckIcon, CircleNotchIcon, EnvelopeSimpleIcon, SignOutIcon } from "@phosphor-icons/react";
 import { Fragment, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   InputGroup,
   InputGroupAddon,
@@ -9,7 +10,8 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { PopoverTitle } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
-import { isEmail, joinWaitlist } from "@/lib/waitlist";
+import { isEmail, joinWaitlist, signOut } from "@/lib/auth";
+import { flushIsland } from "@/lib/island";
 
 /*
  * The small pointer from a menu card up to its button. The card sits a little
@@ -92,27 +94,30 @@ export function ControlsCard() {
 }
 
 /*
- * What goes inside the waitlist popover. The form and the "you're on the list"
- * note share one grid cell, so the card keeps its size when it flips between
- * them. Joining shows the note right away; if the send fails, the form comes
- * back with the email still in it.
+ * What goes inside the waitlist popover, for guests. Nothing is emailed from
+ * here: the address is kept, and invites go out by hand. The form and the note
+ * after it share one grid cell, so the card keeps its size when it flips.
+ * Joining shows the note right away; if the request fails, the form comes back
+ * with the email still in it.
  */
-export function WaitlistCard() {
+export function AccessCard() {
   const input = useRef<HTMLInputElement>(null);
   const note = useRef<HTMLDivElement>(null);
   const [email, setEmail] = useState("");
-  const [status, setStatus] = useState<"idle" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
   const done = status === "done";
 
   const submit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (done || !isEmail(email)) return;
     setStatus("done");
+    setError(null);
     /* Keep focus inside the card so it stays open on the note. */
     note.current?.focus();
-    joinWaitlist(email).catch((error) => {
-      console.error(error);
-      setStatus("error");
+    joinWaitlist(email).catch((err: unknown) => {
+      setStatus("idle");
+      setError(err instanceof Error ? err.message : "Couldn't sign you up. Try again.");
       input.current?.focus();
     });
   };
@@ -125,7 +130,8 @@ export function WaitlistCard() {
       >
         <PopoverTitle>Join the waitlist</PopoverTitle>
         <label htmlFor="waitlist-email" className={`block ${sub}`}>
-          You will get an invite when the game is done.
+          It's invite only for now. Leave your email and you'll get an invite link when there's
+          room.
         </label>
         <InputGroup className="mt-4">
           <InputGroupAddon>
@@ -141,9 +147,10 @@ export function WaitlistCard() {
             enterKeyHint="send"
             placeholder="you@example.com"
             value={email}
+            aria-invalid={!!error}
             onChange={(e) => {
               setEmail(e.currentTarget.value);
-              if (status === "error") setStatus("idle");
+              setError(null);
             }}
           />
           <InputGroupAddon align="inline-end">
@@ -152,8 +159,14 @@ export function WaitlistCard() {
             </InputGroupButton>
           </InputGroupAddon>
         </InputGroup>
-        {status === "error" && (
-          <p className="mt-2.5 mb-0 text-xs text-[#8a8a8a]">Couldn't sign you up. Try again.</p>
+        {error ? (
+          <p role="alert" className="mt-2.5 mb-0 text-xs text-[#8a8a8a]">
+            {error}
+          </p>
+        ) : (
+          <p className="mt-2.5 mb-0 text-xs text-[#5c5c5c]">
+            Already invited? Open the link in your invite email.
+          </p>
         )}
       </form>
 
@@ -165,16 +178,94 @@ export function WaitlistCard() {
       >
         {done && (
           <>
-            <div className="mb-3 grid size-[46px] place-items-center rounded-lg border border-[#333] bg-[#222] shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]">
+            <NoteIcon>
               <CheckIcon size={20} weight="bold" />
-            </div>
+            </NoteIcon>
             <h2 className={title}>You're on the list</h2>
             <p className={`${sub} break-all`}>
-              We'll send your invite to <b className="font-bold text-[#d6d6d6]">{email.trim()}</b>
+              We'll send your invite link to{" "}
+              <b className="font-bold text-[#d6d6d6]">{email.trim()}</b>
             </p>
           </>
         )}
       </div>
     </div>
   );
+}
+
+/* Signed in, but not let in. Approval can come any time; the tab checks back. */
+export function PendingCard(props: { email: string | null }) {
+  return (
+    <div className="px-[18px] pt-[18px] pb-4">
+      <PopoverTitle>Not in yet</PopoverTitle>
+      <p className={`${sub} break-all`}>
+        You're signed in as <b className="font-bold text-[#d6d6d6]">{props.email}</b>, but this
+        email hasn't been let onto the island yet. You'll hear from us when it is.
+      </p>
+      <SignOutRow note="Wrong account?" />
+    </div>
+  );
+}
+
+/* The player's own card, under their name in the title bar. */
+export function PlayerCard(props: { username: string; email: string | null }) {
+  return (
+    <div className="px-[18px] pt-[18px] pb-4">
+      <PopoverTitle className="break-all">{props.username}</PopoverTitle>
+      <p className={`${sub} break-all`}>{props.email}</p>
+      <SignOutRow note="Your island is saved to your account" />
+    </div>
+  );
+}
+
+/*
+ * Signing out means needing the invite link again to get back in, so it asks
+ * once. Anything not yet stored goes up first.
+ */
+function SignOutRow(props: { note: string }) {
+  const [sure, setSure] = useState(false);
+  const [busy, setBusy] = useState(false);
+  return (
+    <>
+      <Separator className="mt-3.5" />
+      <div className="flex items-center justify-between gap-3 pt-3 text-xs text-[#8a8a8a]">
+        {sure ? "You'll need your invite link to get back in" : props.note}
+        <Button
+          variant="link"
+          size="bare"
+          className="gap-1"
+          disabled={busy}
+          onBlur={() => setSure(false)}
+          onClick={() => {
+            if (!sure) {
+              setSure(true);
+              return;
+            }
+            setBusy(true);
+            void flushIsland()
+              .then(signOut)
+              .finally(() => {
+                setBusy(false);
+                setSure(false);
+              });
+          }}
+        >
+          {busy ? <Spinner /> : <SignOutIcon size={13} weight="bold" />}
+          {sure ? "Yes, sign out" : "Sign out"}
+        </Button>
+      </div>
+    </>
+  );
+}
+
+export function NoteIcon(props: { children: React.ReactNode }) {
+  return (
+    <div className="mb-3 grid size-[46px] place-items-center rounded-lg border border-[#333] bg-[#222] shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]">
+      {props.children}
+    </div>
+  );
+}
+
+export function Spinner() {
+  return <CircleNotchIcon size={14} weight="bold" className="animate-spin" aria-label="Working" />;
 }
