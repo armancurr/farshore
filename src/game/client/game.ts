@@ -68,7 +68,7 @@ import {
 } from "../shared/weapons";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
-import { islandImage, type MapView } from "./map";
+import { drawRoutes, islandImage, type MapView } from "./map";
 import {
   type Connection,
   keepSkin,
@@ -703,7 +703,7 @@ export class Game {
       info,
       group,
       props,
-      image: islandImage(terrain.heights, terrain.grid),
+      image: drawRoutes(islandImage(terrain.heights, terrain.grid), terrain),
     });
     world.seed ??= info.seed;
     world.sea.setTiles(world.ground.list());
