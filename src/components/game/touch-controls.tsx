@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { Action, Input } from "../../game/client/input";
+import { CREATIVE, type CameraView } from "../../game/client/modes";
 
 const RADIUS = 52;
 
@@ -16,6 +17,7 @@ export function TouchControls(props: {
   creative: boolean;
   flying: boolean;
   building: boolean;
+  view: CameraView;
 }) {
   const [knob, setKnob] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const stickId = useRef<number | null>(null);
@@ -76,7 +78,7 @@ export function TouchControls(props: {
   /* A one-off press, as a key would queue it. */
   const tap = (action: Action) => ({ onPointerDown: () => input.press(action) });
 
-  const { creative, flying, building } = props;
+  const { creative, flying, building, view } = props;
 
   /*
    * A button that goes away under a thumb (Block turning into Down, or the
@@ -172,21 +174,33 @@ export function TouchControls(props: {
         onPointerUp={lookUp}
         onPointerCancel={lookUp}
       />
-      {/* Modes, beside the thumb buttons: build, creative, and taking off in it. */}
+      {/* Modes, beside the thumb buttons: build, the camera, and (in dev) creative and taking off in it. */}
       <div className="pointer-events-none absolute right-[10.5rem] bottom-4 flex flex-col gap-2">
         {creative && !building && (
           <Button variant="touch" size="touch" className={side} {...tap("fly")}>
             {flying ? "Land" : "Fly"}
           </Button>
         )}
+        {CREATIVE && (
+          <Button
+            variant="touch"
+            size="touch"
+            className={side}
+            data-on={creative}
+            {...tap("creative")}
+          >
+            {creative ? "Survival" : "Creative"}
+          </Button>
+        )}
         <Button
           variant="touch"
           size="touch"
           className={side}
-          data-on={creative}
-          {...tap("creative")}
+          data-on={view === "third"}
+          aria-label={view === "third" ? "First-person view" : "Third-person view"}
+          {...tap("view")}
         >
-          {creative ? "Survival" : "Creative"}
+          {view === "third" ? "1st person" : "3rd person"}
         </Button>
         {!building && (
           <Button variant="touch" size="touch" className={side} {...tap("build")}>

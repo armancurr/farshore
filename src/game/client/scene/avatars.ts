@@ -206,6 +206,8 @@ export class Avatar {
   private swing: Overlay | null = null;
   private flinch: Overlay | null = null;
   private swings = 0;
+  /* Whether the name floats over them: not over yourself, seen from behind. */
+  labelled = true;
 
   constructor(
     readonly id: number,
@@ -382,7 +384,7 @@ export class Avatar {
     const d = camera.distanceTo(this.group.position);
     const mat = this.label.material;
     mat.opacity = Math.max(0, Math.min(1, (60 - d) / 25, (d - 2.5) / 2));
-    this.label.visible = mat.opacity > 0.02;
+    this.label.visible = this.labelled && mat.opacity > 0.02;
   }
 
   /*
