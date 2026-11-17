@@ -35,6 +35,8 @@ export type Prop = {
  * climbed onto.
  */
 export type Solid = {
+  /* Bike tires may roll over the rounded shoulders of low natural rocks. */
+  surface?: "rounded";
   x: number;
   z: number;
   r: number;
@@ -502,6 +504,7 @@ export class Terrain implements Ground {
           bottom: y - sink,
           top: y - sink + height * 0.86,
           standable: true,
+          surface: "rounded",
         });
       }),
     );

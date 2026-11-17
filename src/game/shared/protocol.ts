@@ -27,6 +27,8 @@ export type AnimalSnap = [number, number, number, number, number, number, number
 
 /* Compact per-boat state: [id, x, z, heading, speed]. */
 export type BoatSnap = [number, number, number, number, number];
+/* Bike: id, x, y, z, heading, speed, steering, terrain pitch, lean. */
+export type BikeSnap = [number, number, number, number, number, number, number, number, number];
 
 export const ANIMAL_STATE = {
   graze: 0,
@@ -38,6 +40,7 @@ export const ANIMAL_STATE = {
 } as const;
 
 export const FLAG = {
+  riding: 512, // Server-owned bike posture; never accepted from a client frame.
   alive: 1,
   sprint: 2,
   grounded: 4,
@@ -89,6 +92,7 @@ export type ServerMsg =
       p: PlayerSnap[];
       a: AnimalSnap[];
       b: BoatSnap[];
+      bikes: BikeSnap[];
       me: {
         health: number;
         stagger: number;
@@ -174,6 +178,7 @@ export type ClientMsg =
       flags: number;
       /* Rowing: the boat's heading and speed (its position is yours). */
       boat?: { rot: number; speed: number };
+      drive?: { forward: number; right: number; brake: boolean };
     }
   | { t: "attack"; charge: number }
   | { t: "stance"; block: boolean; charge: boolean }
@@ -211,6 +216,14 @@ function boatOf(v: unknown) {
   if (!v || typeof v !== "object") return undefined;
   const b = v as Record<string, unknown>;
   return finite(b.rot, 100) && finite(b.speed, 20) ? { rot: b.rot, speed: b.speed } : undefined;
+}
+
+function driveOf(v: unknown) {
+  if (!v || typeof v !== "object") return undefined;
+  const d = v as Record<string, unknown>;
+  return finite(d.forward, 1) && finite(d.right, 1) && typeof d.brake === "boolean"
+    ? { forward: d.forward, right: d.right, brake: d.brake }
+    : undefined;
 }
 
 const isInt = (v: unknown, min: number, max: number): v is number =>
@@ -301,6 +314,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         vz: m.vz as number,
         flags: (m.flags as number) | 0,
         boat: boatOf(m.boat),
+        drive: driveOf(m.drive),
       };
     }
     default:

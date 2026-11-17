@@ -138,6 +138,7 @@ export class Avatar {
     this.last.set(x, y, z);
     const speed = dt > 0 ? Math.min(12, moved / dt) : 0;
     const grounded = (flags & FLAG.grounded) !== 0;
+    const riding = (flags & FLAG.riding) !== 0;
     if (grounded) this.stride += moved * STRIDE * this.rig.cadence;
     this.sway += ((speed > 0.5 && grounded ? 1 : 0) - this.sway) * Math.min(1, dt * 6);
     this.clock += dt;
@@ -152,7 +153,11 @@ export class Avatar {
     this.body.rotation.x = -thrust * 0.5 - Math.min(speed, 10) * 0.012;
 
     const holding = this.weapon !== null;
-    this.rig.update(this.clock, this.stride, this.sway, holding);
+    this.rig.update(this.clock, this.stride, riding ? 0 : this.sway, holding && !riding);
+    this.body.position.y = riding ? -0.45 : 0;
+    if (riding) this.rig.ride?.();
+    this.hand.visible = !riding;
+    this.label.position.y = this.rig.top + (riding ? -0.35 : 0.1);
     this.rig.head.rotation.x += -pitch * 0.6;
 
     /*

@@ -1,4 +1,5 @@
 import { PLAYER_RADIUS, SEA_LEVEL } from "./constants";
+import { bikeGround } from "./bike";
 import type { ItemId, KitId } from "./items";
 import type { Block, Tone } from "./structures";
 import { toWorld } from "./structures";
@@ -39,6 +40,15 @@ type PrefabDef = {
 };
 
 export const PREFABS: Record<KitId, PrefabDef> = {
+  desertbike: {
+    hx: 0.5,
+    z0: -1.2,
+    z1: 1.2,
+    height: 2.1,
+    spread: 0.65,
+    placing: "land",
+    onFloors: false,
+  },
   campfire: {
     hx: 0.6,
     z0: -0.6,
@@ -427,6 +437,12 @@ export function checkPlacement(
   const d = PREFABS[kind];
   const no = (reason: string, y = 0): Verdict => ({ ok: false, y, reason });
   if (Math.hypot(x - body.x, z - body.z) > BUILD_REACH) return no("Too far away");
+  if (kind === "desertbike") {
+    const ground = bikeGround(terrain, x, z, rot);
+    if (!ground) return no("Needs clear, dry ground without steep slopes");
+    if (Math.hypot(x - body.x, z - body.z) < 1.8) return no("Stand clear", ground.y);
+    return { ok: true, y: ground.y, reason: null };
+  }
   const pts = samples(kind, x, z, rot);
 
   let y: number;

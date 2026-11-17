@@ -33,7 +33,15 @@ export const FISH_IDS: readonly FishId[] = [
 export type AnimalKind = "deer" | "boar";
 export const ANIMAL_KINDS: readonly AnimalKind[] = ["deer", "boar"];
 
-export type KitId = "campfire" | "chest" | "bed" | "hut" | "cabin" | "dock" | "rowboat";
+export type KitId =
+  | "campfire"
+  | "chest"
+  | "bed"
+  | "hut"
+  | "cabin"
+  | "dock"
+  | "rowboat"
+  | "desertbike";
 export const KIT_IDS: readonly KitId[] = [
   "campfire",
   "chest",
@@ -42,6 +50,7 @@ export const KIT_IDS: readonly KitId[] = [
   "cabin",
   "dock",
   "rowboat",
+  "desertbike",
 ];
 
 /* A carcass is filed under the animal it came from. */
@@ -56,6 +65,12 @@ type ItemDef = {
 };
 
 export const ITEMS: Record<ItemId, ItemDef> = {
+  desertbike: {
+    name: "Desert bike",
+    plural: "desert bikes",
+    kind: "kit",
+    note: "A fast trail machine. Spawn from Marketplace → Vehicles on clear dry ground.",
+  },
   sprat: {
     name: "Sprat",
     plural: "sprats",
