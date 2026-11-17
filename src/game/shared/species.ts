@@ -251,11 +251,33 @@ export const SPECIES: Record<SpeciesId, SpeciesDef> = {
 
 /* What each hunting island holds: species and how many of each. */
 export const BIOME_HERDS: Record<BiomeId, Partial<Record<SpeciesId, number>>> = {
-  meadow: { deer: 9, rabbit: 9, alpaca: 7, horse: 5, fox: 3 },
-  pinewood: { stag: 6, deer: 6, fox: 4, wolf: 5, boar: 5 },
-  ridge: { wolf: 9, stag: 4, goat: 6, rabbit: 5 },
-  marsh: { boar: 8, donkey: 6, bull: 4, fox: 3 },
-  fells: { ram: 7, goat: 6, bull: 4, wolf: 5 },
+  meadow: { deer: 18, rabbit: 20, alpaca: 14, horse: 10, fox: 6 },
+  pinewood: { stag: 12, deer: 14, fox: 8, wolf: 10, boar: 12, rabbit: 8 },
+  ridge: { wolf: 14, stag: 8, goat: 14, rabbit: 10 },
+  marsh: { boar: 16, donkey: 12, bull: 8, fox: 6, deer: 8 },
+  fells: { ram: 14, goat: 14, bull: 8, wolf: 10 },
+};
+
+/*
+ * A few gentle grazers on the Harbor, so home doesn't feel empty. They're
+ * never asked for by the board: the hunting is out on the islands.
+ */
+export const HARBOR_HERD: Partial<Record<SpeciesId, number>> = { alpaca: 6, rabbit: 10 };
+
+/* How many keep together: a herd, a pack, or a family. */
+export const GROUP: Record<SpeciesId, [number, number]> = {
+  deer: [3, 6],
+  stag: [1, 3],
+  alpaca: [4, 7],
+  horse: [3, 6],
+  donkey: [3, 5],
+  rabbit: [2, 5],
+  fox: [1, 2],
+  goat: [3, 6],
+  ram: [2, 5],
+  boar: [2, 5],
+  bull: [1, 3],
+  wolf: [3, 5],
 };
 
 /* The beasts the Guild Board puts a price on: one per island. */

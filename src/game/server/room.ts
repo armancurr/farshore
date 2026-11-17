@@ -37,7 +37,6 @@ import {
   type Payout,
   progress,
 } from "../shared/missions";
-import { randomName } from "../shared/names";
 import { type Body, createBody } from "../shared/physics";
 import {
   type ClientMsg,
@@ -81,7 +80,15 @@ import {
 } from "../shared/save";
 import { SHOP_REACH, shopEntry } from "../shared/shop";
 import { canWear, DEFAULT_SKIN, type SkinId } from "../shared/skins";
-import { ALPHAS, BIOME_HERDS, CULLS, SPECIES, type SpeciesId } from "../shared/species";
+import {
+  ALPHAS,
+  BIOME_HERDS,
+  CULLS,
+  GROUP,
+  HARBOR_HERD,
+  SPECIES,
+  type SpeciesId,
+} from "../shared/species";
 import { VEHICLES, type VehicleKind } from "../shared/vehicles";
 import { blockSolid, overSolid, type Terrain } from "../shared/terrain";
 import {
@@ -280,7 +287,8 @@ export class Room {
       },
     });
     for (const { info, terrain } of this.world.islands.values()) {
-      if (!info.biome) continue;
+      const counts = info.biome ? BIOME_HERDS[info.biome] : info.harbor ? HARBOR_HERD : null;
+      if (!counts) continue;
       herd.addRange({
         island: info.id,
         terrain,
@@ -289,8 +297,16 @@ export class Room {
           { x: terrain.lighthouse.x, z: terrain.lighthouse.z, r: 20 },
         ],
       });
-      for (const [species, n] of Object.entries(BIOME_HERDS[info.biome]) as [SpeciesId, number][])
-        for (let i = 0; i < n; i++) herd.spawn(species, info.id);
+      /* In herds and packs: the first of each group anywhere, the rest close by it. */
+      for (const [species, n] of Object.entries(counts) as [SpeciesId, number][]) {
+        const [lo, hi] = GROUP[species];
+        for (let left = n; left > 0; ) {
+          const size = Math.min(left, lo + Math.floor(this.rng() * (hi - lo + 1)));
+          const lead = herd.spawn(species, info.id);
+          for (let i = 1; i < size && lead; i++) herd.spawn(species, info.id, [], { near: lead });
+          left -= size;
+        }
+      }
     }
     this.herd = herd;
   }
@@ -365,20 +381,24 @@ export class Room {
    * another tab that's still connected gets a new identity instead, so two
    * tabs in one browser are two players.
    */
-  private claim(token: string | undefined, own: boolean): Profile {
+  private claim(token: string | undefined, own: boolean, name: string): Profile {
     const known = token ? this.profiles.get(token) : undefined;
     if (known) {
       const using = [...this.members.values()].find((o) => o.profile === known);
-      if (!using) return known;
+      if (!using) {
+        known.name = name;
+        return known;
+      }
       if (own) {
         this.leave(using.id);
         using.peer.close?.();
+        known.name = name;
         return known;
       }
     }
     const fresh: Profile = {
       token: token && !known ? token : crypto.randomUUID(),
-      name: randomName(Math.random),
+      name,
       saved: null,
     };
     this.profiles.set(fresh.token, fresh);
@@ -388,6 +408,7 @@ export class Room {
   join(
     peer: Peer,
     hello: {
+      name?: string;
       spectate?: boolean;
       token?: string;
       own?: boolean;
@@ -396,7 +417,10 @@ export class Room {
     } = {},
   ) {
     const spectator = !!hello.spectate;
-    const profile = this.opts.grand && !spectator ? this.claim(hello.token, !!hello.own) : null;
+    /* You're called what you picked on the title screen. */
+    const name = hello.name ?? "Guest";
+    const profile =
+      this.opts.grand && !spectator ? this.claim(hello.token, !!hello.own, name) : null;
     if (!spectator && this.humans() >= (this.opts.maxHumans ?? MAX_PLAYERS)) {
       peer.send({ t: "full" });
       return -1;
@@ -410,7 +434,7 @@ export class Room {
     if (profile) profile.skin = skin;
     const member: Member = {
       id,
-      name: profile?.name ?? randomName(Math.random),
+      name,
       skin,
       peer,
       spectator,

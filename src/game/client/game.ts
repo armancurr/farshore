@@ -439,7 +439,8 @@ export class Game {
 
   /* ---------- lifecycle ---------- */
 
-  start(mode: Mode) {
+  /* The username to go ashore under, from the title screen. */
+  start(mode: Mode, name: string | null = null) {
     const seed = this.mode === "attract" ? (this.world?.seed ?? undefined) : undefined;
     this.conn?.close();
     this.conn = null;
@@ -467,7 +468,7 @@ export class Game {
         return;
       }
       this.connecting = true;
-      this.conn = new WsConnection(base, handlers);
+      this.conn = new WsConnection(base, handlers, name);
     } else this.conn = new LocalConnection(handlers, { seed });
     this.emitHud();
   }

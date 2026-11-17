@@ -176,6 +176,7 @@ export class WsConnection implements Connection {
   constructor(
     base: string,
     private handlers: Handlers,
+    name: string | null,
   ) {
     this.ws = new WebSocket(wsUrl(base, "party/public"));
     this.ws.onopen = () => {
@@ -183,6 +184,7 @@ export class WsConnection implements Connection {
       this.ws.send(
         JSON.stringify({
           t: "hello",
+          name: name ?? undefined,
           ...readToken(),
           skin: readSkin(),
           weapon: readWeapon(),

@@ -63,55 +63,81 @@ const ROCKS: Record<Kind, string[]> = {
   fells: ["stone_tallA", "stone_tallB", "stone_tallD", "rock_tallB", "rock_largeD"],
 };
 
-/* The little things: per 1000 m² of land, and what they are. */
-type Decor = { models: string[]; per: number; scale: [number, number] };
-const DECOR: Record<Kind, Decor[]> = {
-  harbor: [
-    { models: ["grass", "grass_large", "grass_leafs"], per: 3, scale: [3, 4.5] },
-    { models: ["flower_redA", "flower_yellowA", "flower_purpleA"], per: 1, scale: [3, 4] },
-    { models: ["plant_bush", "plant_bushDetailed"], per: 0.25, scale: [3.5, 5] },
-  ],
-  meadow: [
-    { models: ["grass", "grass_large", "grass_leafsLarge"], per: 5, scale: [3, 5] },
-    {
-      models: ["flower_redA", "flower_redB", "flower_yellowA", "flower_yellowC", "flower_purpleB"],
-      per: 3,
-      scale: [3, 4.5],
-    },
-    { models: ["plant_bush", "plant_bushLarge", "plant_bushSmall"], per: 0.4, scale: [3.5, 5] },
-  ],
-  pinewood: [
-    { models: ["grass_leafs", "grass_leafsLarge", "grass"], per: 2.5, scale: [3, 4.5] },
-    { models: ["mushroom_red", "mushroom_tanGroup"], per: 0.5, scale: [3, 4.5] },
-    {
-      models: ["plant_bushTriangle", "plant_bushDetailed", "stump_round", "log"],
-      per: 0.5,
-      scale: [3, 4.5],
-    },
-  ],
-  ridge: [
-    { models: ["grass_leafs", "grass"], per: 2, scale: [3, 4] },
-    { models: ["plant_bushSmall", "stump_old"], per: 0.25, scale: [3, 4] },
-  ],
-  marsh: [
-    { models: ["grass_large", "grass_leafsLarge", "grass"], per: 4.5, scale: [3.5, 5.5] },
-    { models: ["mushroom_red", "mushroom_tanGroup", "flower_purpleA"], per: 1, scale: [3, 4] },
-    {
-      models: ["plant_bushLarge", "plant_bushDetailed", "log", "stump_old"],
-      per: 0.5,
-      scale: [3.5, 5],
-    },
-  ],
-  fells: [
-    { models: ["grass_leafs", "grass"], per: 2, scale: [3, 4] },
-    { models: ["flower_yellowA", "flower_redB"], per: 0.5, scale: [3, 4] },
-    { models: ["plant_bushSmall"], per: 0.2, scale: [3, 4] },
-  ],
+/*
+ * The little things, in layers. Each grows in clumps where its field is
+ * strong: grass in the meadows, bushes and logs along the edges of the
+ * groves, mushrooms and ferns under the trees, flowers out in the open grass.
+ * `per` is how many per 1000 m² where the field is full; `clump` how many
+ * come together and how wide a clump spreads; `range` how near you it's drawn.
+ */
+type Where = "meadow" | "edge" | "forest" | "open";
+type Layer = {
+  models: string[];
+  where: Where;
+  per: number;
+  clump: [number, number, number];
+  scale: [number, number];
+  range: number;
 };
 
-/* The small things come in patches this wide, drawn only near you. */
-const PATCH = 160;
-const DECOR_RANGE = 230;
+const GRASS = ["grass_leafsLarge", "grass_leafs", "grass_leafsLarge", "grass"];
+const FLOWERS = [
+  "flower_redA",
+  "flower_redB",
+  "flower_yellowA",
+  "flower_yellowC",
+  "flower_purpleB",
+];
+const BUSHES = ["plant_bush", "plant_bushLarge", "plant_bushSmall", "plant_bushDetailed"];
+
+function layers(kind: Kind, grass: number): Layer[] {
+  const out: Layer[] = [
+    /* Grass: thick tussocks in the meadows, thinning to nothing between them. */
+    { models: GRASS, where: "meadow", per: grass, clump: [6, 14, 5], scale: [3, 5.5], range: 190 },
+    /* A few stray tufts everywhere, so even bare ground isn't bald. */
+    {
+      models: GRASS,
+      where: "open",
+      per: grass * 0.18,
+      clump: [1, 3, 3],
+      scale: [2.5, 4],
+      range: 150,
+    },
+    /* Bushes gather along the edges of the groves. */
+    { models: BUSHES, where: "edge", per: 12, clump: [2, 5, 6], scale: [3.5, 6], range: 320 },
+  ];
+  /* Flowers come up in drifts among the grass. */
+  const flowers = kind === "meadow" || kind === "harbor" ? 22 : kind === "marsh" ? 6 : 9;
+  out.push({
+    models: FLOWERS,
+    where: "meadow",
+    per: flowers,
+    clump: [5, 12, 4],
+    scale: [1.5, 2.3],
+    range: 200,
+  });
+  const floor = kind === "pinewood" || kind === "marsh" ? 7 : 3;
+  out.push({
+    models: ["mushroom_red", "mushroom_tanGroup", "grass_leafsLarge", "plant_bushTriangle"],
+    where: "forest",
+    per: floor,
+    clump: [2, 5, 4],
+    scale: [3, 4.5],
+    range: 200,
+  });
+  out.push({
+    models: ["log", "stump_old", "stump_round"],
+    where: "edge",
+    per: kind === "pinewood" ? 1.6 : 0.7,
+    clump: [1, 1, 0],
+    scale: [3.5, 5],
+    range: 320,
+  });
+  return out;
+}
+
+/* The small things come in patches this wide, each drawn only near you. */
+const PATCH = 100;
 
 /* A model from the pack as one geometry (with a group per material) and its materials. */
 type Piece = { geo: THREE.BufferGeometry; mats: THREE.Material[]; size: THREE.Vector3 };
@@ -181,7 +207,7 @@ const UP = new THREE.Vector3(0, 1, 0);
 
 export class Nature {
   readonly group = new THREE.Group();
-  private patches: { mesh: THREE.InstancedMesh; x: number; z: number }[] = [];
+  private patches: { mesh: THREE.InstancedMesh; x: number; z: number; range: number }[] = [];
   private disposed = false;
 
   constructor(private terrain: Terrain) {
@@ -232,48 +258,79 @@ export class Nature {
     }
   }
 
-  /* Grass, flowers, bushes: scattered over the land, in patches drawn only near you. */
+  /* Grass, flowers, bushes: grown in clumps over the land, in patches drawn only near you. */
   private plantDecor(kind: Kind) {
     const t = this.terrain;
+    const f = t.flora;
     const rng = mulberry32(t.seed ^ 0x2c9277b5);
     const lh = t.lighthouse;
-    /* Land area, roughly: the shape's radius squared. */
-    const area = Math.PI * (t.radius * 1.05) ** 2;
-    const patches = new Map<string, Map<string, Place[]>>();
-    for (const d of DECOR[kind]) {
-      const count = Math.round((area / 1000) * d.per);
-      for (let i = 0, tries = 0; i < count && tries < count * 4; tries++) {
+    const reach = t.radius * 1.1;
+    const area = Math.PI * reach * reach;
+    /* How strongly each layer wants a spot (local coordinates), 0..1. */
+    const want: Record<Where, (x: number, z: number) => number> = {
+      meadow: (x, z) => f.meadow(x, z),
+      edge: (x, z) => {
+        const w = f.forest(x, z);
+        return Math.min(1, 4 * w * (1 - w) + 0.15 * w);
+      },
+      forest: (x, z) => f.forest(x, z),
+      open: (x, z) => 1 - 0.85 * f.forest(x, z),
+    };
+    const patches = new Map<string, { range: number; models: Map<string, Place[]> }>();
+    for (const layer of layers(kind, f.def.grass)) {
+      const [lo, hi, spread] = layer.clump;
+      const clumps = Math.round(((area / 1000) * layer.per) / ((lo + hi) / 2));
+      const field = want[layer.where];
+      for (let c = 0; c < clumps; c++) {
         const a = rng() * Math.PI * 2;
-        const r = Math.sqrt(rng()) * t.radius * 1.1;
-        const x = t.ox + Math.cos(a) * r;
-        const z = t.oz + Math.sin(a) * r;
-        const y = t.heightAt(x, z);
-        if (y < 0.7 || t.normalAt(x, z)[1] < 0.72) continue;
-        /* Clear of the lighthouse and anything built or growing there. */
-        if (Math.hypot(x - lh.x, z - lh.z) < 12) continue;
-        if (t.solidsNear(x, z).some((s) => Math.hypot(s.x - x, s.z - z) < s.r + 0.4)) continue;
-        i++;
-        const name = d.models[Math.floor(rng() * d.models.length)];
-        const k = range(rng, d.scale[0], d.scale[1]);
-        const key = `${Math.floor((x - t.ox + t.half) / PATCH)},${Math.floor((z - t.oz + t.half) / PATCH)}`;
-        let patch = patches.get(key);
-        if (!patch) patches.set(key, (patch = new Map()));
-        let list = patch.get(name);
-        if (!list) patch.set(name, (list = []));
-        list.push({ x, y: y - 0.05, z, rot: rng() * Math.PI * 2, sx: k, sy: k, sz: k });
+        const r = Math.sqrt(rng()) * reach;
+        const cx = Math.cos(a) * r;
+        const cz = Math.sin(a) * r;
+        if (rng() > field(cx, cz)) continue;
+        const n = lo + Math.floor(rng() * (hi - lo + 1));
+        /* A clump mostly keeps to one or two kinds. */
+        const main = layer.models[Math.floor(rng() * layer.models.length)];
+        for (let k = 0; k < n; k++) {
+          /* Thick in the middle of the clump, thinner at its edge. */
+          const d = spread * Math.sqrt(-2 * Math.log(1 - rng() * 0.95)) * 0.6;
+          const b = rng() * Math.PI * 2;
+          const x = t.ox + cx + Math.cos(b) * d;
+          const z = t.oz + cz + Math.sin(b) * d;
+          const y = t.heightAt(x, z);
+          if (y < 0.7 || t.normalAt(x, z)[1] < 0.72) continue;
+          /* Clear of the lighthouse and anything built or growing there. */
+          if (Math.hypot(x - lh.x, z - lh.z) < 12) continue;
+          if (t.solidsNear(x, z).some((s) => Math.hypot(s.x - x, s.z - z) < s.r + 0.3)) continue;
+          const name = rng() < 0.7 ? main : layer.models[Math.floor(rng() * layer.models.length)];
+          const s = range(rng, layer.scale[0], layer.scale[1]);
+          const key = `${layer.range}:${Math.floor((x - t.ox + t.half) / PATCH)},${Math.floor((z - t.oz + t.half) / PATCH)}`;
+          let patch = patches.get(key);
+          if (!patch) patches.set(key, (patch = { range: layer.range, models: new Map() }));
+          let list = patch.models.get(name);
+          if (!list) patch.models.set(name, (list = []));
+          list.push({
+            x,
+            y: y - 0.05,
+            z,
+            rot: rng() * Math.PI * 2,
+            sx: s,
+            sy: s * range(rng, 0.8, 1.25),
+            sz: s,
+          });
+        }
       }
     }
     for (const [key, patch] of patches) {
-      const [i, j] = key.split(",").map(Number);
+      const [i, j] = key.split(":")[1].split(",").map(Number);
       const cx = t.ox - t.half + (i + 0.5) * PATCH;
       const cz = t.oz - t.half + (j + 0.5) * PATCH;
-      for (const [name, places] of patch) {
+      for (const [name, places] of patch.models) {
         void piece(name).then((pc) => {
           if (this.disposed) return;
           const mesh = this.instance(pc, places);
           mesh.visible = false;
           this.group.add(mesh);
-          this.patches.push({ mesh, x: cx, z: cz });
+          this.patches.push({ mesh, x: cx, z: cz, range: patch.range });
         });
       }
     }
@@ -293,8 +350,9 @@ export class Nature {
 
   /* Only the patches of small things near you are drawn. */
   update(eye: THREE.Vector3) {
-    const reach = DECOR_RANGE + PATCH * 0.71;
-    for (const p of this.patches) p.mesh.visible = Math.hypot(p.x - eye.x, p.z - eye.z) < reach;
+    const half = PATCH * 0.71;
+    for (const p of this.patches)
+      p.mesh.visible = Math.hypot(p.x - eye.x, p.z - eye.z) < p.range + half;
   }
 
   dispose() {

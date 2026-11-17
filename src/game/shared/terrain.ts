@@ -1,5 +1,6 @@
 import { BASE_TILE, ISLAND_RADIUS, STEP_HEIGHT } from "./constants";
 import { FEATURES } from "./features";
+import { type Flora, floraFor } from "./flora";
 import { type BiomeId, gridOf, type IslandInfo, islandHeights, type ShapeId } from "./islands";
 import { angleTo, clamp, mulberry32, range, smoothstep } from "./math";
 import {
@@ -53,15 +54,6 @@ export type Site = Spot & { rot: number };
 
 const BUCKET = 12;
 
-/* How thickly trees and rocks grow, by island: a share of the usual count for its size. */
-export const FLORA: Record<BiomeId | "harbor", { trees: number; rocks: number }> = {
-  harbor: { trees: 0.35, rocks: 0.2 },
-  meadow: { trees: 0.45, rocks: 0.3 },
-  pinewood: { trees: 1.8, rocks: 0.45 },
-  ridge: { trees: 0.7, rocks: 1.1 },
-  marsh: { trees: 1, rocks: 0.35 },
-  fells: { trees: 0.4, rocks: 1.2 },
-};
 const NO_SOLIDS: Solid[] = [];
 
 export function blockSolid(b: Block): Solid {
@@ -146,6 +138,8 @@ export class Terrain implements Ground {
   /* How far out the land reaches, roughly: the shape's radius stretched to this tile. */
   readonly radius: number;
   readonly biome: BiomeId | null;
+  /* Where groves, meadows and outcrops are (local coordinates). */
+  readonly flora: Flora;
   /* The centre of the island's tile on the grand map. */
   ox = 0;
   oz = 0;
@@ -186,6 +180,7 @@ export class Terrain implements Ground {
     this.half = this.size / 2;
     this.radius = ISLAND_RADIUS * (this.size / BASE_TILE);
     this.bucketsPerSide = Math.ceil(this.size / BUCKET);
+    this.flora = floraFor(this.seed, this.harbor ? "harbor" : (this.biome ?? "meadow"), this.size);
     this.heights = islandHeights(info.shape, this.seed, this.grid, info.lift);
     this.raiseLighthouse();
     this.raiseStructures();
@@ -471,10 +466,13 @@ export class Terrain implements Ground {
     const keepIf = (on: boolean, place: () => void) => {
       const props = this.props.length;
       const solids = this.solids.length;
+      const held = taken.length;
       place();
       if (on) return;
       this.props.length = props;
       this.solids.length = solids;
+      /* Nor does it keep anything else from growing where it would have stood. */
+      taken.length = held;
     };
 
     /* Ruins: broken columns climbing in a ring, a parkour stair to a high perch. */
@@ -525,57 +523,116 @@ export class Terrain implements Ground {
       }),
     );
 
-    const flora = FLORA[this.harbor ? "harbor" : (this.biome ?? "meadow")];
+    /*
+     * Trees and boulders follow the island's fields: thick in the groves and
+     * on the outcrops, a stray one here and there between. `per` is how many
+     * per 1000 m² at a spot; a quick grid keeps them their spacing apart.
+     */
+    const flora = this.flora;
+    const CELL = 6;
+    const grid = new Map<number, { x: number; z: number; r: number }[]>();
+    const cellOf = (x: number, z: number) =>
+      Math.floor(x / CELL + 2048) * 4096 + Math.floor(z / CELL + 2048);
+    const clear = (x: number, z: number, r: number) => {
+      const cx = Math.floor(x / CELL + 2048);
+      const cz = Math.floor(z / CELL + 2048);
+      for (let i = -1; i <= 1; i++)
+        for (let j = -1; j <= 1; j++)
+          for (const o of grid.get((cx + i) * 4096 + cz + j) ?? [])
+            if (Math.hypot(o.x - x, o.z - z) < o.r + r) return false;
+      return true;
+    };
+    const reach = this.radius * 1.1;
+    const grow = (
+      per: (x: number, z: number) => number,
+      most: number,
+      opts: { minH: number; spacing: number; minNy: number },
+      make: (x: number, y: number, z: number, here: number) => void,
+    ) => {
+      const tries = Math.round(((Math.PI * reach * reach) / 1000) * most * 1.25);
+      for (let t = 0; t < tries; t++) {
+        const a = rng() * Math.PI * 2;
+        const d = Math.sqrt(rng()) * reach;
+        const x = Math.cos(a) * d;
+        const z = Math.sin(a) * d;
+        const here = per(x, z);
+        if (rng() * most > here) continue;
+        const y = this.heightAt(x, z);
+        if (y < opts.minH || this.normalAt(x, z)[1] < opts.minNy) continue;
+        if (!free(x, z, opts.spacing) || !clear(x, z, opts.spacing)) continue;
+        const key = cellOf(x, z);
+        const list = grid.get(key);
+        const spot = { x, z, r: opts.spacing };
+        if (list) list.push(spot);
+        else grid.set(key, [spot]);
+        make(x, y, z, here / most);
+      }
+    };
+
+    const f = flora.def;
     keepIf(FEATURES.rocks, () =>
-      scatter(240 * flora.rocks, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
-        const scale = rng() < 0.15 ? range(rng, 2.2, 3.4) : range(rng, 0.6, 1.9);
-        const sink = scale * 0.28;
-        const height = scale * range(rng, 0.8, 1.15);
-        this.props.push({
-          id: id++,
-          kind: "rock",
-          x,
-          y: y - sink,
-          z,
-          rot: rng() * Math.PI * 2,
-          scale,
-          height,
-          variant: Math.floor(rng() * 1e6),
-        });
-        this.solids.push({
-          x,
-          z,
-          r: scale * 0.82,
-          bottom: y - sink,
-          top: y - sink + height * 0.86,
-          standable: true,
-        });
-      }),
+      grow(
+        (x, z) => f.strays + (f.rocks - f.strays) * flora.stone(x, z),
+        f.rocks,
+        { minH: 0.4, spacing: 2.6, minNy: 0.55 },
+        (x, y, z, k) => {
+          /* Out on an outcrop they come bigger. */
+          const big = rng() < 0.08 + 0.2 * k;
+          const scale = big ? range(rng, 2, 3.4) : range(rng, 0.5, 1.7);
+          const sink = scale * 0.28;
+          const height = scale * range(rng, 0.8, 1.15);
+          this.props.push({
+            id: id++,
+            kind: "rock",
+            x,
+            y: y - sink,
+            z,
+            rot: rng() * Math.PI * 2,
+            scale,
+            height,
+            variant: Math.floor(rng() * 1e6),
+          });
+          this.solids.push({
+            x,
+            z,
+            r: scale * 0.82,
+            bottom: y - sink,
+            top: y - sink + height * 0.86,
+            standable: true,
+          });
+        },
+      ),
     );
 
     keepIf(FEATURES.trees, () =>
-      scatter(140 * flora.trees, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
-        const scale = range(rng, 0.8, 1.35);
-        this.props.push({
-          id: id++,
-          kind: "tree",
-          x,
-          y: y - 0.3,
-          z,
-          rot: rng() * Math.PI * 2,
-          scale,
-          height: 6.5 * scale,
-          variant: Math.floor(rng() * 1e6),
-        });
-        this.solids.push({
-          x,
-          z,
-          r: 0.32 * scale,
-          bottom: y - 1,
-          top: y + 7 * scale,
-          standable: false,
-        });
-      }),
+      grow(
+        (x, z) => f.sparse + (f.dense - f.sparse) * flora.forest(x, z),
+        f.dense,
+        { minH: 1.6, spacing: 3.2, minNy: 0.7 },
+        (x, y, z, k) => {
+          /* Deep in a grove the trees grow taller. */
+          const scale = range(rng, 0.75, 1.15) + k * range(rng, 0, 0.45);
+          this.props.push({
+            id: id++,
+            kind: "tree",
+            x,
+            y: y - 0.3,
+            z,
+            rot: rng() * Math.PI * 2,
+            scale,
+            height: 6.5 * scale,
+            variant: Math.floor(rng() * 1e6),
+          });
+          this.solids.push({
+            x,
+            z,
+            r: 0.32 * scale,
+            bottom: y - 1,
+            top: y + 7 * scale,
+            standable: false,
+          });
+        },
+      ),
     );
 
     keepIf(FEATURES.buoys, () => {

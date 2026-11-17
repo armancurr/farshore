@@ -232,7 +232,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     startedAt.current = performance.now();
     /* Phones play sideways: fullscreen and locked to landscape, where the browser lets us. */
     if (touch) void enterLandscape();
-    game.start(next);
+    game.start(next, auth.username);
     game.lock();
   };
 

@@ -130,6 +130,7 @@ export type ClientMsg =
    */
   | {
       t: "hello";
+      /* The username you picked on the title screen, shown over your head. */
       name?: string;
       spectate?: boolean;
       token?: string;
@@ -187,6 +188,10 @@ const COORD = GRAND_SIZE / 2 + 100;
 const isToken = (v: unknown): v is string =>
   typeof v === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(v);
 
+/* A username as the name picker allows it: 3–16 letters, numbers or underscores. */
+const isPlayerName = (v: unknown): v is string =>
+  typeof v === "string" && /^[A-Za-z0-9_]{3,16}$/.test(v);
+
 const finite = (v: unknown, limit: number): v is number =>
   typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= limit;
 
@@ -214,6 +219,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "hello":
       return {
         t: "hello",
+        name: isPlayerName(m.name) ? m.name : undefined,
         spectate: m.spectate === true,
         token: isToken(m.token) ? m.token : undefined,
         own: m.own === true,

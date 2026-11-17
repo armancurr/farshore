@@ -17,6 +17,9 @@ export const PALETTE = {
   landLine: 0x6e7196,
   landMajor: 0x8184ab,
   wetLand: 0x45476a,
+  /* The land under a meadow and under a grove, a shade off the bare ground. */
+  landMeadow: 0x48677a,
+  landForest: 0x46486a,
   foam: 0xf2fbfa,
   foliage: 0xff8882,
   bark: 0x194350,

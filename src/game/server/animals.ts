@@ -99,7 +99,7 @@ export class Herd {
     species: SpeciesId,
     island: number,
     prey: readonly Prey[] = [],
-    opts: { alpha?: boolean; cull?: number } = {},
+    opts: { alpha?: boolean; cull?: number; near?: { x: number; z: number } } = {},
   ): Animal | null {
     const def = SPECIES[species];
     const max = def.health * (opts.alpha ? ALPHA.health : 1);
@@ -124,7 +124,7 @@ export class Herd {
       alpha: !!opts.alpha,
       cull: opts.cull ?? null,
     };
-    if (!this.place(a, prey)) return null;
+    if (!this.place(a, prey, opts.near)) return null;
     this.animals.push(a);
     return a;
   }
@@ -133,6 +133,19 @@ export class Herd {
   remove(pick: (a: Animal) => boolean) {
     for (let i = this.animals.length - 1; i >= 0; i--)
       if (pick(this.animals[i])) this.animals.splice(i, 1);
+  }
+
+  /* One of its own kind on its island, alive, to come back beside. */
+  private kin(a: Animal) {
+    const others = this.animals.filter(
+      (o) =>
+        o !== a &&
+        o.species === a.species &&
+        o.island === a.island &&
+        o.respawnAt === null &&
+        o.state !== "dead",
+    );
+    return others.length ? others[Math.floor(this.host.rng() * others.length)] : undefined;
   }
 
   private role(a: Animal): Role {
@@ -146,16 +159,21 @@ export class Herd {
   }
 
   /* Somewhere grassy-ish on its island: dry, not steep, clear of things, away from people. */
-  private place(a: Animal, prey: readonly Prey[]) {
+  /*
+   * Somewhere on its island, or (given `near`) close by the rest of its herd;
+   * if there's no room there, anywhere on the island will do.
+   */
+  private place(a: Animal, prey: readonly Prey[], near?: { x: number; z: number }) {
     const range = this.ranges.get(a.island);
     if (!range) return false;
     const { terrain, quiet } = range;
     const rng = this.host.rng;
-    for (let tries = 0; tries < 120; tries++) {
+    for (let tries = 0; tries < 160; tries++) {
       const ang = rng() * Math.PI * 2;
-      const d = Math.sqrt(rng()) * terrain.radius * 1.1;
-      const x = terrain.ox + Math.cos(ang) * d;
-      const z = terrain.oz + Math.sin(ang) * d;
+      const close = near && tries < 60;
+      const d = close ? 4 + rng() * 22 : Math.sqrt(rng()) * terrain.radius * 1.1;
+      const x = (close ? near.x : terrain.ox) + Math.cos(ang) * d;
+      const z = (close ? near.z : terrain.oz) + Math.sin(ang) * d;
       const h = terrain.heightAt(x, z);
       if (h < 2 || terrain.normalAt(x, z)[1] < 0.8) continue;
       if (quiet.some((q) => Math.hypot(q.x - x, q.z - z) < q.r)) continue;
@@ -246,7 +264,8 @@ export class Herd {
     for (let i = this.animals.length - 1; i >= 0; i--) {
       const a = this.animals[i];
       if (a.respawnAt !== null) {
-        if (now >= a.respawnAt && !this.place(a, prey)) a.respawnAt = now + 10;
+        /* Back with the rest of its herd, if any of them are about. */
+        if (now >= a.respawnAt && !this.place(a, prey, this.kin(a))) a.respawnAt = now + 10;
         continue;
       }
       if (a.state === "dead") {

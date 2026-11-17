@@ -107,6 +107,8 @@ const colors = {
   uLandLine: { value: hex(PALETTE.landLine) },
   uLandMajor: { value: hex(PALETTE.landMajor) },
   uWetLand: { value: hex(PALETTE.wetLand) },
+  uLandMeadow: { value: hex(PALETTE.landMeadow) },
+  uLandForest: { value: hex(PALETTE.landForest) },
   uSeabed: { value: hex(PALETTE.seabed) },
   uFoam: { value: hex(PALETTE.foam) },
   uSea: { value: hex(PALETTE.sea) },
@@ -118,6 +120,8 @@ const GLSL_COLORS = /* glsl */ `
   uniform vec3 uLandLine;
   uniform vec3 uLandMajor;
   uniform vec3 uWetLand;
+  uniform vec3 uLandMeadow;
+  uniform vec3 uLandForest;
   uniform vec3 uSeabed;
   uniform vec3 uFoam;
   uniform vec3 uSea;
@@ -147,6 +151,8 @@ const TERRAIN_FRAGMENT = /* glsl */ `
   ${GLSL_SWASH}
   ${GLSL_FIELD}
   uniform float uContour;
+  /* The island's meadows (r) and groves (g), over its tile. */
+  uniform sampler2D uFlora;
   varying vec3 vWorld;
   void main() {
     vec3 hf = field(vWorld.xz);
@@ -167,7 +173,10 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     float fade = smoothstep(0.004, 0.03, slope);
 
     float steep = smoothstep(0.9, 0.62, n.y);
-    vec3 c = uLand * (0.78 + 0.34 * diff) * mix(1.0, 0.9, steep);
+    vec2 flora = texture2D(uFlora, (vWorld.xz - uOrigin + uHalf) / (2.0 * uHalf)).rg;
+    vec3 ground = mix(uLand, uLandMeadow, flora.r * 0.9);
+    ground = mix(ground, uLandForest, flora.g * 0.6);
+    vec3 c = ground * (0.78 + 0.34 * diff) * mix(1.0, 0.9, steep);
     c = mix(c, uLandLine * (0.85 + 0.2 * diff), minor * 0.55 * fade);
     c = mix(c, uLandMajor * (0.85 + 0.2 * diff), major * 0.7 * fade);
 
@@ -280,6 +289,28 @@ const WATER_FRAGMENT = /* glsl */ `
   }
 `;
 
+/* The island's meadow and forest fields, baked small for the ground to tint by. */
+function floraTexture(terrain: Terrain) {
+  const n = 256;
+  const data = new Uint8Array(n * n * 4);
+  const f = terrain.flora;
+  for (let i = 0; i < n; i++) {
+    const z = ((i + 0.5) / n - 0.5) * terrain.size;
+    for (let j = 0; j < n; j++) {
+      const x = ((j + 0.5) / n - 0.5) * terrain.size;
+      const k = (i * n + j) * 4;
+      data[k] = Math.round(f.meadow(x, z) * 255);
+      data[k + 1] = Math.round(f.forest(x, z) * 255);
+      data[k + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, n, n, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 function heightTexture(terrain: Terrain) {
   const tex = new THREE.DataTexture(
     new Float32Array(terrain.heights),
@@ -301,6 +332,7 @@ function heightTexture(terrain: Terrain) {
 export function createLand(terrain: Terrain) {
   const heights = heightTexture(terrain);
   const shore = bakeShoreDistance(terrain.heights, terrain.grid, terrain.size);
+  const flora = floraTexture(terrain);
   const field = {
     uHeights: { value: heights },
     uOrigin: { value: new THREE.Vector2(terrain.ox, terrain.oz) },
@@ -322,7 +354,13 @@ export function createLand(terrain: Terrain) {
   geo.deleteAttribute("normal");
   geo.computeBoundingSphere();
   const groundMat = new THREE.ShaderMaterial({
-    uniforms: { ...shared, ...colors, ...field, uContour: { value: CONTOUR } },
+    uniforms: {
+      ...shared,
+      ...colors,
+      ...field,
+      uContour: { value: CONTOUR },
+      uFlora: { value: flora },
+    },
     vertexShader: TERRAIN_VERTEX,
     fragmentShader: TERRAIN_FRAGMENT,
   });
@@ -357,6 +395,7 @@ export function createLand(terrain: Terrain) {
   groundMat.addEventListener("dispose", () => {
     heights.dispose();
     shore.tex.dispose();
+    flora.dispose();
   });
 
   return [ground, sea] as const;
