@@ -24,12 +24,15 @@ import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
 import { enterLandscape, exitLandscape, usePortrait } from "@/lib/landscape";
 import type { Game, HudState, Mode } from "../../game/client/game";
 import { CREATIVE } from "../../game/client/modes";
+import type { PlotShapeId } from "../../game/shared/islands";
+import type { PlotSizeId } from "../../game/shared/plots";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
 import { Marketplace } from "./marketplace";
 import { AccessCard, ControlsCard, MenuPointer, PendingCard, PlayerCard } from "./menu-cards";
 import { NameDialog } from "./name-dialog";
-import { ChestPanel, GuildBoardPanel, InventoryPanel, ShopPanel } from "./panels";
+import { GuildBoardPanel, InventoryPanel } from "./panels";
+import { PlotPlacer } from "./plot-placer";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
@@ -82,6 +85,8 @@ export function GamePanel(props: { onPress?: () => void }) {
   const portrait = usePortrait();
   /* The marketplace (K), from the title screen or out on the island. */
   const [marketOpen, setMarketOpen] = useState(false);
+  /* Choosing a spot on the grand map for land bought in the marketplace. */
+  const [placing, setPlacing] = useState<{ size: PlotSizeId; shape: PlotShapeId } | null>(null);
   /*
    * Both menu cards open on hover. Keyboard focus opens Controls; the account
    * card (the waitlist, for guests) opens on Enter or a tap, and stays up while
@@ -157,7 +162,9 @@ export function GamePanel(props: { onPress?: () => void }) {
         return;
       }
       if (e.code === "KeyM" && latest.current.playing) toggleMute();
-      if (e.code === "KeyN" && !e.repeat && latest.current.playing) setMapOpen((open) => !open);
+      const placingLand = !!latest.current.placing;
+      if (e.code === "KeyN" && !e.repeat && latest.current.playing && !placingLand)
+        setMapOpen((open) => !open);
       if (e.code === "Escape") setAccountOpen(false);
       /* C toggles the Controls card, anywhere but a text field. */
       const typing =
@@ -167,7 +174,7 @@ export function GamePanel(props: { onPress?: () => void }) {
         setControlsOpen((open) => !open);
       }
       /* K opens or closes the marketplace, but not over another panel. */
-      const blocked = !!latest.current.hud?.panel;
+      const blocked = !!latest.current.hud?.panel || placingLand;
       if (e.code === "KeyK" && !e.repeat && !typing && latest.current.ready && !blocked) {
         e.preventDefault();
         if (latest.current.marketOpen) latest.current.closeMarket(true);
@@ -257,6 +264,17 @@ export function GamePanel(props: { onPress?: () => void }) {
     if (byClick && latest.current.playing) gameRef.current?.lock();
   }, []);
 
+  /* From the land shelf to the grand map, to choose where it goes. */
+  const placeLand = useCallback((size: PlotSizeId, shape: PlotShapeId) => {
+    setMarketOpen(false);
+    setPlacing({ size, shape });
+  }, []);
+
+  const closePlacer = useCallback((byClick: boolean) => {
+    setPlacing(null);
+    if (byClick && latest.current.playing) gameRef.current?.lock();
+  }, []);
+
   /* The keyboard handler and the status poll live outside renders; give them the latest. */
   const latest = useRef({
     hud,
@@ -272,6 +290,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     marketOpen,
     openMarket,
     closeMarket,
+    placing,
   });
   latest.current = {
     hud,
@@ -287,6 +306,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     marketOpen,
     openMarket,
     closeMarket,
+    placing,
   };
 
   /* Approved without a name: ask for one as soon as the island is up. */
@@ -323,6 +343,7 @@ export function GamePanel(props: { onPress?: () => void }) {
   const leave = () => {
     setMapOpen(false);
     setMarketOpen(false);
+    setPlacing(null);
     setReloadKey(null);
     game?.input.unlock();
     game?.start("attract");
@@ -347,6 +368,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     !hud.locked &&
     !hud.panel &&
     !marketOpen &&
+    !placing &&
     (!!reloadKey || performance.now() - startedAt.current > 500);
 
   return (
@@ -388,8 +410,6 @@ export function GamePanel(props: { onPress?: () => void }) {
         <>
           {hud.panel === "inventory" && <InventoryPanel hud={hud} game={game} />}
           {hud.panel === "board" && <GuildBoardPanel hud={hud} game={game} />}
-          {hud.panel === "shop" && <ShopPanel hud={hud} game={game} />}
-          {hud.panel === "chest" && <ChestPanel hud={hud} game={game} />}
         </>
       )}
 
@@ -478,8 +498,11 @@ export function GamePanel(props: { onPress?: () => void }) {
           input={game.input}
           creative={hud.creative}
           flying={hud.flying}
-          building={!!hud.build}
           view={hud.view}
+          placing={!!hud.placing}
+          ownItem={hud.ownItem}
+          repair={hud.repair}
+          crew={hud.crew?.order ?? null}
         />
       )}
 
@@ -591,7 +614,18 @@ export function GamePanel(props: { onPress?: () => void }) {
         </div>
       )}
 
-      {marketOpen && game && <Marketplace game={game} touch={touch} onClose={closeMarket} />}
+      {marketOpen && game && (
+        <Marketplace game={game} touch={touch} onClose={closeMarket} onPlace={placeLand} />
+      )}
+      {placing && playing && game && (
+        <PlotPlacer
+          game={game}
+          touch={touch}
+          size={placing.size}
+          shape={placing.shape}
+          onClose={closePlacer}
+        />
+      )}
     </div>
   );
 }

@@ -15,7 +15,20 @@ import { overSolid, type Terrain } from "../shared/terrain";
  *             gore you, backing off to charge again.
  *   predator  notice you from afar, close in at a run and bite, again and
  *             again; the pack joins in. Badly hurt, they slink away.
+ *
+ * Animals keep in groups. The first of a group still standing leads: the
+ * rest graze round it and drift after it when it moves. Alarm one and the
+ * whole group knows: prey stampede together, a herd's guard (a bull with its
+ * cows) comes for whoever caused it, and a pack hunts as one, each wolf
+ * swinging out to its own side before it closes, so they come from all round.
  */
+
+/* How far the rest of a group strays from its leader before they catch up. */
+const SPREAD: Partial<Record<SpeciesId, number>> = { cow: 9, wolf: 7, bull: 9 };
+const SPREAD_DEFAULT = 13;
+/* A pack fans out this wide (radians either side) and this far off its quarry before closing in. */
+const FLANK = 0.75;
+const FLANK_RING = 7;
 
 /* Seconds a normal animal stays gone after it's killed. */
 const RESPAWN = 90;
@@ -52,6 +65,8 @@ export type Animal = {
   alpha: boolean;
   /* The cull it's part of: it never comes back once killed. */
   cull: number | null;
+  /* Its herd or pack (the id of the one it was raised with); alone, its own id. */
+  group: number;
 };
 
 /* What the herd needs to know about the people out there. */
@@ -86,6 +101,8 @@ export class Herd {
   readonly animals: Animal[] = [];
   private nextId = 1;
   private ranges = new Map<number, Range>();
+  /* Each group's members still about, leader first; rebuilt every tick. */
+  private groups = new Map<number, Animal[]>();
 
   constructor(private host: HerdHost) {}
 
@@ -99,12 +116,19 @@ export class Herd {
     species: SpeciesId,
     island: number,
     prey: readonly Prey[] = [],
-    opts: { alpha?: boolean; cull?: number; near?: { x: number; z: number } } = {},
+    opts: {
+      alpha?: boolean;
+      cull?: number;
+      near?: { x: number; z: number };
+      /* Join this animal's herd or pack. */
+      with?: Animal;
+    } = {},
   ): Animal | null {
     const def = SPECIES[species];
     const max = def.health * (opts.alpha ? ALPHA.health : 1);
+    const id = this.nextId++;
     const a: Animal = {
-      id: this.nextId++,
+      id,
       species,
       island,
       x: 0,
@@ -123,8 +147,9 @@ export class Herd {
       biteAt: 0,
       alpha: !!opts.alpha,
       cull: opts.cull ?? null,
+      group: opts.with?.group ?? id,
     };
-    if (!this.place(a, prey, opts.near)) return null;
+    if (!this.place(a, prey, opts.near ?? opts.with)) return null;
     this.animals.push(a);
     return a;
   }
@@ -135,8 +160,10 @@ export class Herd {
       if (pick(this.animals[i])) this.animals.splice(i, 1);
   }
 
-  /* One of its own kind on its island, alive, to come back beside. */
+  /* Its own group, or else one of its own kind on its island, alive, to come back beside. */
   private kin(a: Animal) {
+    const mine = this.groups.get(a.group)?.filter((o) => o !== a);
+    if (mine?.length) return mine[Math.floor(this.host.rng() * mine.length)];
     const others = this.animals.filter(
       (o) =>
         o !== a &&
@@ -239,10 +266,44 @@ export class Herd {
     a.yaw = wrapAngle(a.yaw + clamp(wrapAngle(want - a.yaw), -6 * dt, 6 * dt));
   }
 
+  private members(a: Animal): readonly Animal[] {
+    return this.groups.get(a.group) ?? [];
+  }
+
+  /* Who it follows: its group's leader, unless that's itself. */
+  private leaderOf(a: Animal) {
+    const lead = this.members(a)[0];
+    return lead && lead !== a ? lead : null;
+  }
+
+  private spread(a: Animal) {
+    return SPREAD[a.species] ?? SPREAD_DEFAULT;
+  }
+
   private wander(a: Animal, now: number) {
     const rng = this.host.rng;
     const terrain = this.ranges.get(a.island)?.terrain;
     a.target = null;
+    /* Following: graze near the leader, and go after it when it moves off. */
+    const lead = this.leaderOf(a);
+    if (lead) {
+      const spread = this.spread(a);
+      const moving = lead.state === "walk";
+      const cx = moving ? lead.tx : lead.x;
+      const cz = moving ? lead.tz : lead.z;
+      if (!moving && Math.hypot(lead.x - a.x, lead.z - a.z) < spread && rng() < 0.6) {
+        a.state = "graze";
+        a.until = now + 2 + rng() * 5;
+        return;
+      }
+      const ang = rng() * Math.PI * 2;
+      const d = 2 + rng() * spread * 0.6;
+      a.tx = cx + Math.cos(ang) * d;
+      a.tz = cz + Math.sin(ang) * d;
+      a.state = "walk";
+      a.until = now + 14;
+      return;
+    }
     if (rng() < 0.45) {
       a.state = "graze";
       a.until = now + 3 + rng() * 6;
@@ -260,7 +321,45 @@ export class Herd {
     a.until = now + 12;
   }
 
+  /* Each group's members still about, in the order they were raised, so the leader stays put until it falls. */
+  private regroup() {
+    this.groups.clear();
+    for (const a of this.animals) {
+      if (a.respawnAt !== null || a.state === "dead") continue;
+      const g = this.groups.get(a.group);
+      if (g) g.push(a);
+      else this.groups.set(a.group, [a]);
+    }
+  }
+
+  /*
+   * Something has the group on edge, `threat` being who. Prey turn to bolt
+   * (a beat apart, so they go almost as one), guards square up to it, and a
+   * pack closes in.
+   */
+  private alarm(a: Animal, threat: Prey, now: number) {
+    for (const o of this.members(a)) {
+      if (o === a) continue;
+      const role = this.role(o);
+      if (role === "prey") {
+        if (o.state === "run" || o.state === "alert") continue;
+        o.state = "alert";
+        o.target = threat.id;
+        o.until = now + 0.15 + this.host.rng() * 0.35;
+      } else if (role === "defender") {
+        if (o.state === "charge" || o.state === "attack") continue;
+        if (!o.alpha && o.health < o.max * 0.25) continue;
+        this.squareUp(o, threat, now);
+      } else if (o.target === null) {
+        o.target = threat.id;
+        o.state = "charge";
+        o.until = now + 20;
+      }
+    }
+  }
+
   tick(now: number, dt: number, prey: readonly Prey[]) {
+    this.regroup();
     for (let i = this.animals.length - 1; i >= 0; i--) {
       const a = this.animals[i];
       if (a.respawnAt !== null) {
@@ -305,7 +404,11 @@ export class Herd {
   /* Graze, or walk to where it was going. */
   private idle(a: Animal, now: number, dt: number) {
     if (a.state === "walk") {
-      const ok = this.walk(a, a.tx - a.x, a.tz - a.z, SPECIES[a.species].walk, dt);
+      /* Fallen behind its group: a brisker pace to catch up. */
+      const lead = this.leaderOf(a);
+      const behind = !!lead && Math.hypot(lead.x - a.x, lead.z - a.z) > this.spread(a) * 1.4;
+      const speed = SPECIES[a.species].walk * (behind ? 1.8 : 1);
+      const ok = this.walk(a, a.tx - a.x, a.tz - a.z, speed, dt);
       if (!ok || Math.hypot(a.tx - a.x, a.tz - a.z) < 1 || now > a.until) this.wander(a, now);
     } else if (now > a.until) this.wander(a, now);
   }
@@ -320,6 +423,7 @@ export class Herd {
           a.state = "alert";
           a.target = p!.id;
           a.until = now + 0.45;
+          this.alarm(a, p!, now);
           return;
         }
         this.idle(a, now, dt);
@@ -388,6 +492,7 @@ export class Herd {
       case "walk":
         if (this.noticed(a, p, d)) {
           this.squareUp(a, p!, now);
+          this.alarm(a, p!, now);
           return;
         }
         this.idle(a, now, dt);
@@ -454,12 +559,13 @@ export class Herd {
     }
   }
 
-  /* Others of its kind close by join the hunt. */
+  /* Its pack joins the hunt, wherever they are, and so do others of its kind close by. */
   private rally(a: Animal, target: number, now: number) {
     for (const o of this.animals) {
       if (o === a || o.species !== a.species || o.island !== a.island) continue;
+      const pack = o.group === a.group;
       if (o.respawnAt !== null || o.state === "dead" || o.target !== null) continue;
-      if (Math.hypot(o.x - a.x, o.z - a.z) > 28) continue;
+      if (!pack && Math.hypot(o.x - a.x, o.z - a.z) > 28) continue;
       o.target = target;
       o.state = "charge";
       o.until = now + 20;
@@ -529,7 +635,9 @@ export class Herd {
           }
           return;
         }
-        this.walk(a, dx, dz, dist > 8 ? def.run : def.run * 0.7, dt);
+        /* Out of reach yet: swing round to its own side of the quarry first. */
+        const [fx, fz] = this.flank(a, target, dist);
+        this.walk(a, fx - a.x, fz - a.z, dist > 8 ? def.run : def.run * 0.7, dt);
         return;
       }
       case "run": {
@@ -544,6 +652,21 @@ export class Herd {
       default:
         this.wander(a, now);
     }
+  }
+
+  /*
+   * Where a pack animal heads while closing on `target`: a point on a ring
+   * round it, turned to this one's side of the pack, so the pack spreads out
+   * and comes from several sides. Close in, or alone, it goes straight in.
+   */
+  private flank(a: Animal, target: Prey, dist: number): [number, number] {
+    const hunting = this.members(a).filter((o) => o.target === target.id);
+    if (hunting.length < 2 || dist < FLANK_RING * 0.75) return [target.x, target.z];
+    const slot = hunting.indexOf(a);
+    const offset = (slot - (hunting.length - 1) / 2) * FLANK;
+    const from = Math.atan2(a.z - target.z, a.x - target.x) + offset * 0.5;
+    const r = Math.min(FLANK_RING, dist * 0.7);
+    return [target.x + Math.cos(from) * r, target.z + Math.sin(from) * r];
   }
 
   /*
@@ -564,6 +687,7 @@ export class Herd {
       return true;
     }
     a.target = by.id;
+    this.alarm(a, by, now);
     const role = this.role(a);
     if (role === "prey") {
       a.state = "run";

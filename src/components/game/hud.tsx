@@ -1,7 +1,7 @@
 import { cn } from "cn";
 import { Progress } from "@/components/ui/progress";
 import type { HudState } from "../../game/client/game";
-import { Belt, controlHint } from "./belt";
+import { Belt } from "./belt";
 import { clock } from "./panels";
 
 const DOWN_TEXT: Record<string, string> = {
@@ -55,10 +55,29 @@ function Missions(props: { hud: HudState }) {
   );
 }
 
+const ORDER_WORDS = { home: "At home", follow: "Following you", hold: "Holding" } as const;
+
+/* Your crew: what they're doing, how many, how many are down, and the keys that tell them. */
+function CrewLine(props: { hud: HudState; touch: boolean }) {
+  const c = props.hud.crew;
+  if (!c) return null;
+  const keys = c.order === "follow" ? "G home · H hold" : "G call · H hold";
+  return (
+    <div className="flex flex-col items-start gap-1 font-mono text-[11px] font-normal tracking-[0.12em] uppercase">
+      <div>
+        Crew · {ORDER_WORDS[c.order]} · {c.men} {c.men === 1 ? "man" : "men"}
+        {c.down > 0 ? ` · ${c.down} down` : ""}
+      </div>
+      {!props.touch && <div className="text-white/70">{keys}</div>}
+    </div>
+  );
+}
+
 /* Big news for a moment: a payout, an alpha sighted, an island overrun. */
 function Banner(props: { hud: HudState }) {
   const c = props.hud.banner;
-  if (!c) return null;
+  /* An alarm takes its place. */
+  if (!c || props.hud.alarm) return null;
   return (
     <div className="absolute top-[30%] left-1/2 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 flex-col items-center gap-1 text-center [text-shadow:0_1px_4px_rgba(0,0,0,0.8)]">
       <div className="text-2xl font-semibold tracking-tight">{c.title}</div>
@@ -67,10 +86,114 @@ function Banner(props: { hud: HudState }) {
   );
 }
 
+/*
+ * Raids, along the top: the isle you're raiding, or raiders on yours; under
+ * them, a Hearth being taken near you, filling as it goes.
+ */
+function Raid(props: { hud: HudState }) {
+  const h = props.hud;
+  const c = h.capture;
+  if (!h.raid && !h.besieged && !c) return null;
+  return (
+    <div className="flex flex-col items-center gap-2 text-center [text-shadow:0_1px_3px_rgba(0,0,0,0.85)]">
+      {h.raid && (
+        <div className="border border-[#ff5a4c]/70 bg-[#5a0d08]/70 px-3 py-1 font-mono text-[11px] tracking-[0.25em] text-[#ffb3ab] uppercase">
+          Raiding {h.raid}
+        </div>
+      )}
+      {h.besieged > 0 && (
+        <div className="animate-pulse border border-[#ff5a4c]/70 bg-[#5a0d08]/70 px-3 py-1 font-mono text-[11px] tracking-[0.25em] text-[#ffb3ab] uppercase">
+          Your isle is under attack · {h.besieged} {h.besieged === 1 ? "raider" : "raiders"}
+        </div>
+      )}
+      {c && (
+        <div className="flex flex-col items-center gap-1.5">
+          <div
+            className={cn(
+              "font-sans text-sm font-bold",
+              c.state === "contested" ? "text-[#ffd27a]" : c.mine ? "text-[#ff8a80]" : "",
+            )}
+          >
+            {c.title}
+          </div>
+          <Progress
+            aria-label="Capture"
+            value={c.progress * 100}
+            className="w-64"
+            trackClassName="h-[5px] bg-white/25"
+            indicatorClassName={c.state === "contested" ? "bg-[#ffc247]" : "bg-[#ff4a3d]"}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Raiders landing on your land: hard to miss, for a few seconds. */
+function Alarm(props: { hud: HudState }) {
+  const a = props.hud.alarm;
+  if (!a) return null;
+  return (
+    <div className="absolute top-[34%] left-1/2 flex w-[min(40rem,calc(100%-2rem))] -translate-x-1/2 flex-col items-center gap-1.5 border-y border-[#ff5a4c]/80 bg-[#3a0604]/75 px-6 py-3 text-center [text-shadow:0_1px_4px_rgba(0,0,0,0.85)]">
+      <div className="font-mono text-[10px] tracking-[0.4em] text-[#ff8a80] uppercase">Alarm</div>
+      <div className="text-2xl font-semibold tracking-tight text-white">{a.title}</div>
+      <div className="font-mono text-[10px] tracking-[0.3em] text-[#ffb3ab] uppercase">{a.sub}</div>
+    </div>
+  );
+}
+
+/* A bow's sight: a ring round the crosshair that closes in as you draw. */
+function Sight(props: { charge: number | null }) {
+  const size = 34 - (props.charge ?? 0) * 18;
+  return (
+    <span
+      className="absolute top-1/2 left-1/2 -translate-1/2 rounded-full border border-white/70 mix-blend-difference"
+      style={{ width: size, height: size }}
+    />
+  );
+}
+
+/*
+ * At a ship's helm: the hull that's left, and the guns down each side,
+ * loaded or how long till they are. A battered boat shows its hull too.
+ */
+function Ship(props: { hud: HudState }) {
+  const h = props.hud;
+  if (h.hull === null && !h.guns) return null;
+  const side = (name: string, left: number) => (
+    <span className={left > 0 ? "text-white/60" : "text-white"}>
+      {name} {left > 0 ? `${Math.ceil(left)} s` : "ready"}
+    </span>
+  );
+  return (
+    <div className="flex flex-col items-center gap-1.5 font-mono text-[10px] tracking-[0.2em] uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.85)]">
+      {h.hull !== null && (
+        <div className="flex items-center gap-2">
+          <span>Hull</span>
+          <Progress
+            aria-label="Hull"
+            value={h.hull * 100}
+            className="w-40"
+            trackClassName="h-[5px] bg-white/25"
+            indicatorClassName={h.hull < 0.3 ? "bg-[#ff4a3d]" : "bg-white"}
+          />
+        </div>
+      )}
+      {h.guns && (
+        <div className="flex gap-4">
+          {side("Port guns", h.guns.port)}
+          {side("Starboard guns", h.guns.starboard)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Crosshair(props: { hud: HudState }) {
   const h = props.hud;
   return (
     <div className="pointer-events-none absolute top-1/2 left-1/2 size-16 -translate-1/2">
+      {h.ranged && <Sight charge={h.charge} />}
       <span className="absolute top-1/2 left-1/2 h-px w-3 -translate-1/2 bg-white/80 mix-blend-difference" />
       <span className="absolute top-1/2 left-1/2 h-3 w-px -translate-1/2 bg-white/80 mix-blend-difference" />
       {h.hitMarker > 0 && (
@@ -120,10 +243,33 @@ function Crosshair(props: { hud: HudState }) {
   );
 }
 
+/* Setting something down: what it is, what it costs, and whether it can go where the ghost is. */
+function Placing(props: { hud: HudState }) {
+  const p = props.hud.placing;
+  if (!p) return null;
+  return (
+    <div className="flex flex-col items-center gap-1 text-center [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]">
+      <div className="font-sans text-sm font-bold">
+        {p.moving
+          ? `Moving the ${p.name.toLowerCase()}`
+          : `${p.name} · ◎ ${p.price.toLocaleString("en-US")}`}
+      </div>
+      <div
+        className={cn(
+          "font-mono text-[10px] tracking-[0.2em] uppercase",
+          p.ok ? "text-[#9dffb6]" : "text-[#ff9b93]",
+        )}
+      >
+        {p.ok ? (p.snapped ? "Snapped · ready to place" : "Ready to place") : (p.reason ?? "")}
+      </div>
+    </div>
+  );
+}
+
 /* "Space up · Shift down · …" as a short list, one control to a line. */
 /*
  * What the controls do right now, one per line. What E would do here (get in
- * the rowboat, open the chest) leads, brighter, unless a line already says it.
+ * the rowboat, read the Guild Board) leads, brighter, unless a line already says it.
  */
 function ControlHints(props: { text: string | null; prompt: string | null }) {
   const cap = (line: string) => line.charAt(0).toUpperCase() + line.slice(1);
@@ -172,9 +318,8 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
             {h.sheltered ? " · safe ground" : ""}
           </div>
         )}
-        {!props.touch && h.player && (
-          <ControlHints text={controlHint(h, props.touch)} prompt={h.prompt} />
-        )}
+        {h.player && <CrewLine hud={h} touch={props.touch} />}
+        {!props.touch && h.player && <ControlHints text={h.hint} prompt={h.prompt} />}
         {h.feed.length > 0 && (
           <div className="flex flex-col items-start gap-1.5 text-white/90">
             {h.feed.map((item, i) => (
@@ -188,6 +333,16 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-28" : "top-20")}
         >
           <Missions hud={h} />
+        </div>
+      )}
+      {h.player && (
+        <div
+          className={cn(
+            "absolute left-1/2 -translate-x-1/2",
+            props.touch ? "top-44" : h.economy ? "top-40" : "top-16",
+          )}
+        >
+          <Raid hud={h} />
         </div>
       )}
       {/* The Harbor is common ground: nobody can be hurt here. */}
@@ -205,7 +360,24 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
       {h.player && (
         <>
           <Crosshair hud={h} />
+          <div
+            className={cn(
+              "absolute left-1/2 -translate-x-1/2",
+              props.touch ? "bottom-52" : "bottom-40",
+            )}
+          >
+            <Ship hud={h} />
+          </div>
           <Banner hud={h} />
+          <Alarm hud={h} />
+          <div
+            className={cn(
+              "absolute left-1/2 -translate-x-1/2",
+              props.touch ? "bottom-44" : "bottom-28",
+            )}
+          >
+            <Placing hud={h} />
+          </div>
           {/* Phones have no hints column: what the action button does sits over the belt. */}
           {props.touch && h.prompt && (
             <div className="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">

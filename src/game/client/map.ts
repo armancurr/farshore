@@ -1,3 +1,4 @@
+import type { Team } from "../shared/catalogue";
 import { GRAND_SIZE } from "../shared/constants";
 import type { IslandInfo } from "../shared/islands";
 
@@ -76,7 +77,12 @@ export function islandImage(heights: Float32Array, n: number, size = IMAGE) {
   return canvas;
 }
 
-export type MapIsland = { info: IslandInfo; image: HTMLCanvasElement };
+/*
+ * A plot's raid standing, for the map: its colours, the seconds left on its
+ * shield (0: none), who took its Hearth, and whether raiders are on it now.
+ */
+export type MapRaid = { team: Team; shield: number; captor: string | null; attacked: boolean };
+export type MapIsland = { info: IslandInfo; image: HTMLCanvasElement; raid?: MapRaid };
 export type MapPlayer = {
   id: number;
   name: string;
@@ -84,7 +90,26 @@ export type MapPlayer = {
   z: number;
   yaw: number;
   me: boolean;
+  /* Raiding someone's land: drawn red. */
+  raider?: boolean;
 };
+
+/* The team colours as the map draws them. */
+export const TEAM_COLOR: Record<Team, string> = {
+  blue: "#5b9cf0",
+  red: "#ef5b50",
+  yellow: "#f4cd4f",
+  green: "#67c972",
+};
+
+/* A long span of time, as a person would say it: "7h 12m", "12m", "40s". */
+export function span(seconds: number) {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  return m ? `${m}m` : `${s}s`;
+}
 
 export type MapView = {
   islands: MapIsland[];
@@ -125,6 +150,8 @@ export function toWorld(f: MapFrame, px: number, py: number) {
 const LABEL = `700 13px Almarai, sans-serif`;
 
 const SEA = "#48b3af";
+/* Your own land, picked out on the map. */
+const MINE = "#ffd27a";
 
 /* Draw the whole grand map: the sea, every island, and everyone on it. */
 export function drawMap(ctx: CanvasRenderingContext2D, f: MapFrame, view: MapView, dpr: number) {
@@ -150,24 +177,94 @@ export function drawMap(ctx: CanvasRenderingContext2D, f: MapFrame, view: MapVie
   for (const o of view.islands) draw(o.image, o.info);
   ctx.restore();
 
+  /*
+   * Plots: a shield is a pale bubble over the land, a raid a red ring
+   * pulsing out from it, and the Hearth a dot in the plot's colours (the
+   * captor's while a raid's shield lasts). Your own gets a ring round it,
+   * so it can be found at a glance.
+   */
+  const now = performance.now() / 1000;
+  for (const o of view.islands) {
+    const p = toCanvas(f, o.info.x, o.info.z);
+    const r = Math.max(7, tileOf(o.info) * 0.5);
+    const raid = o.raid;
+    if (raid && raid.shield > 0) {
+      ctx.save();
+      ctx.fillStyle = "rgba(190,240,255,0.22)";
+      ctx.strokeStyle = "rgba(220,250,255,0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 0.9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (raid?.attacked) {
+      for (const k of [0, 0.5]) {
+        const ph = (now * 0.8 + k) % 1;
+        ctx.strokeStyle = `rgba(255,74,61,${(1 - ph) * 0.95})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r * (0.7 + ph * 0.9), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    if (o.info.plot?.mine) {
+      ctx.strokeStyle = MINE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (raid) {
+      ctx.fillStyle = TEAM_COLOR[raid.team];
+      ctx.strokeStyle = "rgba(0,0,0,0.8)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
   ctx.font = LABEL;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.lineJoin = "round";
   for (const o of view.islands) {
     const p = toCanvas(f, o.info.x, o.info.z);
-    const y = p.y + tileOf(o.info) * 0.36;
+    const plot = o.info.plot;
+    /* Plots go by their owner's name, a little below the land so a small one isn't covered. */
+    const y = p.y + (plot ? Math.max(9, tileOf(o.info) * 0.5) : tileOf(o.info) * 0.36);
+    const label = plot ? (plot.mine ? `${plot.owner} (you)` : plot.owner) : o.info.name;
     ctx.lineWidth = 4;
     ctx.strokeStyle = "rgba(0,0,0,0.85)";
-    ctx.strokeText(o.info.name, p.x, y);
-    ctx.fillStyle = o.info.harbor ? "#ffffff" : "#d8d8e6";
-    ctx.fillText(o.info.name, p.x, y);
+    ctx.strokeText(label, p.x, y);
+    ctx.fillStyle = plot?.mine ? MINE : o.info.harbor ? "#ffffff" : "#d8d8e6";
+    ctx.fillText(label, p.x, y);
+    /* Under a plot's name: a raid going on, or how long its shield has left. */
+    const raid = o.raid;
+    const note = raid?.attacked
+      ? "Under attack"
+      : raid && raid.shield > 0
+        ? `${raid.captor ? `Taken by ${raid.captor} · ` : ""}Shield ${span(raid.shield)}`
+        : null;
+    if (note) {
+      ctx.save();
+      ctx.font = `700 11px Almarai, sans-serif`;
+      ctx.lineWidth = 3;
+      ctx.strokeText(note, p.x, y + 15);
+      ctx.fillStyle = raid?.attacked ? "#ff7a6e" : "#c9f3ff";
+      ctx.fillText(note, p.x, y + 15);
+      ctx.restore();
+    }
   }
 
   /* Everyone out there: a dot, and an arrow for you. */
   for (const pl of view.players) {
     const p = toCanvas(f, pl.x, pl.z);
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = pl.raider ? "#ff4a3d" : "#ffffff";
     ctx.strokeStyle = "#000000";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -185,11 +282,46 @@ export function drawMap(ctx: CanvasRenderingContext2D, f: MapFrame, view: MapVie
       ctx.stroke();
       ctx.restore();
     } else {
-      ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, pl.raider ? 4.5 : 3.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
   }
+}
+
+/*
+ * Where a plot would go, while you choose a spot for it: the land it could
+ * take (filled), the open sea it needs round it (dashed), and its tile;
+ * green when the spot will do, red when it won't.
+ */
+export function drawGhost(
+  ctx: CanvasRenderingContext2D,
+  f: MapFrame,
+  g: { x: number; z: number; size: number; reach: number; gap: number; ok: boolean },
+) {
+  const p = toCanvas(f, g.x, g.z);
+  const k = f.size / GRAND_SIZE;
+  const color = g.ok ? "#7ee2a1" : "#ff7a6e";
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = color;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, Math.max(10, (g.reach + g.gap) * k), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([2, 3]);
+  const tile = Math.max(8, g.size * k);
+  ctx.strokeRect(p.x - tile / 2, p.y - tile / 2, tile, tile);
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, Math.max(4, g.reach * k), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
 }
 
 /*

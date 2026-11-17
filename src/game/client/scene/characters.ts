@@ -119,11 +119,36 @@ export type ClipHalves = { lower: THREE.AnimationClip; upper: THREE.AnimationCli
 
 let clips: Promise<Map<string, ClipHalves>> | null = null;
 
+/*
+ * More of the rig's clips, from the pack's own sets: drawing and loosing a
+ * bow, a crossbow's shot, and a throw. Only the ones named are kept.
+ */
+const EXTRA_ANIMS: [string, readonly string[]][] = [
+  [
+    "/models/anims/combat-ranged.glb",
+    [
+      "Ranged_Bow_Draw",
+      "Ranged_Bow_Release",
+      "Ranged_Bow_Idle",
+      "Ranged_Bow_Aiming_Idle",
+      "Ranged_2H_Aiming",
+      "Ranged_2H_Shoot",
+    ],
+  ],
+  ["/models/anims/general.glb", ["Throw"]],
+];
+
 export function playerClips(): Promise<Map<string, ClipHalves>> {
   if (!clips) {
-    clips = loadModel(PLAYER_ANIMS).then((gltf) => {
+    const extras = EXTRA_ANIMS.map(([url, names]) =>
+      loadModel(url).then(
+        (gltf) => gltf.animations.filter((a) => names.includes(a.name)),
+        () => [] as THREE.AnimationClip[],
+      ),
+    );
+    clips = Promise.all([loadModel(PLAYER_ANIMS), ...extras]).then(([gltf, ...more]) => {
       const out = new Map<string, ClipHalves>();
-      for (const clip of gltf.animations) {
+      for (const clip of [...gltf.animations, ...more.flat()]) {
         const lower = clip.tracks.filter((t) => LOWER.has(t.name.split(".")[0]));
         const upper = clip.tracks.filter((t) => !LOWER.has(t.name.split(".")[0]));
         out.set(clip.name, {

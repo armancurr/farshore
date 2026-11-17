@@ -38,6 +38,11 @@ type ModelDef = {
   stride?: number;
   /* Lift a model whose feet don't reach its own floor. */
   lift?: number;
+  /*
+   * Repaint swatches of the model's palette texture (a strip of equal
+   * swatches, left to right) as [r, g, b]: one model, a different animal.
+   */
+  paint?: { swatches: number; colors: Record<number, readonly [number, number, number]> };
 };
 
 const Q = "/models/animals/";
@@ -52,9 +57,46 @@ export const ANIMAL_MODELS: Record<SpeciesId, ModelDef> = {
   goat: { url: `${Q}goat.glb`, height: 1.15, stride: 2.2 },
   ram: { url: `${Q}ram.glb`, height: 1.25, stride: 2.2 },
   boar: { url: `${Q}boar.glb`, height: 1, stride: 2.2 },
-  bull: { url: `${Q}bull.glb`, height: 1.75 },
-  wolf: { url: `${Q}wolf.glb`, height: 1.05 },
+  bull: { url: `${Q}bull.glb`, height: 2.2 },
+  wolf: { url: `${Q}wolf.glb`, height: 1.4 },
+  /* The bull's model in a cow's coat: warm brown hide, a pale muzzle. */
+  cow: {
+    url: `${Q}bull.glb`,
+    height: 1.95,
+    paint: {
+      swatches: 8,
+      colors: {
+        0: [132, 84, 50],
+        1: [222, 205, 180],
+      },
+    },
+  },
 };
+
+/* A copy of `tex` with some of its swatches repainted. */
+function repaint(tex: THREE.Texture, paint: NonNullable<ModelDef["paint"]>) {
+  const img = tex.image as CanvasImageSource & { width: number; height: number };
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return tex;
+  ctx.drawImage(img, 0, 0);
+  const w = canvas.width / paint.swatches;
+  for (const [i, [r, g, b]] of Object.entries(paint.colors)) {
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(Math.round(Number(i) * w), 0, Math.round(w), canvas.height);
+  }
+  const out = new THREE.CanvasTexture(canvas);
+  out.flipY = tex.flipY;
+  out.colorSpace = tex.colorSpace;
+  out.magFilter = tex.magFilter;
+  out.minFilter = tex.minFilter;
+  out.wrapS = tex.wrapS;
+  out.wrapT = tex.wrapT;
+  out.generateMipmaps = tex.generateMipmaps;
+  return out;
+}
 
 /* A loaded pack model, ready to copy: its scene at the right size, and its clips by part. */
 type Template = {
@@ -106,7 +148,7 @@ export class HerdView {
   readonly group = new THREE.Group();
   private shown = new Map<number, Shown>();
   private stamp = 0;
-  /* By model file: an alpha may wear its own. */
+  /* By model file (an alpha may wear its own), or by species for a repainted one. */
   private templates = new Map<string, Template | "loading" | "failed">();
   private frame = 0;
 
@@ -118,14 +160,39 @@ export class HerdView {
   private template(species: SpeciesId, alpha: boolean): Template | null {
     const def = ANIMAL_MODELS[species];
     const url = alpha && def.alphaUrl ? def.alphaUrl : def.url;
-    const have = this.templates.get(url);
+    const key = def.paint ? `${url}#${species}` : url;
+    const have = this.templates.get(key);
     if (have === "loading" || have === "failed") return null;
     if (have) return have;
-    this.templates.set(url, "loading");
+    this.templates.set(key, "loading");
     loadModel(url).then(
       (gltf) => {
-        const scene = gltf.scene;
+        /* The loader may share a file's scene between callers: a repaint works on its own copy. */
+        const scene = def.paint ? cloneSkinned(gltf.scene) : gltf.scene;
+        /* The plain one may already have been sized and turned in place: start the copy afresh. */
+        if (def.paint) {
+          scene.position.set(0, 0, 0);
+          scene.rotation.set(0, 0, 0);
+          scene.scale.set(1, 1, 1);
+        }
         flatten(scene);
+        if (def.paint) {
+          const paint = def.paint;
+          scene.traverse((o) => {
+            const mesh = o as THREE.Mesh;
+            if (!mesh.isMesh) return;
+            const swap = (m: THREE.Material) => {
+              const mat = m as THREE.MeshLambertMaterial;
+              if (!mat.map) return m;
+              const copy = mat.clone();
+              copy.map = repaint(mat.map, paint);
+              return copy;
+            };
+            mesh.material = Array.isArray(mesh.material)
+              ? mesh.material.map(swap)
+              : swap(mesh.material);
+          });
+        }
         scene.traverse((o) => {
           o.frustumCulled = false;
         });
@@ -144,9 +211,9 @@ export class HerdView {
           const c = pickClip(gltf.animations, CLIPS[name]);
           if (c) clips[name] = c;
         }
-        this.templates.set(url, { scene: holder, clips, stride: def.stride ?? 1 });
+        this.templates.set(key, { scene: holder, clips, stride: def.stride ?? 1 });
       },
-      () => this.templates.set(url, "failed"),
+      () => this.templates.set(key, "failed"),
     );
     return null;
   }

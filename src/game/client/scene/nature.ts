@@ -228,7 +228,8 @@ export class Nature {
         models: ["forest/bush-1-e", "forest/bush-1-f", "forest/bush-1-g", "forest/bush-3-a"],
         palette: LEAF_PALETTE.peach,
         want: (x, z) => f.meadow(x, z) * (1 - f.forest(x, z)),
-        per: t.harbor || t.biome === "meadow" ? 3 : 1.2,
+        /* None on a plot: it's left as open grass to build on. */
+        per: t.plot ? 0 : t.harbor || t.biome === "meadow" ? 3 : 1.2,
         clump: [2, 4, 2.5],
         scale: [1.5, 2.6],
         range: 260,

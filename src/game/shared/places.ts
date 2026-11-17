@@ -1,4 +1,4 @@
-import type { BiomeId } from "./islands";
+import type { FloraKind } from "./flora";
 import { mulberry32, range, type Rng } from "./math";
 import { MODEL_BOUNDS, type ModelId } from "./models.gen";
 
@@ -26,7 +26,8 @@ export type PlaceKind =
   | "stones"
   | "paddock"
   | "market"
-  | "dock";
+  | "dock"
+  | "hearth";
 
 /* One model set down at a place. `solid` gives it collision; `stand` lets you climb on it. */
 export type PlacedModel = {
@@ -42,6 +43,8 @@ export type PlacedModel = {
   sink?: number;
   /* Stands on the water rather than the ground. */
   float?: boolean;
+  /* Stands this high over the place's ground (on a plinth, say) rather than on the ground. */
+  lift?: number;
 };
 
 export type Place = {
@@ -67,7 +70,16 @@ export interface PlaceGround {
   normalAt(x: number, z: number): [number, number, number];
 }
 
-type Item = [ModelId, number, number, number?, number?, ("solid" | "stand" | "deco")?];
+type Item = [
+  ModelId,
+  number,
+  number,
+  number?,
+  number?,
+  ("solid" | "stand" | "deco")?,
+  /* How high over the ground it stands. */
+  number?,
+];
 
 /*
  * Recipes, in the place's own frame: +z is its front. Each item is
@@ -266,6 +278,19 @@ const RECIPES: Record<PlaceKind, (rng: Rng) => Item[]> = {
     out.push(["town/banner-red", 0, -7.4, 0, T, "deco"]);
     return out;
   },
+
+  /*
+   * The Hearth on a plot: the fire burns on top of the stone plinth
+   * (structures.ts HEARTH, a metre high), the owner's flag flies behind it
+   * and two lanterns light the way in.
+   */
+  hearth: () => [
+    ["camp/campfire-pit", 0, 0, 0, 4.6, "deco", 1],
+    ["camp/campfire-stand", 0, 0, 0.3, C, "deco", 1],
+    ["coast/flag-high", -0.6, -4.6, 0, 1.6, "solid"],
+    ["town/lantern", -3.6, 3.4, 0, 1.6, "solid"],
+    ["town/lantern", 3.6, 3.4, 0, 1.6, "solid"],
+  ],
 };
 
 /* How much flat ground each place needs, and whether it sits on the shore. */
@@ -280,16 +305,19 @@ const NEEDS: Record<PlaceKind, { r: number; shore?: boolean; high?: boolean }> =
   landing: { r: 5, shore: true },
   dock: { r: 5, shore: true },
   market: { r: 12 },
+  hearth: { r: 8 },
 };
 
 /* What each kind of island has, in the order they're placed (the landing first: it's where you arrive). */
-const PLAN: Record<"harbor" | BiomeId, PlaceKind[]> = {
+const PLAN: Record<FloraKind, PlaceKind[]> = {
   harbor: ["dock", "dock", "dock", "camp", "paddock", "camp"],
   meadow: ["landing", "camp", "paddock", "stones", "ruin", "lookout", "camp"],
   pinewood: ["landing", "camp", "woodcut", "woodcut", "lookout", "ruin"],
   ridge: ["landing", "camp", "lookout", "lookout", "ruin", "stones"],
   marsh: ["landing", "wreck", "camp", "stones", "ruin", "woodcut"],
   fells: ["landing", "camp", "lookout", "ruin", "stones", "woodcut", "wreck"],
+  /* A plot has only its Hearth, at its very middle (see below). */
+  plot: [],
 };
 
 const TAU = Math.PI * 2;
@@ -302,7 +330,7 @@ const TAU = Math.PI * 2;
 export function planPlaces(
   ground: PlaceGround,
   seed: number,
-  kind: "harbor" | BiomeId,
+  kind: FloraKind,
   taken: { x: number; z: number; r: number }[],
   opts: { toward: number; lighthouse?: { x: number; z: number } },
 ): Place[] {
@@ -326,6 +354,13 @@ export function planPlaces(
       }
     return { lo, hi, mid: ground.heightAt(x, z) };
   };
+
+  if (kind === "plot") {
+    /* The Hearth stands in the middle of the plot, its front toward the Harbor. */
+    const hearth = make("hearth", 0, 0, ground.heightAt(0, 0), faceAway(opts.toward), rng);
+    taken.push({ x: 0, z: 0, r: hearth.r });
+    return [hearth];
+  }
 
   if (kind === "harbor" && opts.lighthouse) {
     /* The market fills the square in front of the lighthouse, facing the main quay. */
@@ -411,7 +446,7 @@ function make(kind: PlaceKind, x: number, z: number, y: number, rot: number, rng
   const c = Math.cos(rot);
   const s = Math.sin(rot);
   const models: PlacedModel[] = RECIPES[kind](rng).map(
-    ([model, lx, lz, r = 0, scale = 1, col = "solid"]) => ({
+    ([model, lx, lz, r = 0, scale = 1, col = "solid", lift]) => ({
       model,
       /* Local (lx, lz) turned by rot about +y, as three.js turns things. */
       x: x + lx * c + lz * s,
@@ -421,6 +456,7 @@ function make(kind: PlaceKind, x: number, z: number, y: number, rot: number, rng
       scale,
       solid: col !== "deco",
       stand: col === "stand",
+      lift,
     }),
   );
   const shore = NEEDS[kind].shore;

@@ -8,6 +8,9 @@ import type { BiomeId } from "./islands";
  *   prey      grazes, and bolts from anyone who comes too close or runs at it.
  *   defender  grazes, but squares up and charges anyone who crowds or hits it.
  *   predator  stalks anyone it notices, closes in and bites, and backs off hurt.
+ *
+ * Most keep together (see GROUP): a herd drifts after its leader and bolts as
+ * one, and a pack hunts as one, fanning out round whoever it's after.
  */
 
 export const SPECIES_IDS = [
@@ -23,6 +26,8 @@ export const SPECIES_IDS = [
   "boar",
   "bull",
   "wolf",
+  /* Added after the rest: the room sends a species as its place in this list. */
+  "cow",
 ] as const;
 
 export type SpeciesId = (typeof SPECIES_IDS)[number];
@@ -224,12 +229,12 @@ export const SPECIES: Record<SpeciesId, SpeciesDef> = {
     run: 9,
     notice: 9,
     noticeRunning: 14,
-    radius: 0.95,
+    radius: 1.15,
     damage: 24,
     reach: 2,
     cooldown: 0,
     value: 80,
-    note: "Leave it be and it leaves you be. Mostly.",
+    note: "Leave it be and it leaves you be. Mostly. Trouble its herd and it comes for you.",
   },
   wolf: {
     name: "Wolf",
@@ -240,21 +245,37 @@ export const SPECIES: Record<SpeciesId, SpeciesDef> = {
     run: 8.8,
     notice: 22,
     noticeRunning: 30,
-    radius: 0.55,
+    radius: 0.7,
     damage: 10,
-    reach: 1.6,
+    reach: 1.8,
     cooldown: 1.3,
     value: 55,
     note: "Hunts in packs, and it will come for you.",
+  },
+  cow: {
+    name: "Wild cow",
+    plural: "wild cows",
+    role: "prey",
+    health: 70,
+    walk: 1,
+    run: 7.4,
+    notice: 7,
+    noticeRunning: 15,
+    radius: 1,
+    damage: 0,
+    reach: 0,
+    cooldown: 0,
+    value: 42,
+    note: "Grazes in herds, and the whole herd stampedes at once. A bull keeps watch.",
   },
 };
 
 /* What each hunting island holds: species and how many of each. */
 export const BIOME_HERDS: Record<BiomeId, Partial<Record<SpeciesId, number>>> = {
-  meadow: { deer: 18, rabbit: 20, alpaca: 14, horse: 10, fox: 6 },
+  meadow: { deer: 18, rabbit: 20, alpaca: 14, horse: 10, fox: 6, cow: 16, bull: 3 },
   pinewood: { stag: 12, deer: 14, fox: 8, wolf: 10, boar: 12, rabbit: 8 },
   ridge: { wolf: 14, stag: 8, goat: 14, rabbit: 10 },
-  marsh: { boar: 16, donkey: 12, bull: 8, fox: 6, deer: 8 },
+  marsh: { boar: 16, donkey: 12, cow: 14, bull: 8, fox: 6, deer: 8 },
   fells: { ram: 14, goat: 14, bull: 8, wolf: 10 },
 };
 
@@ -278,7 +299,15 @@ export const GROUP: Record<SpeciesId, [number, number]> = {
   boar: [2, 5],
   bull: [1, 3],
   wolf: [3, 5],
+  cow: [5, 8],
 };
+
+/*
+ * Herds that keep a guard of another kind: every herd of cows has a bull
+ * with it (taken from the island's bulls), who comes for anyone who troubles
+ * them. Bulls left over roam on their own.
+ */
+export const GUARDED_BY: Partial<Record<SpeciesId, SpeciesId>> = { cow: "bull" };
 
 /* The beasts the Guild Board puts a price on: one per island. */
 export type AlphaDef = { species: SpeciesId; name: string; biome: BiomeId; reward: number };

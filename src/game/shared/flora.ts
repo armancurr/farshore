@@ -12,7 +12,8 @@ import { createNoise2D, fbm, mulberry32, smoothstep } from "./math";
  * Coordinates are local to the island (its centre at 0, 0), in metres.
  */
 
-export type FloraKind = "harbor" | BiomeId;
+/* The kinds of island: the Harbor, the hunting islands' biomes, and a bought plot. */
+export type FloraKind = "harbor" | BiomeId | "plot";
 
 export type FloraDef = {
   /* How much of the land is forest (0..1), and trees per 1000 m² in it and out of it. */
@@ -78,6 +79,17 @@ export const FLORA: Record<FloraKind, FloraDef> = {
     stone: 0.12,
     rocks: 3,
     strays: 0.1,
+  },
+  /* A plot is bare: grass, no trees, no stones (it gets a few of its own on the beach). */
+  plot: {
+    forest: 0,
+    dense: 0,
+    sparse: 0,
+    meadow: 0.7,
+    grass: 150,
+    stone: 0,
+    rocks: 0,
+    strays: 0,
   },
   fells: {
     forest: 0.28,

@@ -1,6 +1,6 @@
 import { BASE_TILE, ISLAND_RADIUS, STEP_HEIGHT } from "./constants";
 import { FEATURES } from "./features";
-import { type Flora, floraFor } from "./flora";
+import { type Flora, type FloraKind, floraFor } from "./flora";
 import { type BiomeId, gridOf, type IslandInfo, islandHeights, type ShapeId } from "./islands";
 import { angleTo, clamp, mulberry32, range, type Rng, smoothstep } from "./math";
 import type { ModelId } from "./models.gen";
@@ -9,6 +9,7 @@ import { type PathPoint, pathDistance, planPaths } from "./paths";
 import { modelExtent, type Place, planPlaces } from "./places";
 import {
   type Block,
+  hearthStructure,
   type Ladder,
   LIGHTHOUSE,
   type Perch,
@@ -168,27 +169,34 @@ export class Terrain implements Ground {
   lighthouse: Spot = { x: 0, y: 0, z: 0 };
   /* Where a new arrival wakes up: a flat, open patch near the middle of the island. */
   home: Spot & { yaw: number } = { x: 0, y: 0, z: 0, yaw: 0 };
-  /* The Guild Board on the lantern deck, and the keeper's stall beside the lighthouse door. */
+  /* The Guild Board on the lantern deck. */
   board: Site = { x: 0, y: 0, z: 0, rot: 0 };
-  shop: Site = { x: 0, y: 0, z: 0, rot: 0 };
   peak = 0;
   private taken: { x: number; z: number; r: number }[] = [];
   private buckets: Solid[][] = [];
   private bucketsPerSide: number;
-  /* Solids added after generation (placed prefabs), by owner key. */
+  /* Solids added after generation (vehicles), by owner key. */
   private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
 
   /* The Harbor: the lighthouse at its centre, whatever the features say. */
   readonly harbor: boolean;
+  /* Someone's plot: bare land with the Hearth at its middle, and nothing else built. */
+  readonly plot: boolean;
+  /* The Hearth's fire, on a plot. */
+  hearth: Spot | null = null;
 
   constructor(
-    info: Pick<IslandInfo, "seed" | "shape" | "x" | "z" | "size" | "cell" | "lift" | "harbor"> & {
+    info: Pick<
+      IslandInfo,
+      "seed" | "shape" | "x" | "z" | "size" | "cell" | "lift" | "harbor" | "plot"
+    > & {
       biome?: BiomeId;
     },
   ) {
     this.seed = info.seed >>> 0;
     this.shape = info.shape;
     this.harbor = !!info.harbor;
+    this.plot = !!info.plot;
     this.biome = info.biome ?? null;
     this.size = info.size;
     this.grid = gridOf(info);
@@ -196,17 +204,23 @@ export class Terrain implements Ground {
     this.half = this.size / 2;
     this.radius = ISLAND_RADIUS * (this.size / BASE_TILE);
     this.bucketsPerSide = Math.ceil(this.size / BUCKET);
-    this.flora = floraFor(this.seed, this.harbor ? "harbor" : (this.biome ?? "meadow"), this.size);
-    this.heights = islandHeights(info.shape, this.seed, this.grid, info.lift);
+    this.flora = floraFor(this.seed, this.kind, this.size);
+    this.heights = islandHeights(info.shape, this.seed, this.grid, info.lift, this.size);
     this.raiseLighthouse();
-    this.raiseStructures();
+    if (!this.plot) this.raiseStructures();
     /* Where the Harbor is from here: the landing faces it. The Harbor's main quay faces north. */
     const toward = this.harbor ? -Math.PI / 2 : Math.atan2(-info.z, -info.x);
     this.layPlaces(toward);
+    if (this.plot) this.raiseHearth();
     this.scatterProps();
     this.findHome();
     this.moveTo(info.x, info.z);
     this.indexSolids();
+  }
+
+  /* What sort of island this is, for what grows and what's built on it. */
+  get kind(): FloraKind {
+    return this.harbor ? "harbor" : this.plot ? "plot" : (this.biome ?? "meadow");
   }
 
   /* Is (x, z) on this island's tile? */
@@ -255,14 +269,15 @@ export class Terrain implements Ground {
     at(this.lighthouse);
     at(this.home);
     at(this.board);
-    at(this.shop);
+    if (this.hearth) at(this.hearth);
   }
 
   /* Level a pad for the lighthouse: at the Harbor's very centre, or on another island's summit. */
   private raiseLighthouse() {
     const g = this.grid;
     let best = 0;
-    if (this.harbor) best = Math.floor(g / 2) * g + Math.floor(g / 2);
+    /* The Harbor's is at its centre; a plot keeps its centre for the Hearth. */
+    if (this.harbor || this.plot) best = Math.floor(g / 2) * g + Math.floor(g / 2);
     else
       for (let k = 1; k < this.heights.length; k++)
         if (this.heights[k] > this.heights[best]) best = k;
@@ -270,7 +285,7 @@ export class Terrain implements Ground {
     const z = this.oz - this.half + Math.floor(best / g) * this.cell;
     const top = this.heights[best];
 
-    if (FEATURES.lighthouse || this.harbor)
+    if ((FEATURES.lighthouse && !this.plot) || this.harbor)
       this.levelPad(x, z, LIGHTHOUSE.plinthRadius - 1, LIGHTHOUSE.plinthRadius + 5, top);
 
     this.lighthouse = { x, y: top, z };
@@ -316,17 +331,11 @@ export class Terrain implements Ground {
 
   /*
    * The Guild Board stands on the lantern deck at the very top, across from
-   * the ladder, facing whoever climbs up. The stall stands on the plinth
-   * beside the door, facing out. A site's front (local +z) faces its visitors.
+   * the ladder, facing whoever climbs up. A site's front (local +z) faces
+   * its visitors.
    */
   private furnishPlinth(st: Structure) {
     const base = st.y + LIGHTHOUSE.plinthHeight;
-    const site = (a: number): Site => ({
-      x: st.x + Math.cos(a) * 5.05,
-      y: base,
-      z: st.z + Math.sin(a) * 5.05,
-      rot: Math.PI / 2 - a,
-    });
     const deck = base + LIGHTHOUSE.towerHeight;
     const lad = st.ladders[st.ladders.length - 1];
     const toLadder = lad ? Math.atan2(lad.z - st.z, lad.x - st.x) : st.rot;
@@ -336,7 +345,6 @@ export class Terrain implements Ground {
       z: st.z - Math.sin(toLadder) * 1.15,
       rot: Math.atan2(Math.cos(toLadder), Math.sin(toLadder)),
     };
-    this.shop = site(st.rot - 0.78);
     const B = st.blocks;
     const block = (
       s: Site,
@@ -410,47 +418,6 @@ export class Terrain implements Ground {
         );
       st.lamps.push({ x: b.x, y: top + 2.2, z: b.z });
     }
-    if (FEATURES.shop) {
-      /* Stall: a counter, two posts holding up an awning, a crate beside it. */
-      const s = this.shop;
-      B.push(
-        block(s, 0, 0.05, { bottom: base, top: base + 1.05, hx: 1.0, hz: 0.38, standable: true }),
-      );
-      B.push(
-        block(s, 0, 0.05, {
-          bottom: base + 1.05,
-          top: base + 1.12,
-          hx: 1.08,
-          hz: 0.45,
-          tone: "dark",
-          standable: true,
-        }),
-      );
-      for (const side of [-1, 1])
-        B.push(
-          block(s, side * 0.95, -0.25, {
-            bottom: base,
-            top: base + 2.45,
-            hx: 0.06,
-            hz: 0.06,
-            tone: "dark",
-          }),
-        );
-      B.push(
-        block(s, 0, 0.1, {
-          bottom: base + 2.45,
-          top: base + 2.53,
-          hx: 1.2,
-          hz: 0.75,
-          tone: "light",
-          solid: false,
-        }),
-      );
-      B.push(
-        block(s, 1.45, 0.2, { bottom: base, top: base + 0.6, hx: 0.3, hz: 0.3, standable: true }),
-      );
-      st.lamps.push({ x: s.x, y: base + 2.3, z: s.z });
-    }
   }
 
   /*
@@ -460,7 +427,7 @@ export class Terrain implements Ground {
    * (so a crate sits on the path's cutting, not on the hill that was there).
    */
   private layPlaces(toward: number) {
-    const kind = this.harbor ? "harbor" : (this.biome ?? "meadow");
+    const kind = this.kind;
     const places = planPlaces(this, this.seed, kind, this.taken, {
       toward,
       lighthouse: this.harbor ? this.lighthouse : undefined,
@@ -552,6 +519,8 @@ export class Terrain implements Ground {
         m.y = m.model.includes("boat") ? -0.28 : 0.95 - e.top;
       } else if (m.model === "ships/ship-wreck") {
         m.y = this.heightAt(m.x, m.z) - 1.4;
+      } else if (m.lift !== undefined) {
+        m.y = pl.y + m.lift;
       } else {
         m.y = this.heightAt(m.x, m.z) - 0.04;
       }
@@ -573,6 +542,19 @@ export class Terrain implements Ground {
         box: { hx, hz, c, s },
       });
     }
+  }
+
+  /*
+   * A plot's Hearth: the stone plinth over the middle of the levelled place,
+   * solid and climbable, with the fire on top (the place's models).
+   */
+  private raiseHearth() {
+    const pl = this.places.find((p) => p.kind === "hearth");
+    if (!pl) return;
+    const st = hearthStructure(pl.x, pl.y, pl.z, pl.rot);
+    this.structures.push(st);
+    for (const b of st.blocks) if (b.solid) this.solids.push(blockSolid(b));
+    this.hearth = { x: pl.x, y: pl.y + st.h, z: pl.z };
   }
 
   /* A tree of a species at a size (1 = full grown): its model, its trunk's collision. */
@@ -684,6 +666,25 @@ export class Terrain implements Ground {
     const taken = this.taken;
     const free = (x: number, z: number, r: number) =>
       taken.every((t) => Math.hypot(t.x - x, t.z - z) > t.r + r);
+
+    /* A plot is left bare for building: only a few stones washed up on its beach. */
+    if (this.plot) {
+      if (!FEATURES.rocks) return;
+      const want = Math.round(this.size / 120);
+      for (let placed = 0, t = 0; placed < want && t < 400; t++) {
+        const a = rng() * Math.PI * 2;
+        const d = Math.sqrt(rng()) * this.half;
+        const x = Math.cos(a) * d;
+        const z = Math.sin(a) * d;
+        const y = this.heightAt(x, z);
+        if (y < 0.3 || y > 1.4 || !free(x, z, 6)) continue;
+        taken.push({ x, z, r: 6 });
+        const model = BOULDERS[Math.floor(rng() * BOULDERS.length)];
+        this.addRock(id++, rng, x, y, z, model, range(rng, 0.7, 1.4));
+        placed++;
+      }
+      return;
+    }
 
     /* Bigger islands get proportionally more of everything. */
     const area = (this.size / BASE_TILE) ** 2;
@@ -1004,13 +1005,13 @@ export class Terrain implements Ground {
     return clamp(Math.floor((z - this.oz + this.half) / BUCKET), 0, this.bucketsPerSide - 1);
   }
 
-  /* The solids a body standing at (x, z) could touch, placed prefabs included. */
+  /* The solids a body standing at (x, z) could touch, vehicles included. */
   solidsNear(x: number, z: number): readonly Solid[] {
     if (!this.buckets.length) return this.solids;
     return this.buckets[this.bucketZ(z) * this.bucketsPerSide + this.bucketX(x)] ?? NO_SOLIDS;
   }
 
-  /* Add collision for something built after generation; `key` removes it again. */
+  /* Add collision for something set down after generation (a vehicle); `key` removes it again. */
   addSolids(key: number, solids: readonly Solid[]) {
     this.removeSolids(key);
     const n = this.bucketsPerSide;
@@ -1046,6 +1047,14 @@ export class Terrain implements Ground {
    * patch that is dry, level, and clear of buildings, rocks and trees.
    */
   private findHome() {
+    /* On a plot you wake in front of the Hearth, facing it. */
+    const pl = this.places.find((p) => p.kind === "hearth");
+    if (this.plot && pl) {
+      const x = pl.x + Math.sin(pl.rot) * (pl.r - 1.5);
+      const z = pl.z + Math.cos(pl.rot) * (pl.r - 1.5);
+      this.home = { x, y: this.heightAt(x, z), z, yaw: angleTo(pl.x - x, pl.z - z) };
+      return;
+    }
     const lh = this.lighthouse;
     const open = (x: number, z: number, r: number) =>
       this.taken.every((t) => Math.hypot(t.x - x, t.z - z) > t.r + r);

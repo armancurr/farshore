@@ -19,6 +19,8 @@ export class Archipelago implements Ground {
   ladders: Ladder[] = [];
   /* Everything built, by key, so an island that arrives later still collides with it. */
   private dynamic = new Map<number, readonly Solid[]>();
+  /* Keys whose solids only ever stand on land (what's built on a plot): not out on the open sea. */
+  private landed = new Set<number>();
   /* The same, all together: what's out on the open sea between the tiles. */
   private loose: Solid[] = [];
   private last: Terrain | null = null;
@@ -37,6 +39,15 @@ export class Archipelago implements Ground {
     this.ladders = [...this.islands.values()].flatMap((o) => o.terrain.ladders);
     for (const [key, solids] of this.dynamic) this.register(terrain, key, solids);
     return island;
+  }
+
+  /* Take an island away again (a plot about to be regrown bigger). */
+  remove(id: number) {
+    const island = this.islands.get(id);
+    if (!island) return;
+    this.islands.delete(id);
+    if (this.last === island.terrain) this.last = null;
+    this.ladders = [...this.islands.values()].flatMap((o) => o.terrain.ladders);
   }
 
   list(): IslandInfo[] {
@@ -86,20 +97,29 @@ export class Archipelago implements Ground {
     return this.loose.length ? this.loose : NONE;
   }
 
-  addSolids(key: number, solids: readonly Solid[]) {
+  /*
+   * Collision for something that moves or was set down. `onLand` keeps it off
+   * the open sea's list (everything out there is checked against every boat),
+   * for things that always stand on an island's tile.
+   */
+  addSolids(key: number, solids: readonly Solid[], onLand = false) {
     this.dynamic.set(key, solids);
+    if (onLand) this.landed.add(key);
+    else this.landed.delete(key);
     for (const { terrain } of this.islands.values()) this.register(terrain, key, solids);
-    this.gather();
+    if (!onLand) this.gather();
   }
 
   removeSolids(key: number) {
     if (!this.dynamic.delete(key)) return;
     for (const { terrain } of this.islands.values()) terrain.removeSolids(key);
-    this.gather();
+    if (!this.landed.delete(key)) this.gather();
   }
 
   private gather() {
-    this.loose = [...this.dynamic.values()].flat();
+    const out: Solid[] = [];
+    for (const [key, solids] of this.dynamic) if (!this.landed.has(key)) out.push(...solids);
+    this.loose = out;
   }
 
   private register(terrain: Terrain, key: number, solids: readonly Solid[]) {

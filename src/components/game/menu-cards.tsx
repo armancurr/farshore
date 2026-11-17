@@ -43,14 +43,18 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Open your pack", ["Tab", "I"]],
   ],
   [
-    ["Build", ["B"]],
-    ["Turn a piece", ["R"]],
-    ["Take a piece back", ["RMB"]],
-  ],
-  [
-    ["Marketplace: skins, weapons, boats", ["K"]],
+    ["Marketplace: skins, weapons, boats, land, crew", ["K"]],
     ["The map", ["N"]],
     ["First or third person", ["V"]],
+  ],
+  [
+    ["Building: turn it", ["R", "Wheel"]],
+    ["Move what you built, or sell it", ["E", "X"]],
+    ["Mend what's been battered or burnt", ["R"]],
+  ],
+  [
+    ["Call your crew, or send them home", ["G"]],
+    ["Your crew hold where you stand", ["H"]],
   ],
   /* Creative is only there while developing. */
   ...(CREATIVE

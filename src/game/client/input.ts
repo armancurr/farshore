@@ -7,13 +7,21 @@ export type Action =
   | "altUp"
   | "interact"
   | "inventory"
-  | "build"
-  | "rotate"
   | "creative"
   /* Creative: take off or come down (the touch button for a double tap of Space). */
   | "fly"
   /* First person or third, behind you. */
-  | "view";
+  | "view"
+  /* Placing something: turn it (Shift for finer steps). */
+  | "rotate"
+  /* Sell the thing of yours you're looking at. */
+  | "sell"
+  /* Pay to mend the thing of yours you're looking at (R, when not turning something). */
+  | "repair"
+  /* G: call your crew to follow you, or send them home. */
+  | "crew"
+  /* H: your crew hold where you stand. */
+  | "hold";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -57,11 +65,15 @@ export class Input {
       if (e.code === "KeyF") this.setAttack(true);
       if (e.code === "KeyE") this.queued.add("interact");
       if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
-      if (e.code === "KeyB") this.queued.add("build");
-      /* ⌘R / Ctrl+R is the reload key, which the island menu catches. */
-      if (e.code === "KeyR" && !e.metaKey && !e.ctrlKey) this.queued.add("rotate");
       if (e.code === "KeyC" && e.shiftKey) this.queued.add("creative");
       if (e.code === "KeyV") this.queued.add("view");
+      if (e.code === "KeyR") {
+        this.queued.add("rotate");
+        this.queued.add("repair");
+      }
+      if (e.code === "KeyX") this.queued.add("sell");
+      if (e.code === "KeyG") this.queued.add("crew");
+      if (e.code === "KeyH") this.queued.add("hold");
       if (e.code === "KeyW" || e.code === "ArrowUp") {
         const now = performance.now();
         this.boostHeld = now - this.lastForwardTap < 300;

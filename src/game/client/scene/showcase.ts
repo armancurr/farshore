@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CATALOGUE, type CatalogueId, piecePalette, type Team } from "../../shared/catalogue";
 import type { SkinId } from "../../shared/skins";
 import { afloat, VEHICLES, type VehicleKind } from "../../shared/vehicles";
 import { gripOf, type WeaponKind } from "../../shared/weapons";
@@ -11,6 +12,7 @@ import {
 } from "./characters";
 import { edges, flatten, inkMaterial, lineMaterial, PALETTE } from "./materials";
 import { measure } from "./models";
+import { packModel } from "./packs";
 import { buildVehicle, disposeBuilt } from "./vehicles";
 import { buildWeapon, WEAPON_SPAN, weaponsReady } from "./weapons";
 
@@ -88,6 +90,8 @@ function displayWeapon(kind: WeaponKind) {
   /* Lift it so the bottom clears the plinth, then lean it a touch. */
   model.position.y = -span.from * scale;
   if (shield) model.rotation.y = Math.PI;
+  /* A bow or a crossbow is stood on end. */
+  if (span.lies) model.rotation.x = -Math.PI / 2;
   /* Knuckledusters lie flat in the hand's frame: tip them up so the rings face out. */
   if (kind === "knuckles") model.rotation.x = -1.2;
   const tilt = new THREE.Group();
@@ -159,6 +163,36 @@ function frameVehicle(camera: THREE.PerspectiveCamera, dist: number, height = 1)
   const mid = Math.min(1.4, height * 0.4);
   camera.position.set(0, mid + dist * 0.38, -dist);
   camera.lookAt(0, mid, 0);
+}
+
+/*
+ * Something from the build shelves, whole, in the owner's colours: scaled
+ * down so a hedge and a keep both fill the view, standing on the plinth.
+ */
+async function displayItem(kind: CatalogueId, team: Team) {
+  const def = CATALOGUE[kind];
+  const model = new THREE.Group();
+  const parts = await Promise.all(def.pieces.map((p) => packModel(p.model, piecePalette(p, team))));
+  def.pieces.forEach((p, k) => {
+    const m = parts[k];
+    m.position.set(p.x, p.y, p.z);
+    m.rotation.y = p.rot;
+    m.scale.setScalar(p.scale);
+    model.add(m);
+  });
+  const box = measure(model);
+  const size = box.getSize(new THREE.Vector3());
+  const k = DISPLAY / Math.max(size.x, size.z, size.y * 1.15);
+  const holder = new THREE.Group();
+  holder.add(model);
+  model.scale.setScalar(k);
+  model.position.y = -box.min.y * k;
+  model.position.x = -((box.min.x + box.max.x) / 2) * k;
+  model.position.z = -((box.min.z + box.max.z) / 2) * k;
+  holder.add(...displayLights());
+  holder.userData.height = size.y * k;
+  holder.userData.item = true;
+  return holder;
 }
 
 /* A vehicle's model shares its pack's geometry and materials: just let go of it. */
@@ -234,6 +268,20 @@ export class Showcase {
     frame(this.camera, 2.3);
   }
 
+  showItem(kind: CatalogueId, team: Team) {
+    this.clear();
+    const shown = ++this.shown;
+    void displayItem(kind, team).then((root) => {
+      if (shown !== this.shown || this.disposed) {
+        root.removeFromParent();
+        return;
+      }
+      this.weapon = root;
+      this.scene.add(root);
+      frameVehicle(this.camera, 7.2, root.userData.height);
+    });
+  }
+
   showVehicle(kind: VehicleKind) {
     this.clear();
     const shown = ++this.shown;
@@ -259,7 +307,10 @@ export class Showcase {
     if (this.weapon) {
       this.scene.remove(this.weapon, this.lights);
       if (this.weapon.userData.built) disposeVehicle(this.weapon);
-      else disposeWeapon(this.weapon);
+      /* Pack models share their geometry: nothing of the item's own to let go of. */ else if (
+        !this.weapon.userData.item
+      )
+        disposeWeapon(this.weapon);
       this.weapon = null;
     }
   }
@@ -391,6 +442,15 @@ function portraitWeapon(kind: WeaponKind) {
   const root = new THREE.Group();
   root.add(model);
   switch (gripOf(kind)) {
+    case "bow":
+      /* Side on, its string toward you, leaning like a blade. */
+      model.rotation.set(0, Math.PI / 2, 0);
+      root.rotation.z = -0.62;
+      break;
+    case "crossbow":
+      /* Three-quarters on, so the bow and the stock both show. */
+      model.rotation.set(0.35, -Math.PI / 2 + 0.6, 0);
+      break;
     case "shield":
       /* Face on, turned a little. */
       model.rotation.y = Math.PI + 0.35;
@@ -487,4 +547,40 @@ export async function vehiclePortraitsOf(
     renderer.forceContextLoss();
   }
   return new Map(kinds.map((k) => [k, vehiclePortraits.get(k) ?? ""]));
+}
+
+/* And everything on the build shelves, in one team's colours. */
+const itemPortraits = new Map<string, string>();
+
+export async function itemPortraitsOf(
+  kinds: readonly CatalogueId[],
+  team: Team,
+  width = 224,
+): Promise<Map<CatalogueId, string>> {
+  const key = (k: CatalogueId) => `${k}|${team}`;
+  const missing = kinds.filter((k) => !itemPortraits.has(key(k)));
+  if (missing.length) {
+    const shown = await Promise.all(missing.map((k) => displayItem(k, team).catch(() => null)));
+    await texturesLoaded(shown.filter((r): r is THREE.Group => r !== null));
+    const canvas = document.createElement("canvas");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(1);
+    renderer.setSize(width, Math.round(width * 1.25), false);
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
+    missing.forEach((kind, i) => {
+      const root = shown[i];
+      if (!root) return;
+      root.rotation.y = 0.6 + Math.PI;
+      frameVehicle(camera, 7.8, root.userData.height);
+      scene.add(root);
+      renderer.render(scene, camera);
+      itemPortraits.set(key(kind), canvas.toDataURL("image/png"));
+      scene.remove(root);
+    });
+    renderer.dispose();
+    renderer.forceContextLoss();
+  }
+  return new Map(kinds.map((k) => [k, itemPortraits.get(key(k)) ?? ""]));
 }
