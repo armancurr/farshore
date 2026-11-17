@@ -7,7 +7,14 @@ import type { Game } from "../../game/client/game";
 import type { Showcase } from "../../game/client/scene/showcase";
 import { SKINS, type SkinId, skinDef } from "../../game/shared/skins";
 import { VEHICLE_KINDS, VEHICLES, type VehicleKind } from "../../game/shared/vehicles";
-import { WEAPON_KINDS, WEAPONS, type WeaponDef, type WeaponKind } from "../../game/shared/weapons";
+import {
+  type Grip,
+  gripOf,
+  WEAPON_KINDS,
+  WEAPONS,
+  type WeaponDef,
+  type WeaponKind,
+} from "../../game/shared/weapons";
 
 type Tab = "skins" | "weapons" | "vehicles";
 
@@ -57,7 +64,9 @@ export function Marketplace(props: {
       else if (now.tab === "weapons") showcase.current.showWeapon(now.eyed);
       else showcase.current.showVehicle(now.ride);
       setPortraits(mod.portraitsOf(SKINS.map((s) => s.id)));
-      setWeaponPortraits(mod.weaponPortraitsOf(WEAPON_KINDS));
+      void mod.weaponPortraitsOf(WEAPON_KINDS).then((p) => {
+        if (!disposed) setWeaponPortraits(p);
+      });
       setVehiclePortraits(mod.vehiclePortraitsOf(VEHICLE_KINDS));
     });
     return () => {
@@ -169,7 +178,7 @@ export function Marketplace(props: {
           <div className="flex items-end justify-between gap-4 px-5 pb-5 sm:px-6 sm:pb-6">
             <div className="flex min-w-0 flex-col gap-2">
               <h3 className="truncate font-sans text-3xl leading-none font-extrabold">{name}</h3>
-              {tab === "weapons" && <WeaponStats def={weapon} />}
+              {tab === "weapons" && <WeaponStats def={weapon} grip={gripOf(eyed)} />}
               {tab === "vehicles" && (
                 <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
                   {vehicle.hint}
@@ -276,15 +285,27 @@ function pace(cooldown: number) {
   return "Very slow";
 }
 
-/* What a weapon does: damage, reach and pace, then what makes it different. */
-function WeaponStats(props: { def: WeaponDef }) {
+/* How it's held, in words. */
+const HELD: Record<Grip, string> = {
+  unarmed: "Bare hands",
+  "1h": "One hand",
+  "2h": "Two hands",
+  dual: "A pair",
+  polearm: "Two hands",
+  shield: "Left arm",
+};
+
+/* What a weapon does: how it's held, damage, reach and pace, then what makes it different. */
+function WeaponStats(props: { def: WeaponDef; grip: Grip }) {
   const d = props.def;
   const damage = d.charged ? `${d.damage}–${d.charged}` : `${d.damage}`;
   const special = d.hint.split(" · ").slice(1).join(" · ");
   return (
     <div className="flex flex-col gap-1.5">
       <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label="Damage" value={damage} />
+        <Stat label="Held" value={HELD[props.grip]} />
+        {/* A shield's blow is its bash. */}
+        <Stat label={d.guard ? "Bash" : "Damage"} value={damage} />
         <Stat label="Reach" value={`${d.reach} m`} />
         <Stat label="Pace" value={pace(d.cooldown)} />
       </dl>

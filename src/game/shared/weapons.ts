@@ -6,36 +6,71 @@
 
 export type WeaponKind =
   | "daggers"
-  | "sickle"
-  | "machete"
-  | "boardaxe"
+  | "knuckles"
+  | "cutlass"
+  | "beardaxe"
+  | "mallet"
+  | "morningstar"
   | "spear"
-  | "trident"
-  | "mace"
   | "halberd"
   | "axe"
   | "greatsword"
   | "hammer"
-  | "shield";
+  | "shield"
+  | "kite"
+  | "spiked";
 
-/* In marketplace order: quick and light first, then the heavy hitters, then the shield. */
+/*
+ * In marketplace order: quick and light first, then the long reach, then the
+ * heavy hitters, then the shields. The snapshot sends a weapon as its place in
+ * this list, so client and server must share it (they do: it lives here).
+ */
 export const WEAPON_KINDS: readonly WeaponKind[] = [
   "daggers",
-  "sickle",
-  "machete",
-  "boardaxe",
+  "knuckles",
+  "cutlass",
+  "beardaxe",
+  "mallet",
+  "morningstar",
   "spear",
-  "trident",
-  "mace",
   "halberd",
   "axe",
   "greatsword",
   "hammer",
   "shield",
+  "kite",
+  "spiked",
 ];
 
 export const isWeaponKind = (v: unknown): v is WeaponKind =>
   typeof v === "string" && (WEAPON_KINDS as readonly string[]).includes(v);
+
+/*
+ * Weapons that were retired when the armory moved to real models, and what
+ * each became: the nearest thing still on the shelf, so nobody's save or
+ * remembered choice loses a weapon.
+ */
+const RETIRED: Record<string, WeaponKind> = {
+  sickle: "cutlass",
+  machete: "cutlass",
+  boardaxe: "beardaxe",
+  trident: "spear",
+  mace: "morningstar",
+};
+
+/* A weapon kind from a save, a message or storage: today's kinds as they are, retired ones as their heirs. */
+export function toWeaponKind(v: unknown): WeaponKind | null {
+  if (isWeaponKind(v)) return v;
+  return typeof v === "string" && Object.hasOwn(RETIRED, v) ? RETIRED[v] : null;
+}
+
+/*
+ * How a shield holds a blow. `cover` is how far round it guards (the cosine of
+ * the angle off straight ahead it still catches), `leak` the share of a blow
+ * that gets through anyway, `parry` how soon after raising it a block parries.
+ * `firm` holds even against weapons that sunder; `thorns` hurts whoever hits it.
+ */
+export type Guard = { cover: number; leak: number; parry: number; firm?: boolean; thorns?: number };
 
 export type WeaponDef = {
   name: string;
@@ -53,6 +88,10 @@ export type WeaponDef = {
   stagger: number;
   knock: number;
   lift: number;
+  /* How it sounds and swings: a quick whistle, a steady cut, or a heavy whoosh. */
+  heft: "quick" | "steady" | "heavy";
+  /* A head that thuds rather than rings. */
+  blunt?: boolean;
   /* Hold to charge, release to strike: seconds for a minimum and a full charge. */
   charge?: { min: number; max: number };
   /* Charged weapons: the damage at a full charge (a minimum charge does `damage`). */
@@ -73,6 +112,8 @@ export type WeaponDef = {
   combo?: number;
   /* Cuts through a raised shield for half its damage. */
   sunders?: boolean;
+  /* Shields: right-click to raise it. */
+  guard?: Guard;
   hint: string;
 };
 
@@ -87,10 +128,13 @@ export const FISTS: WeaponDef = {
   stagger: 6,
   knock: 9.5,
   lift: 4.5,
+  heft: "steady",
+  blunt: true,
   hint: "Click to shove",
 };
 
 export const WEAPONS: Record<WeaponKind, WeaponDef> = {
+  /* Light and quick: little each, but it adds up, and each has its trick. */
   daggers: {
     name: "Twin daggers",
     price: 120,
@@ -103,41 +147,45 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     stagger: 5,
     knock: 1.5,
     lift: 0.6,
-    hint: "Click to jab · far deadlier from behind",
+    heft: "quick",
+    hint: "Click to jab, left and right · far deadlier from behind",
   },
-  sickle: {
-    name: "Sickle",
-    price: 140,
-    damage: 9,
-    bleed: 6,
-    pull: 5,
-    reach: 2.1,
+  knuckles: {
+    name: "Knuckledusters",
+    price: 100,
+    damage: 5,
+    combo: 16,
+    speed: 1.08,
+    reach: 1.8,
     arc: 0.55,
-    windup: 0.08,
-    cooldown: 0.4,
-    stagger: 6,
-    knock: 0,
+    windup: 0.04,
+    cooldown: 0.26,
+    stagger: 7,
+    knock: 4,
     lift: 1.5,
-    hint: "Click to hook · draws them in and draws blood",
+    heft: "quick",
+    blunt: true,
+    hint: "Click to punch · every third blow in a row is a haymaker · light on your feet",
   },
-  machete: {
-    name: "Machete",
+  cutlass: {
+    name: "Cutlass",
     price: 150,
-    damage: 11,
-    combo: 18,
+    damage: 10,
+    bleed: 6,
     reach: 2.5,
     arc: 0.55,
-    windup: 0.1,
+    windup: 0.09,
     cooldown: 0.38,
     stagger: 7,
-    knock: 5,
-    lift: 2,
-    hint: "Click to hack · every third swing chops deep",
+    knock: 4,
+    lift: 1.8,
+    heft: "quick",
+    hint: "Click to slash · draws blood that keeps flowing",
   },
-  boardaxe: {
-    name: "Boarding axe",
+  beardaxe: {
+    name: "Bearded axe",
     price: 180,
-    damage: 14,
+    damage: 13,
     pull: 7,
     reach: 2.6,
     arc: 0.6,
@@ -146,12 +194,46 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     stagger: 10,
     knock: 0,
     lift: 2.5,
-    hint: "Click to swing · the bearded blade drags them to you",
+    heft: "steady",
+    hint: "Click to hook · the bearded blade drags them to you",
   },
+  mallet: {
+    name: "Mallet",
+    price: 130,
+    damage: 4,
+    reach: 2.5,
+    arc: 0.55,
+    windup: 0.22,
+    cooldown: 0.9,
+    stagger: 30,
+    knock: 17,
+    lift: 7,
+    heft: "steady",
+    blunt: true,
+    hint: "Click to bonk · barely bruises, but sends them flying",
+  },
+  morningstar: {
+    name: "Morning star",
+    price: 200,
+    damage: 18,
+    daze: 1.5,
+    reach: 2.4,
+    arc: 0.6,
+    windup: 0.28,
+    cooldown: 0.95,
+    stagger: 18,
+    knock: 8,
+    lift: 3.5,
+    heft: "heavy",
+    blunt: true,
+    hint: "Click to bludgeon · leaves them dazed and slow",
+  },
+  /* Long reach. */
   spear: {
     name: "Spear",
-    price: 160,
+    price: 170,
     damage: 15,
+    wet: 1.6,
     reach: 4.2,
     arc: 0.94,
     windup: 0.16,
@@ -159,40 +241,14 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     stagger: 12,
     knock: 11,
     lift: 3,
-    hint: "Click to thrust · longest reach",
-  },
-  trident: {
-    name: "Trident",
-    price: 220,
-    damage: 16,
-    wet: 1.5,
-    reach: 3.8,
-    arc: 0.9,
-    windup: 0.18,
-    cooldown: 0.8,
-    stagger: 12,
-    knock: 10,
-    lift: 3.5,
-    hint: "Click to thrust · strikes harder at anyone in the water",
-  },
-  mace: {
-    name: "Mace",
-    price: 200,
-    damage: 20,
-    daze: 1.5,
-    reach: 2.4,
-    arc: 0.6,
-    windup: 0.3,
-    cooldown: 1,
-    stagger: 18,
-    knock: 9,
-    lift: 3.5,
-    hint: "Click to bludgeon · leaves them dazed and slow",
+    heft: "quick",
+    hint: "Click to thrust · longest reach · strikes harder at anyone in the water",
   },
   halberd: {
     name: "Halberd",
     price: 260,
-    damage: 22,
+    damage: 20,
+    speed: 0.9,
     reach: 3.8,
     arc: 0.3,
     windup: 0.4,
@@ -200,20 +256,24 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     stagger: 18,
     knock: 12,
     lift: 4,
+    heft: "heavy",
     hint: "Click to sweep · a long, wide arc that catches everyone in it",
   },
+  /* Two hands, slow and crushing. */
   axe: {
     name: "Battle axe",
     price: 240,
     damage: 24,
     sunders: true,
-    reach: 2.6,
+    speed: 0.9,
+    reach: 2.7,
     arc: 0.7,
     windup: 0.42,
     cooldown: 1.15,
     stagger: 24,
     knock: 13,
     lift: 5,
+    heft: "heavy",
     hint: "Click to chop · cuts through shields",
   },
   greatsword: {
@@ -230,6 +290,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     stagger: 16,
     knock: 9,
     lift: 4,
+    heft: "heavy",
     hint: "Hold to raise it, release to cleave · the longer the harder",
   },
   hammer: {
@@ -245,10 +306,13 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 10,
     charge: { min: 0.6, max: 0.6 },
     speed: 0.8,
+    heft: "heavy",
+    blunt: true,
     hint: "Hold, release to slam · launches everyone round you",
   },
+  /* Shields: right-click to block, click to bash. */
   shield: {
-    name: "Shield",
+    name: "Round shield",
     price: 140,
     damage: 5,
     reach: 2.2,
@@ -258,7 +322,43 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     stagger: 8,
     knock: 10,
     lift: 3,
+    heft: "steady",
+    blunt: true,
+    guard: { cover: 0.2, leak: 0, parry: 0.25 },
     hint: "Right-click to block · click to bash · block late to parry",
+  },
+  kite: {
+    name: "Kite shield",
+    price: 200,
+    damage: 4,
+    speed: 0.88,
+    reach: 2.2,
+    arc: 0.5,
+    windup: 0.12,
+    cooldown: 0.9,
+    stagger: 10,
+    knock: 15,
+    lift: 3.5,
+    heft: "steady",
+    blunt: true,
+    guard: { cover: -0.15, leak: 0, parry: 0.15, firm: true },
+    hint: "Right-click to block · guards your flanks and holds even against axes",
+  },
+  spiked: {
+    name: "Spiked shield",
+    price: 180,
+    damage: 9,
+    bleed: 4,
+    reach: 2.2,
+    arc: 0.5,
+    windup: 0.08,
+    cooldown: 0.8,
+    stagger: 9,
+    knock: 9,
+    lift: 2.5,
+    heft: "steady",
+    guard: { cover: 0.3, leak: 0.25, parry: 0.25, thorns: 5 },
+    hint: "Right-click to block · its spikes bite whoever strikes it, and its bash draws blood",
   },
 };
 
@@ -278,8 +378,6 @@ export const STAGGER_MAX = 250;
 /* Seconds after a hit before stagger starts to wear off, and how fast. */
 export const STAGGER_GRACE = 3;
 export const STAGGER_RECOVER = 5;
-/* A shield raised this soon before a hit parries it. */
-export const PARRY_WINDOW = 0.25;
 /* Swings this close together count toward a combo. */
 export const COMBO_WINDOW = 1;
 /* A bleed runs out over this many seconds, in one-second ticks. */
@@ -309,17 +407,23 @@ export type Grip = "unarmed" | "1h" | "2h" | "dual" | "polearm" | "shield";
 
 const GRIPS: Record<WeaponKind, Grip> = {
   daggers: "dual",
-  sickle: "1h",
-  machete: "1h",
-  boardaxe: "1h",
+  knuckles: "dual",
+  cutlass: "1h",
+  beardaxe: "1h",
+  mallet: "1h",
+  morningstar: "1h",
   spear: "polearm",
-  trident: "polearm",
-  mace: "1h",
   halberd: "polearm",
   axe: "2h",
   greatsword: "2h",
   hammer: "2h",
   shield: "shield",
+  kite: "shield",
+  spiked: "shield",
 };
 
 export const gripOf = (kind: WeaponKind | null): Grip => (kind ? GRIPS[kind] : "unarmed");
+
+/* The shield's guard, if this is a shield. */
+export const guardOf = (kind: WeaponKind | null): Guard | null =>
+  kind ? (WEAPONS[kind].guard ?? null) : null;

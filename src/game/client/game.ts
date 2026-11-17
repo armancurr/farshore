@@ -62,6 +62,7 @@ import {
 import {
   COMBO_WINDOW,
   DAZE_SPEED,
+  guardOf,
   type WeaponKind,
   weaponDef,
   weaponFromIndex,
@@ -981,6 +982,7 @@ export class Game {
     const a = this.herd.list().get(msg.id);
     if (msg.by === this.myId) {
       this.hitMarker = 1;
+      this.viewmodel.impact(0.8);
       this.hitText = msg.dead ? "Down" : `-${msg.damage}`;
       this.audio.hit(this.weapon, false);
       if (msg.dead) {
@@ -1100,12 +1102,15 @@ export class Game {
 
   private onHit(msg: Extract<ServerMsg, { t: "hit" }>) {
     if (msg.target === this.myId) {
-      if (msg.blocked || msg.parry) this.audio.clang(msg.parry);
-      else this.audio.hit(msg.kind, msg.heavy);
+      if (msg.blocked || msg.parry) {
+        this.audio.clang(msg.parry);
+        this.viewmodel.impact(msg.parry ? 0.7 : 1);
+      } else this.audio.hit(msg.kind, msg.heavy);
       return;
     }
     if (msg.by === this.myId) {
       this.hitMarker = 1;
+      this.viewmodel.impact(msg.blocked ? 1 : 0.8);
       /* Health taken when it counts; on the Harbor (or in creative) only the stagger. */
       this.hitText = msg.parry
         ? "Parried"
@@ -1208,6 +1213,8 @@ export class Game {
           : null,
       blocking: this.blocking,
       kick: this.kick,
+      yaw: this.camera.rotation.y,
+      pitch: this.camera.rotation.x,
     });
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
@@ -1254,7 +1261,7 @@ export class Game {
       const b = this.body;
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
-      this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
+      this.blocking = guardOf(this.weapon) !== null && active && this.input.altHeld && !this.build;
       const charging = this.chargeStart !== null;
       if (active && this.input.take("creative") && this.bike === null) this.toggleCreative(b);
       if (active && this.input.take("fly") && this.creative && !this.boat && this.bike === null)

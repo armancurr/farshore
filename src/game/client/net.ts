@@ -2,7 +2,7 @@ import { Room } from "../server/room";
 import { TICK_HZ } from "../shared/constants";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
 import { DEFAULT_SKIN, isSkinId, type SkinId } from "../shared/skins";
-import { isWeaponKind, type WeaponKind } from "../shared/weapons";
+import { toWeaponKind, type WeaponKind } from "../shared/weapons";
 
 export type ConnectionKind = "attract" | "online";
 
@@ -134,7 +134,9 @@ export function readWeapon(): WeaponKind | null | undefined {
   try {
     const saved = localStorage.getItem(WEAPON_KEY);
     if (saved === "none") return null;
-    if (isWeaponKind(saved)) return saved;
+    /* A weapon since retired comes back as its heir. */
+    const kind = toWeaponKind(saved);
+    if (kind) return kind;
   } catch {
     /* Storage unavailable. */
   }

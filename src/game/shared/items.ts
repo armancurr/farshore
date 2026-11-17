@@ -1,6 +1,6 @@
 import type { Contract, Payout } from "./missions";
 import { SPECIES, SPECIES_IDS, type SpeciesId } from "./species";
-import { WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
+import { toWeaponKind, WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
  * Everything you can own. Stackable items (carcasses, building kits) are
@@ -107,6 +107,9 @@ export const TOOLS: Record<ToolKind, ToolDef> = Object.fromEntries(
 
 export const isToolKind = (v: unknown): v is ToolKind =>
   typeof v === "string" && Object.hasOwn(TOOLS, v);
+
+/* A tool kind from a save: a weapon since retired comes back as its heir (see toWeaponKind). */
+export const toToolKind = (v: unknown): ToolKind | null => (isToolKind(v) ? v : toWeaponKind(v));
 
 /* A tool you own. `uses` counts down to breaking; -1 never breaks (weapons never do). */
 export type Tool = { id: number; kind: ToolKind; uses: number };

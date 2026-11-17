@@ -106,8 +106,8 @@ import {
   BLEED_TIME,
   COMBO_WINDOW,
   chargePower,
+  guardOf,
   knockScale,
-  PARRY_WINDOW,
   STAGGER_GRACE,
   STAGGER_MAX,
   STAGGER_RECOVER,
@@ -609,7 +609,7 @@ export class Room {
         return;
       case "stance": {
         const weapon = this.weaponOf(m);
-        const block = msg.block && weapon === "shield";
+        const block = msg.block && guardOf(weapon) !== null;
         if (block && !m.blocking) m.blockSince = this.now();
         m.blocking = block;
         m.charging = msg.charge && !!weapon && !!weaponDef(weapon).charge;
@@ -1470,7 +1470,7 @@ export class Room {
       z: m.body.z,
       yaw: m.body.yaw,
       running: (m.flags & FLAG.sprint) !== 0,
-      blocking: m.blocking && this.weaponOf(m) === "shield",
+      blocking: m.blocking && guardOf(this.weaponOf(m)) !== null,
       /* Animals leave alone anyone in a boat, down, or in creative. */
       away: m.respawnAt !== null || m.boat !== null || (m.flags & FLAG.creative) !== 0,
     };
@@ -1576,7 +1576,7 @@ export class Room {
     return !this.sheltered(o) && !((by.flags | o.flags) & FLAG.creative);
   }
 
-  /* A sickle's bleed runs out a second at a time; the Harbor staunches it. */
+  /* A bleed runs out a second at a time; the Harbor staunches it. */
   private tickBleed(m: Member, now: number) {
     const b = m.bleed;
     if (!b || now < b.nextAt) return;
@@ -1697,20 +1697,25 @@ export class Room {
 
     let blocked = false;
     let parry = false;
-    if (o.blocking && this.weaponOf(o) === "shield" && -facingAway > 0.2) {
+    /* A raised shield catches blows from as far round as it covers. */
+    const shield = this.weaponOf(o);
+    const guard = o.blocking ? guardOf(shield) : null;
+    if (guard && -facingAway > guard.cover) {
       blocked = true;
-      parry = now - o.blockSince < PARRY_WINDOW;
-      if (def.sunders) {
+      parry = now - o.blockSince < guard.parry;
+      if (def.sunders && !guard.firm) {
         added *= 0.5;
         knock *= 0.5;
         lift *= 0.5;
         damage *= 0.5;
       } else {
-        added = 0;
-        knock *= 0.2;
-        lift = 0;
-        damage = 0;
+        added *= guard.leak;
+        knock *= 0.2 + guard.leak;
+        lift *= guard.leak;
+        damage *= guard.leak;
       }
+      /* Spikes on the face: striking it costs the striker. */
+      if (guard.thorns && this.canHarm(o, m)) this.hurt(m, guard.thorns, "hit", o);
       if (parry) {
         m.stagger = Math.min(STAGGER_MAX, m.stagger + 15);
         m.lastHitAt = now;
@@ -1719,7 +1724,7 @@ export class Room {
           t: "hit",
           by: o.id,
           target: m.id,
-          kind: "shield",
+          kind: shield,
           stagger: Math.round(m.stagger),
           added: 15,
           damage: 0,

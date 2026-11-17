@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { FLAG } from "../../shared/protocol";
 import type { SkinId } from "../../shared/skins";
-import type { WeaponKind } from "../../shared/weapons";
+import { gripOf, type WeaponKind } from "../../shared/weapons";
 import { buildRig, disposeRig, type Rig } from "./skins";
 import { buildWeapon } from "./weapons";
 
@@ -29,13 +29,6 @@ function nameTexture(name: string, stagger = 0) {
 }
 
 /* Another player, as you see them: their skin, what they hold, and their name. */
-/* Polearms are held partway down the shaft, so they don't tower overhead. */
-const GRIP_DROP: Partial<Record<WeaponKind, number>> = {
-  spear: -0.5,
-  trident: -0.5,
-  halberd: -0.7,
-};
-
 export class Avatar {
   readonly group = new THREE.Group();
   private body = new THREE.Group();
@@ -98,10 +91,11 @@ export class Avatar {
       for (const c of [...this.hand.children]) this.hand.remove(c);
       if (weapon) {
         const model = buildWeapon(weapon);
-        if (weapon === "shield") {
+        /* buildWeapon puts the grip at the origin, polearms included. */
+        if (gripOf(weapon) === "shield") {
           model.position.set(-0.3, 0, -0.25);
           model.rotation.y = 0.4;
-        } else model.position.y = GRIP_DROP[weapon] ?? 0;
+        }
         this.hand.add(model);
       }
     }

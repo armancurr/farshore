@@ -3,7 +3,7 @@ import {
   HOTBAR,
   type Inventory,
   isItemId,
-  isToolKind,
+  toToolKind,
   type ItemId,
   MAX_TOOLS,
   type Tool,
@@ -61,10 +61,14 @@ function inventory(v: unknown): Inventory | null {
   const tools: Tool[] = [];
   for (const t of v.tools) {
     if (!isObj(t) || !id(t.id) || !int(t.uses, -1, 1000)) return null;
-    /* Retired tools (the sword, the pickaxe, the flail, bought variants) are simply gone. */
-    if (!isToolKind(t.kind) || t.uses === 0 || tools.some((o) => o.id === t.id)) continue;
+    /*
+     * Retired weapons come back as their heirs; other retired tools (the
+     * pickaxe, the flail, bought variants) are simply gone.
+     */
+    const kind = toToolKind(t.kind);
+    if (!kind || t.uses === 0 || tools.some((o) => o.id === t.id)) continue;
     /* Weapons no longer wear out. */
-    tools.push({ id: t.id, kind: t.kind, uses: TOOLS[t.kind].weapon ? -1 : t.uses });
+    tools.push({ id: t.id, kind, uses: TOOLS[kind].weapon ? -1 : t.uses });
   }
   if (tools.length > MAX_TOOLS) return null;
   /* Slot 1 is always fists; other slots must point at tools you have, once each. */
