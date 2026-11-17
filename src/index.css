@@ -227,3 +227,74 @@ body::-webkit-scrollbar {
     cursor: pointer;
   }
 }
+
+/*
+ * The curtain (components/curtain.tsx): the island's sky over its sea, the
+ * same colours the scene draws (scene/materials.ts PALETTE), so lifting it
+ * hands straight over. index.html paints the same before any script runs.
+ */
+.curtain-sky {
+  background: linear-gradient(
+    to bottom,
+    #705eff 0%,
+    #8c7fff 40%,
+    #79c9c4 48%,
+    #48b3af 58%,
+    #2f8f8b 100%
+  );
+}
+
+.curtain {
+  transition: opacity 900ms ease;
+}
+
+.curtain-in {
+  animation: curtain-in 900ms ease backwards;
+}
+
+.curtain-lift {
+  opacity: 0;
+}
+
+/* The words follow the dark down, a beat behind. */
+.curtain-words {
+  animation: curtain-in 500ms ease 450ms backwards;
+}
+
+.curtain-dot {
+  animation: curtain-dot 1.2s ease-in-out infinite both;
+}
+
+.curtain-wave {
+  animation: curtain-wave 1.6s linear infinite;
+}
+
+@keyframes curtain-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes curtain-dot {
+  0%,
+  20% {
+    opacity: 0;
+  }
+  40%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes curtain-wave {
+  to {
+    transform: translateX(-24px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curtain-wave,
+  .curtain-dot {
+    animation: none;
+  }
+}

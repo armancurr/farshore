@@ -48,7 +48,8 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Take a piece back", ["RMB"]],
   ],
   [
-    ["Marketplace: skins, weapons, boats", ["K"]],
+    ["Arsenal: hold, point, let go", ["Q"]],
+    ["Marketplace: weapons, vehicles, skins", ["K"]],
     ["The map", ["N"]],
     ["First or third person", ["V"]],
   ],

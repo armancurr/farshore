@@ -41,6 +41,18 @@
         background: #000;
         color: #fff;
       }
+      /* Before any script runs: the island's sky, as the curtain (src/components/curtain.tsx) paints it. */
+      #root:empty {
+        min-height: 100svh;
+        background: linear-gradient(
+          to bottom,
+          #705eff 0%,
+          #8c7fff 40%,
+          #79c9c4 48%,
+          #48b3af 58%,
+          #2f8f8b 100%
+        );
+      }
     </style>
     <script type="application/ld+json">
       {

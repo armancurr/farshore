@@ -15,6 +15,15 @@ import { packMaterial } from "./packs";
 const charUrl = (c: CharacterId) => `/models/characters/${c}.glb`;
 const textureUrl = (name: string) => `/models/characters/${name}.png`;
 export const PLAYER_ANIMS = "/models/anims/player.glb";
+/* KayKit's ranged set, as it comes: the bow and spell clips are taken from it. */
+const RANGED_ANIMS = "/models/anims/combat-ranged.glb";
+const RANGED_CLIPS = new Set([
+  "Ranged_Bow_Idle",
+  "Ranged_Bow_Draw",
+  "Ranged_Bow_Release",
+  "Ranged_Magic_Raise",
+  "Ranged_Magic_Shoot",
+]);
 
 /*
  * How much the KayKit rig is scaled to make a person PLAYER_HEIGHT tall. The
@@ -121,11 +130,18 @@ let clips: Promise<Map<string, ClipHalves>> | null = null;
 
 export function playerClips(): Promise<Map<string, ClipHalves>> {
   if (!clips) {
-    clips = loadModel(PLAYER_ANIMS).then((gltf) => {
+    /* Without the ranged set (it failed to load), bows and wands just swing like the rest. */
+    const ranged = loadModel(RANGED_ANIMS).then(
+      (gltf) => gltf.animations.filter((c) => RANGED_CLIPS.has(c.name)),
+      () => [] as THREE.AnimationClip[],
+    );
+    clips = Promise.all([loadModel(PLAYER_ANIMS), ranged]).then(([gltf, extra]) => {
       const out = new Map<string, ClipHalves>();
-      for (const clip of gltf.animations) {
-        const lower = clip.tracks.filter((t) => LOWER.has(t.name.split(".")[0]));
-        const upper = clip.tracks.filter((t) => !LOWER.has(t.name.split(".")[0]));
+      for (const clip of [...gltf.animations, ...extra]) {
+        /* Scale never changes on this rig (player.glb has it stripped already). */
+        const tracks = clip.tracks.filter((t) => !t.name.endsWith(".scale"));
+        const lower = tracks.filter((t) => LOWER.has(t.name.split(".")[0]));
+        const upper = tracks.filter((t) => !LOWER.has(t.name.split(".")[0]));
         out.set(clip.name, {
           lower: new THREE.AnimationClip(`${clip.name}:lower`, clip.duration, lower),
           upper: new THREE.AnimationClip(`${clip.name}:upper`, clip.duration, upper),

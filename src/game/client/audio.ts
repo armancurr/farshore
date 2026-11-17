@@ -339,6 +339,28 @@ export class TideAudio {
 
   /* The whoosh of a swing: heavier weapons are lower and slower. */
   swing(kind: WeaponKind | null, heavy = false) {
+    const shot = kind ? weaponDef(kind).shot : undefined;
+    if (shot?.flies === "bolt") {
+      /* A spell: a falling zap with a hiss behind it. */
+      this.tone(980, 260, 0.16, 0.004, 0.22, "triangle");
+      this.noiseBurst({ type: "highpass", freq: 3000, peak: 0.08, attack: 0.01, decay: 0.2 });
+      return;
+    }
+    if (shot) {
+      /* A bowstring: a low twang and the whip of the arrow leaving. */
+      this.tone(190, 110, 0.22, 0.002, 0.18, "triangle");
+      this.noiseBurst({
+        type: "bandpass",
+        freq: 2200,
+        to: 5200,
+        q: 1.2,
+        peak: 0.12,
+        attack: 0.01,
+        decay: 0.1,
+        rate: 2,
+      });
+      return;
+    }
     const low = heavy || heftOf(kind) === "heavy";
     const quick = heftOf(kind) === "quick";
     this.noiseBurst({

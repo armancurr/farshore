@@ -7,8 +7,11 @@ import type { MountSpec } from "./mount";
  * Things to ride, chosen from the marketplace: the asset packs' boats, ships
  * and cars, and the horses and donkeys from the islands. Spawning one puts it
  * in the water or on clear ground near you; you get one at a time, and a new
- * one replaces the last. Everything is free for now; `price` is what it will
- * cost once the market takes coins.
+ * one replaces the last.
+ *
+ * Each sits in a tier. Free ones are everyone's from the start; cheap and
+ * premium ones are bought once, with coins from the Guild Board, and kept
+ * (the room holds what you own, in your inventory; see `ownsVehicle`).
  *
  * A vehicle's class decides how it moves and how you drive it:
  *   row    oars: slow, W and S pull, A and D turn
@@ -25,14 +28,15 @@ import type { MountSpec } from "./mount";
 
 export type VehicleClass = "row" | "sail" | "motor" | "car" | "mount";
 export type VehicleSection = "Boats" | "Workboats" | "Ships" | "Land" | "Mounts";
-/* Workboats and mounts are put away for now (their kinds are commented out in VEHICLES). */
-export const VEHICLE_SECTIONS: readonly VehicleSection[] = [
-  "Boats",
-  // "Workboats",
-  "Ships",
-  "Land",
-  // "Mounts",
-];
+
+/* What it costs to own: nothing, a few contracts' worth, or a real saving-up. */
+export type VehicleTier = "free" | "cheap" | "premium";
+export const VEHICLE_TIERS: readonly VehicleTier[] = ["free", "cheap", "premium"];
+export const TIER_NAMES: Record<VehicleTier, string> = {
+  free: "Free",
+  cheap: "Cheap",
+  premium: "Premium",
+};
 
 /*
  * Somewhere to sit, in the vehicle's frame: `y` is the seat itself, where the
@@ -45,6 +49,8 @@ export type VehicleDef = {
   name: string;
   section: VehicleSection;
   class: VehicleClass;
+  tier: VehicleTier;
+  /* Coins to buy it; 0 for the free tier. */
   price: number;
   /* What it is, in a line, for the marketplace. */
   blurb: string;
@@ -107,6 +113,7 @@ type WaterOpts = {
   name: string;
   section: VehicleSection;
   class: "row" | "sail" | "motor";
+  tier: VehicleTier;
   price: number;
   blurb: string;
   model: ModelId;
@@ -143,6 +150,7 @@ function water(o: WaterOpts): VehicleDef {
     name: o.name,
     section: o.section,
     class: o.class,
+    tier: o.tier,
     price: o.price,
     blurb: o.blurb,
     model: o.model,
@@ -161,6 +169,7 @@ const CAR_SCALE = 1.6;
 
 type CarOpts = {
   name: string;
+  tier: VehicleTier;
   price: number;
   blurb: string;
   model: ModelId;
@@ -186,6 +195,7 @@ function car(o: CarOpts): VehicleDef {
     name: o.name,
     section: "Land",
     class: "car",
+    tier: o.tier,
     price: o.price,
     blurb: o.blurb,
     model: o.model,
@@ -215,6 +225,7 @@ function car(o: CarOpts): VehicleDef {
 
 type MountOpts = {
   name: string;
+  tier: VehicleTier;
   price: number;
   blurb: string;
   model: string;
@@ -233,6 +244,7 @@ function mount(o: MountOpts): VehicleDef {
     name: o.name,
     section: "Mounts",
     class: "mount",
+    tier: o.tier,
     price: o.price,
     blurb: o.blurb,
     model: o.model,
@@ -328,25 +340,31 @@ const BESIDE = (z: number, y: number): readonly Native[] => [
 ];
 
 /*
- * The catalogue. A trimmed first roster is on offer: nine boats, six ships,
- * six cars. The rest are commented out, not deleted, so any of them can come
- * back by uncommenting its entry.
+ * The catalogue, by tier: two free (a pickup and a skiff, so anyone can get
+ * about on land and water), seven cheap and six premium. The rest are
+ * commented out, not deleted, so any of them can come back.
  */
 export const VEHICLES = {
-  /* ----- boats: oars, sails and outboards ----- */
-  rowboat: ROW({
-    name: "Rowboat",
-    price: 180,
-    blurb: "A clinker-built rowboat: slow, steady and hard to sink.",
-    model: "boats/boat-row-small",
-    length: 3.6,
-    sink: 0.16,
-    seats: [[0, 0.4, -0.42]],
-    speed: 13,
+  /* ----- free: everyone has these from the start ----- */
+  pickup: car({
+    name: "Pickup",
+    tier: "free",
+    price: 0,
+    blurb: "A pickup with an open bed. Happy on a track or off it.",
+    model: "cars/truck",
+    wheels: { front: 0.86, back: -0.76, half: 0.43, tire: 0.3 },
+    seats: [
+      [0.22, 0.58, 0.05],
+      [-0.22, 0.58, 0.05],
+    ],
+    speed: 27,
+    accel: 7,
+    clearance: 0.38,
   }),
   skiff: ROW({
     name: "Skiff",
-    price: 240,
+    tier: "free",
+    price: 0,
     blurb: "A longer rowboat with room for a passenger in the bow.",
     model: "boats/boat-row-large",
     length: 4.3,
@@ -357,29 +375,42 @@ export const VEHICLES = {
     ],
     speed: 14,
   }),
-  daysailer: water({
-    name: "Daysailer",
-    section: "Boats",
-    class: "sail",
-    price: 420,
-    blurb: "A little open sailboat. Quick on a reach, useless head to wind.",
-    model: "boats/boat-sail-a",
-    length: 7,
-    sink: 0.32,
-    /* On the cockpit coaming, to see past the cabin. */
+
+  /* ----- cheap: a few contracts from the Guild Board ----- */
+  kart: car({
+    name: "Kart",
+    tier: "cheap",
+    price: 350,
+    blurb: "A go-kart with a roll hoop: low, light and twitchy. Hang on in the corners.",
+    model: "cars/kart-oozi",
+    wheels: { front: 0.32, back: -0.36, half: 0.28, tire: 0.21 },
+    seats: [[0, 0.42, -0.12]],
+    speed: 24,
+    accel: 11,
+    steer: 0.62,
+    clearance: 0.12,
+  }),
+  coupe: car({
+    name: "Coupé",
+    tier: "cheap",
+    price: 900,
+    blurb: "A low two-door with a big engine.",
+    model: "cars/sedan-sports",
+    wheels: { front: 0.66, back: -0.66, half: 0.43, tire: 0.3 },
     seats: [
-      [0.55, 1.5, -1.25],
-      [-0.55, 1.5, -1.25],
+      [0.22, 0.48, -0.1],
+      [-0.22, 0.48, -0.1],
     ],
-    draft: 0.8,
-    speed: 22,
-    turn: 0.85,
+    speed: 36,
+    accel: 10,
+    clearance: 0.26,
   }),
   sloop: water({
     name: "Sloop",
+    tier: "cheap",
+    price: 450,
     section: "Boats",
     class: "sail",
-    price: 480,
     blurb: "A sloop with a long bowsprit: points a little higher than the daysailer.",
     model: "boats/boat-sail-b",
     length: 7.6,
@@ -394,9 +425,10 @@ export const VEHICLES = {
   }),
   airboat: water({
     name: "Airboat",
+    tier: "cheap",
+    price: 500,
     section: "Boats",
     class: "motor",
-    price: 520,
     blurb: "A flat hull and a caged propeller. Loud, flat-out quick, and it skids.",
     model: "boats/boat-fan",
     length: 5,
@@ -409,30 +441,170 @@ export const VEHICLES = {
     speed: 48,
     turn: 1.3,
   }),
-  fishingboat: water({
-    name: "Fishing boat",
-    section: "Boats",
-    class: "motor",
-    price: 560,
-    blurb: "A little wheelhouse boat for long days out past the islands.",
-    model: "boats/boat-fishing-small",
-    length: 7.5,
-    sink: 0.38,
-    seats: [
-      [0.2, 1.05, 0.38],
-      [-0.4, 1.05, -1.2],
-    ],
-    draft: 0.9,
-    speed: 22,
-    turn: 0.8,
+  surveylaunch: SPEED({
+    name: "Survey launch",
+    tier: "cheap",
+    price: 600,
+    blurb: "A stubby launch with a console and a mast of aerials.",
+    model: "boats/boat-speed-e",
+    seats: BESIDE(-0.55, 0.95),
+    speed: 40,
   }),
-  //   wakeboat: SPEED({
-  //     name: "Wakeboard boat",
-  //     price: 900,
-  //     blurb: "A deep hull and a tow tower, built to throw a big wake.",
-  //     model: "boats/boat-speed-a",
-  //     seats: BESIDE(-0.75, 1.15),
-  //     speed: 48,
+  houseboat: HOUSE({
+    name: "Houseboat",
+    tier: "cheap",
+    price: 700,
+    blurb: "A cabin on a pontoon. Unhurried, but you could live on it.",
+    model: "boats/boat-house-a",
+    length: 10,
+    seats: [
+      [0, 0.7, 1.85, DECK],
+      [0.5, 0.7, -1.85, DECK],
+    ],
+  }),
+  wakeboat: SPEED({
+    name: "Wakeboard boat",
+    tier: "cheap",
+    price: 800,
+    blurb: "A deep hull and a tow tower, built to throw a big wake.",
+    model: "boats/boat-speed-a",
+    seats: BESIDE(-0.75, 1.15),
+    speed: 48,
+  }),
+
+  /* ----- premium: worth saving up for ----- */
+  touring: car({
+    name: "Touring SUV",
+    tier: "premium",
+    price: 2000,
+    blurb: "A long, plush SUV. Quiet, quick and comfortable.",
+    model: "cars/suv-luxury",
+    wheels: { front: 0.81, back: -0.71, half: 0.43, tire: 0.3 },
+    seats: [
+      [0.22, 0.58, 0.1],
+      [-0.22, 0.58, 0.1],
+    ],
+    speed: 31,
+    accel: 8,
+    clearance: 0.38,
+  }),
+  prototype: car({
+    name: "Prototype",
+    tier: "premium",
+    price: 3500,
+    blurb: "A wedge from the future. The quickest thing on wheels.",
+    model: "cars/race-future",
+    wheels: { front: 0.59, back: -0.93, half: 0.45, tire: 0.3 },
+    seats: [[0, 0.32, -0.2]],
+    speed: 48,
+    accel: 14,
+    steer: 0.5,
+    clearance: 0.2,
+  }),
+  daycruiser: SPEED({
+    name: "Day cruiser",
+    tier: "premium",
+    price: 2400,
+    blurb: "The longest of the speedboats, with a cuddy cabin in the bow.",
+    model: "boats/boat-speed-j",
+    seats: BESIDE(-1.25, 1.05),
+    speed: 50,
+  }),
+  cottageboat: HOUSE({
+    name: "Floating cottage",
+    tier: "premium",
+    price: 2800,
+    blurb: "Two decks of cottage, afloat. The upper deck has the view.",
+    model: "boats/boat-house-c",
+    length: 11,
+    seats: [
+      [0, 0.73, 1.95, DECK],
+      [0.5, 0.73, -1.95, DECK],
+    ],
+  }),
+  galleon: SHIP({
+    name: "Galleon",
+    tier: "premium",
+    price: 5000,
+    blurb: "A tall ship under white canvas. Quick, but slow to turn; a helmsman and a crew of six.",
+    model: "boats/ship-large",
+    length: 27,
+    seats: HULL_LARGE,
+    draft: 3,
+    speed: 62,
+    turn: 0.22,
+  }),
+  liner: water({
+    name: "Ocean liner",
+    section: "Ships",
+    class: "motor",
+    tier: "premium",
+    price: 7500,
+    blurb: "Four funnels and a long promenade. Slow to turn and impossible to miss.",
+    model: "boats/ship-ocean-liner",
+    length: 42,
+    sink: 1.5,
+    /* At the front of the sun deck, ahead of the first funnel; the crew on the open decks fore and aft. */
+    seats: [
+      [0, 5.36, 5.3, HELM],
+      [1.2, 3.83, 6.8, DECK],
+      [-1.2, 3.83, 6.8, DECK],
+      [1.2, 3.83, -6.4, DECK],
+      [-1.2, 3.83, -6.4, DECK],
+    ],
+    draft: 3,
+    speed: 40,
+    turn: 0.18,
+  }),
+
+  /*
+   * ----- retired: out of the market, kept so any can come back -----
+   * Uncomment one and give it a `tier` to bring it back.
+   */
+  //   rowboat: ROW({
+  //     name: "Rowboat",
+  //     price: 180,
+  //     blurb: "A clinker-built rowboat: slow, steady and hard to sink.",
+  //     model: "boats/boat-row-small",
+  //     length: 3.6,
+  //     sink: 0.16,
+  //     seats: [[0, 0.4, -0.42]],
+  //     speed: 13,
+  //   }),
+  //   daysailer: water({
+  //     name: "Daysailer",
+  //     section: "Boats",
+  //     class: "sail",
+  //     price: 420,
+  //     blurb: "A little open sailboat. Quick on a reach, useless head to wind.",
+  //     model: "boats/boat-sail-a",
+  //     length: 7,
+  //     sink: 0.32,
+  //     /* On the cockpit coaming, to see past the cabin. */
+  //     seats: [
+  //       [0.55, 1.5, -1.25],
+  //       [-0.55, 1.5, -1.25],
+  //     ],
+  //     draft: 0.8,
+  //     speed: 22,
+  //     turn: 0.85,
+  //   }),
+  //   fishingboat: water({
+  //     name: "Fishing boat",
+  //     section: "Boats",
+  //     class: "motor",
+  //     price: 560,
+  //     blurb: "A little wheelhouse boat for long days out past the islands.",
+  //     model: "boats/boat-fishing-small",
+  //     length: 7.5,
+  //     sink: 0.38,
+  //     seats: [
+  //       [0.2, 1.05, 0.38],
+  //       [-0.4, 1.05, -1.2],
+  //     ],
+  //     draft: 0.9,
+  //     speed: 22,
+  //     turn: 0.8,
   //   }),
   //   bowrider: SPEED({
   //     name: "Bowrider",
@@ -442,14 +614,14 @@ export const VEHICLES = {
   //     seats: BESIDE(-0.7, 1.12),
   //     speed: 50,
   //   }),
-  runabout: SPEED({
-    name: "Runabout",
-    price: 760,
-    blurb: "A small, lively speedboat for hopping between the islands.",
-    model: "boats/boat-speed-c",
-    seats: BESIDE(-0.65, 1.12),
-    speed: 52,
-  }),
+  //   runabout: SPEED({
+  //     name: "Runabout",
+  //     price: 760,
+  //     blurb: "A small, lively speedboat for hopping between the islands.",
+  //     model: "boats/boat-speed-c",
+  //     seats: BESIDE(-0.65, 1.12),
+  //     speed: 52,
+  //   }),
   //   tender: SPEED({
   //     name: "Harbour tender",
   //     price: 600,
@@ -457,14 +629,6 @@ export const VEHICLES = {
   //     model: "boats/boat-speed-d",
   //     seats: BESIDE(-1.05, 0.95),
   //     speed: 36,
-  //   }),
-  //   surveylaunch: SPEED({
-  //     name: "Survey launch",
-  //     price: 700,
-  //     blurb: "A stubby launch with a console and a mast of aerials.",
-  //     model: "boats/boat-speed-e",
-  //     seats: BESIDE(-0.55, 0.95),
-  //     speed: 40,
   //   }),
   //   centreconsole: SPEED({
   //     name: "Centre console",
@@ -474,14 +638,14 @@ export const VEHICLES = {
   //     seats: BESIDE(-0.45, 0.95),
   //     speed: 42,
   //   }),
-  jetboat: SPEED({
-    name: "Jet boat",
-    price: 1100,
-    blurb: "A low, sleek hull for flat-out runs. Nothing afloat is faster.",
-    model: "boats/boat-speed-g",
-    seats: BESIDE(-0.95, 1.05),
-    speed: 62,
-  }),
+  //   jetboat: SPEED({
+  //     name: "Jet boat",
+  //     price: 1100,
+  //     blurb: "A low, sleek hull for flat-out runs. Nothing afloat is faster.",
+  //     model: "boats/boat-speed-g",
+  //     seats: BESIDE(-0.95, 1.05),
+  //     speed: 62,
+  //   }),
   //   skiboat: SPEED({
   //     name: "Ski boat",
   //     price: 860,
@@ -498,16 +662,6 @@ export const VEHICLES = {
   //     seats: BESIDE(-0.9, 1.05),
   //     speed: 48,
   //   }),
-  daycruiser: SPEED({
-    name: "Day cruiser",
-    price: 1200,
-    blurb: "The longest of the speedboats, with a cuddy cabin in the bow.",
-    model: "boats/boat-speed-j",
-    seats: BESIDE(-1.25, 1.05),
-    speed: 50,
-  }),
-
-  /* ----- workboats: tugs, towboats and houseboats ----- */
   //   harbourtug: water({
   //     name: "Harbour tug",
   //     section: "Workboats",
@@ -594,17 +748,6 @@ export const VEHICLES = {
   //     speed: 16,
   //     turn: 0.42,
   //   }),
-  //   houseboat: HOUSE({
-  //     name: "Houseboat",
-  //     price: 800,
-  //     blurb: "A cabin on a pontoon. Unhurried, but you could live on it.",
-  //     model: "boats/boat-house-a",
-  //     length: 10,
-  //     seats: [
-  //       [0, 0.7, 1.85, DECK],
-  //       [0.5, 0.7, -1.85, DECK],
-  //     ],
-  //   }),
   //   canalboat: HOUSE({
   //     name: "Canal boat",
   //     price: 860,
@@ -614,17 +757,6 @@ export const VEHICLES = {
   //     seats: [
   //       [0, 0.73, 2.1, DECK],
   //       [0.5, 0.73, -2.1, DECK],
-  //     ],
-  //   }),
-  //   cottageboat: HOUSE({
-  //     name: "Floating cottage",
-  //     price: 1000,
-  //     blurb: "Two decks of cottage, afloat. The upper deck has the view.",
-  //     model: "boats/boat-house-c",
-  //     length: 11,
-  //     seats: [
-  //       [0, 0.73, 1.95, DECK],
-  //       [0.5, 0.73, -1.95, DECK],
   //     ],
   //   }),
   //   sundeckboat: HOUSE({
@@ -638,74 +770,61 @@ export const VEHICLES = {
   //       [0.5, 0.7, -1.85, DECK],
   //     ],
   //   }),
-
-  /* ----- ships: the wind drives them, and they carry a crew ----- */
-  pirate_sloop: SHIP({
-    name: "Pirate sloop",
-    price: 2400,
-    blurb: "A single-masted raider under a black sail. Seats a helmsman and two.",
-    model: "ships/ship-pirate-small",
-    length: 11,
-    seats: HULL_SMALL,
-    draft: 1.6,
-    speed: 62,
-    turn: 0.42,
-  }),
-  pirate_brig: SHIP({
-    name: "Pirate brig",
-    price: 4200,
-    blurb: "Two masts of black canvas, a helmsman and a crew of four.",
-    model: "ships/ship-pirate-medium",
-    length: 17,
-    seats: HULL_MEDIUM,
-    draft: 2.2,
-    speed: 62,
-    turn: 0.32,
-  }),
-  pirate_galleon: SHIP({
-    name: "Pirate galleon",
-    price: 7600,
-    blurb: "A great black-sailed galleon. Quick, but slow to turn; a helmsman and a crew of six.",
-    model: "ships/ship-pirate-large",
-    length: 27,
-    seats: HULL_LARGE,
-    draft: 3,
-    speed: 62,
-    turn: 0.22,
-  }),
-  trading_sloop: SHIP({
-    name: "Trading sloop",
-    price: 2000,
-    blurb: "A plain working sloop under white sail. Seats a helmsman and two.",
-    model: "ships/ship-small",
-    length: 11,
-    seats: HULL_SMALL,
-    draft: 1.6,
-    speed: 62,
-    turn: 0.42,
-  }),
-  brigantine: SHIP({
-    name: "Brigantine",
-    price: 3600,
-    blurb: "A handy two-master under white sail, a helmsman and a crew of four.",
-    model: "ships/ship-medium",
-    length: 17,
-    seats: HULL_MEDIUM,
-    draft: 2.2,
-    speed: 62,
-    turn: 0.32,
-  }),
-  galleon: SHIP({
-    name: "Galleon",
-    price: 6800,
-    blurb: "A tall merchant galleon. Quick, but slow to turn; a helmsman and a crew of six.",
-    model: "ships/ship-large",
-    length: 27,
-    seats: HULL_LARGE,
-    draft: 3,
-    speed: 62,
-    turn: 0.22,
-  }),
+  //   pirate_sloop: SHIP({
+  //     name: "Pirate sloop",
+  //     price: 2400,
+  //     blurb: "A single-masted raider under a black sail. Seats a helmsman and two.",
+  //     model: "ships/ship-pirate-small",
+  //     length: 11,
+  //     seats: HULL_SMALL,
+  //     draft: 1.6,
+  //     speed: 62,
+  //     turn: 0.42,
+  //   }),
+  //   pirate_brig: SHIP({
+  //     name: "Pirate brig",
+  //     price: 4200,
+  //     blurb: "Two masts of black canvas, a helmsman and a crew of four.",
+  //     model: "ships/ship-pirate-medium",
+  //     length: 17,
+  //     seats: HULL_MEDIUM,
+  //     draft: 2.2,
+  //     speed: 62,
+  //     turn: 0.32,
+  //   }),
+  //   pirate_galleon: SHIP({
+  //     name: "Pirate galleon",
+  //     price: 7600,
+  //     blurb: "A great black-sailed galleon. Quick, but slow to turn; a helmsman and a crew of six.",
+  //     model: "ships/ship-pirate-large",
+  //     length: 27,
+  //     seats: HULL_LARGE,
+  //     draft: 3,
+  //     speed: 62,
+  //     turn: 0.22,
+  //   }),
+  //   trading_sloop: SHIP({
+  //     name: "Trading sloop",
+  //     price: 2000,
+  //     blurb: "A plain working sloop under white sail. Seats a helmsman and two.",
+  //     model: "ships/ship-small",
+  //     length: 11,
+  //     seats: HULL_SMALL,
+  //     draft: 1.6,
+  //     speed: 62,
+  //     turn: 0.42,
+  //   }),
+  //   brigantine: SHIP({
+  //     name: "Brigantine",
+  //     price: 3600,
+  //     blurb: "A handy two-master under white sail, a helmsman and a crew of four.",
+  //     model: "ships/ship-medium",
+  //     length: 17,
+  //     seats: HULL_MEDIUM,
+  //     draft: 2.2,
+  //     speed: 62,
+  //     turn: 0.32,
+  //   }),
   //   ghost_ship: SHIP({
   //     name: "Ghost ship",
   //     price: 6600,
@@ -717,8 +836,6 @@ export const VEHICLES = {
   //     speed: 62,
   //     turn: 0.36,
   //   }),
-
-  /* ----- land: the car kit's working machines and a few for fun ----- */
   //   tractor: car({
   //     name: "Tractor",
   //     price: 500,
@@ -741,20 +858,6 @@ export const VEHICLES = {
   //     accel: 3.5,
   //     clearance: 0.45,
   //   }),
-  //   pickup: car({
-  //     name: "Pickup",
-  //     price: 900,
-  //     blurb: "A pickup with an open bed. Happy on a track or off it.",
-  //     model: "cars/truck",
-  //     wheels: { front: 0.86, back: -0.76, half: 0.43, tire: 0.3 },
-  //     seats: [
-  //       [0.22, 0.58, 0.05],
-  //       [-0.22, 0.58, 0.05],
-  //     ],
-  //     speed: 27,
-  //     accel: 7,
-  //     clearance: 0.38,
-  //   }),
   //   flatbed: car({
   //     name: "Flatbed",
   //     price: 880,
@@ -769,91 +872,63 @@ export const VEHICLES = {
   //     accel: 6.5,
   //     clearance: 0.38,
   //   }),
-  fourbyfour: car({
-    name: "Four-by-four",
-    price: 1100,
-    blurb: "A boxy off-roader with a high ride: the best thing for the hills.",
-    model: "cars/suv",
-    wheels: { front: 0.76, back: -0.56, half: 0.43, tire: 0.3 },
-    seats: [
-      [0.22, 0.58, 0.05],
-      [-0.22, 0.58, 0.05],
-    ],
-    speed: 28,
-    accel: 7.5,
-    clearance: 0.42,
-  }),
-  touring: car({
-    name: "Touring SUV",
-    price: 1500,
-    blurb: "A long, plush SUV. Quiet, quick and comfortable.",
-    model: "cars/suv-luxury",
-    wheels: { front: 0.81, back: -0.71, half: 0.43, tire: 0.3 },
-    seats: [
-      [0.22, 0.58, 0.1],
-      [-0.22, 0.58, 0.1],
-    ],
-    speed: 31,
-    accel: 8,
-    clearance: 0.38,
-  }),
-  campervan: car({
-    name: "Camper van",
-    price: 1000,
-    blurb: "A tall van for long trips round the island roads.",
-    model: "cars/van",
-    wheels: { front: 0.76, back: -0.76, half: 0.43, tire: 0.3 },
-    seats: [
-      [0.22, 0.62, 0.32],
-      [-0.22, 0.62, 0.32],
-    ],
-    speed: 24,
-    accel: 6,
-    clearance: 0.36,
-  }),
-  sedan: car({
-    name: "Sedan",
-    price: 950,
-    blurb: "An everyday saloon: comfortable, sensible, not built for the hills.",
-    model: "cars/sedan",
-    wheels: { front: 0.66, back: -0.66, half: 0.43, tire: 0.3 },
-    seats: [
-      [0.22, 0.55, -0.05],
-      [-0.22, 0.55, -0.05],
-    ],
-    speed: 30,
-    accel: 8,
-    clearance: 0.3,
-  }),
-  coupe: car({
-    name: "Coupé",
-    price: 1700,
-    blurb: "A low two-door with a big engine.",
-    model: "cars/sedan-sports",
-    wheels: { front: 0.66, back: -0.66, half: 0.43, tire: 0.3 },
-    seats: [
-      [0.22, 0.48, -0.1],
-      [-0.22, 0.48, -0.1],
-    ],
-    speed: 36,
-    accel: 10,
-    clearance: 0.26,
-  }),
-  hothatch: car({
-    name: "Hot hatch",
-    price: 1300,
-    blurb: "A short, stiff hatchback that loves a corner.",
-    model: "cars/hatchback-sports",
-    wheels: { front: 0.81, back: -0.81, half: 0.43, tire: 0.3 },
-    seats: [
-      [0.22, 0.48, 0.05],
-      [-0.22, 0.48, 0.05],
-    ],
-    speed: 33,
-    accel: 10,
-    steer: 0.6,
-    clearance: 0.28,
-  }),
+  //   fourbyfour: car({
+  //     name: "Four-by-four",
+  //     price: 1100,
+  //     blurb: "A boxy off-roader with a high ride: the best thing for the hills.",
+  //     model: "cars/suv",
+  //     wheels: { front: 0.76, back: -0.56, half: 0.43, tire: 0.3 },
+  //     seats: [
+  //       [0.22, 0.58, 0.05],
+  //       [-0.22, 0.58, 0.05],
+  //     ],
+  //     speed: 28,
+  //     accel: 7.5,
+  //     clearance: 0.42,
+  //   }),
+  //   campervan: car({
+  //     name: "Camper van",
+  //     price: 1000,
+  //     blurb: "A tall van for long trips round the island roads.",
+  //     model: "cars/van",
+  //     wheels: { front: 0.76, back: -0.76, half: 0.43, tire: 0.3 },
+  //     seats: [
+  //       [0.22, 0.62, 0.32],
+  //       [-0.22, 0.62, 0.32],
+  //     ],
+  //     speed: 24,
+  //     accel: 6,
+  //     clearance: 0.36,
+  //   }),
+  //   sedan: car({
+  //     name: "Sedan",
+  //     price: 950,
+  //     blurb: "An everyday saloon: comfortable, sensible, not built for the hills.",
+  //     model: "cars/sedan",
+  //     wheels: { front: 0.66, back: -0.66, half: 0.43, tire: 0.3 },
+  //     seats: [
+  //       [0.22, 0.55, -0.05],
+  //       [-0.22, 0.55, -0.05],
+  //     ],
+  //     speed: 30,
+  //     accel: 8,
+  //     clearance: 0.3,
+  //   }),
+  //   hothatch: car({
+  //     name: "Hot hatch",
+  //     price: 1300,
+  //     blurb: "A short, stiff hatchback that loves a corner.",
+  //     model: "cars/hatchback-sports",
+  //     wheels: { front: 0.81, back: -0.81, half: 0.43, tire: 0.3 },
+  //     seats: [
+  //       [0.22, 0.48, 0.05],
+  //       [-0.22, 0.48, 0.05],
+  //     ],
+  //     speed: 33,
+  //     accel: 10,
+  //     steer: 0.6,
+  //     clearance: 0.28,
+  //   }),
   //   racer: car({
   //     name: "Racer",
   //     price: 3000,
@@ -865,18 +940,6 @@ export const VEHICLES = {
   //     accel: 13,
   //     steer: 0.5,
   //     clearance: 0.18,
-  //   }),
-  //   prototype: car({
-  //     name: "Prototype",
-  //     price: 4000,
-  //     blurb: "A wedge from the future. The quickest thing on wheels.",
-  //     model: "cars/race-future",
-  //     wheels: { front: 0.59, back: -0.93, half: 0.45, tire: 0.3 },
-  //     seats: [[0, 0.32, -0.2]],
-  //     speed: 48,
-  //     accel: 14,
-  //     steer: 0.5,
-  //     clearance: 0.2,
   //   }),
   //   boxtruck: car({
   //     name: "Box truck",
@@ -906,8 +969,6 @@ export const VEHICLES = {
   //     accel: 5.5,
   //     clearance: 0.36,
   //   }),
-
-  /* ----- mounts ----- */
   //   horse: mount({
   //     name: "Bay horse",
   //     price: 340,
@@ -948,7 +1009,7 @@ export const VEHICLES = {
 
 export type VehicleKind = keyof typeof VEHICLES;
 
-/* In marketplace order: by section, as listed above. */
+/* In marketplace order: by tier, as listed above. */
 export const VEHICLE_KINDS = Object.keys(VEHICLES) as VehicleKind[];
 
 export const isVehicleKind = (v: unknown): v is VehicleKind =>
@@ -983,8 +1044,16 @@ export function controlsOf(kind: VehicleKind) {
   }
 }
 
-/* Older saves: the hand-built rowboat became the rowboat; the desert bike is gone. */
+/* Free for everyone, or bought once and kept. `owned` is what an inventory holds. */
+export const ownsVehicle = (owned: readonly VehicleKind[], kind: VehicleKind) =>
+  VEHICLES[kind].tier === "free" || owned.includes(kind);
+
+/*
+ * Older saves: the rowboat (and the hand-built boat before it) is now the
+ * skiff, the free boat. Anything else since retired is simply gone.
+ */
 export function migrateKind(v: unknown): VehicleKind | null {
   if (isVehicleKind(v)) return v;
+  if (v === "rowboat") return "skiff";
   return null;
 }
