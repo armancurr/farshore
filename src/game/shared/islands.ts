@@ -133,6 +133,12 @@ type ShapeDef = {
   base: number;
   roll: number;
   ridge: number;
+  /*
+   * Terraces: the land climbs in steps of `step` metres, each a flat bench
+   * and a steep riser (`riser` of the step's run), over about `cover` of the
+   * island; elsewhere the slopes stay smooth, and those are the ways up.
+   */
+  terrace?: { step: number; riser: number; cover: number };
   plan: (rng: Rng) => Plan;
 };
 
@@ -174,6 +180,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.3,
     roll: 0.22,
     ridge: 0.03,
+    terrace: { step: 3.4, riser: 0.4, cover: 0.55 },
     plan: (rng) => {
       const hills: Hill[] = [{ x: 0, z: 0, r: 75, h: 1 }];
       for (let k = 0; k < 9; k++)
@@ -192,6 +199,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     roll: 0.18,
     ridge: 0.09,
     /* Kept exactly as the first island was made, so old saves come back unchanged. */
+    terrace: { step: 6.5, riser: 0.2, cover: 0.7 },
     plan: (rng) => {
       const hills: Hill[] = [];
       hills.push(hill(rng() * TAU, rng() * 50, range(rng, 58, 72), 1));
@@ -217,6 +225,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.16,
     roll: 0.16,
     ridge: 0.1,
+    terrace: { step: 5.5, riser: 0.24, cover: 0.6 },
     plan: (rng) => {
       const facing = rng() * TAU;
       const radius = range(rng, 150, 175);
@@ -269,6 +278,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.12,
     roll: 0.16,
     ridge: 0.09,
+    terrace: { step: 5, riser: 0.26, cover: 0.55 },
     plan: (rng) => {
       const axis = rng() * TAU;
       const apart = range(rng, 120, 140);
@@ -354,6 +364,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.1,
     roll: 0.14,
     ridge: 0.2,
+    terrace: { step: 7, riser: 0.16, cover: 0.75 },
     plan: (rng) => {
       const axis = rng() * Math.PI;
       const c = Math.cos(axis);
@@ -392,6 +403,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.2,
     roll: 0.14,
     ridge: 0.05,
+    terrace: { step: 8, riser: 0.14, cover: 0.85 },
     plan: (rng) => {
       const hills: Hill[] = [hill(rng() * TAU, rng() * 30, range(rng, 115, 135), 1)];
       for (let k = 0; k < 5; k++)
@@ -416,6 +428,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.3,
     roll: 0.3,
     ridge: 0.05,
+    terrace: { step: 3.6, riser: 0.32, cover: 0.6 },
     plan: (rng) => {
       const hills: Hill[] = [];
       for (let k = 0; k < 16; k++)
@@ -470,6 +483,7 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
     base: 0.1,
     roll: 0.12,
     ridge: 0.14,
+    terrace: { step: 7.5, riser: 0.18, cover: 0.6 },
     plan: (rng) => {
       const hills: Hill[] = [hill(rng() * TAU, rng() * 25, range(rng, 48, 58), 1)];
       for (let k = 0; k < 7; k++)
@@ -534,14 +548,48 @@ export function islandHeights(shape: ShapeId, seed: number, n: number, lift = 1)
 
   const out = new Float32Array(n * n);
   const top = MAX_HEIGHT * def.height * lift;
+  const terrace = def.terrace;
+  const steps = createNoise2D(rng);
+  const wobble = createNoise2D(rng);
   for (let k = 0; k < raw.length; k++) {
     const t = raw[k] / maxRaw;
-    const land = (plan.curve ? plan.curve(t) : t) * top - 1.4;
+    let land = (plan.curve ? plan.curve(t) : t) * top - 1.4;
+    if (terrace && land > 1.2) {
+      const x = -half + (k % n) * cell;
+      const z = -half + Math.floor(k / n) * cell;
+      land = terraced(land, x, z, terrace, steps, wobble);
+    }
     /* Out past the coast the floor falls away to the open sea's depth (less in a lagoon). */
     const sea = (1 - masks[k]) * (SEA_FLOOR + 1.4);
     out[k] = land + sea * floors[k];
   }
   return out;
+}
+
+/*
+ * Step a height into terraces. Where the `steps` field is high the land
+ * benches and climbs in risers; where it's low the slope runs smooth, so
+ * there's always a way round. The step edges wander a little, so a riser
+ * follows the hill without tracing it exactly.
+ */
+function terraced(
+  h: number,
+  x: number,
+  z: number,
+  t: { step: number; riser: number; cover: number },
+  steps: (x: number, z: number) => number,
+  wobble: (x: number, z: number) => number,
+) {
+  const on = smoothstep(0.5 - t.cover, 0.62 - t.cover, (steps(x * 0.0045, z * 0.0045) + 1) / 2);
+  if (on <= 0) return h;
+  const w = wobble(x * 0.012, z * 0.012) * 0.22;
+  const u = h / t.step + w;
+  const k = Math.floor(u);
+  const f = u - k;
+  const stepped = (k + smoothstep(1 - t.riser, 1, f) - w) * t.step;
+  /* The lowest bench comes in gently, so beaches stay beaches. */
+  const shore = smoothstep(1.2, 3.5, h);
+  return h + (stepped - h) * on * shore;
 }
 
 /* ---------- the grand map ---------- */

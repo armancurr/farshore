@@ -88,6 +88,8 @@ import { createLand, OpenSea } from "./scene/land";
 import { PALETTE, shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
+import { Clouds } from "./scene/clouds";
+import { NO_CAST, SunShadows } from "./scene/shadows";
 import { Sky } from "./scene/sky";
 import { ViewModel } from "./scene/weapons";
 
@@ -276,6 +278,8 @@ export class Game {
   private camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.08, 4500);
   private post = new PostPass();
   private sky = new Sky();
+  private clouds = new Clouds();
+  private shadows = new SunShadows();
   private audio = new TideAudio();
   private viewmodel = new ViewModel();
   private world: World | null = null;
@@ -394,6 +398,10 @@ export class Game {
     this.touch = matchMedia("(pointer: coarse)").matches;
     this.input = new Input(canvas);
     this.scene.add(this.sky.group);
+    this.scene.add(this.clouds.group);
+    /* The sky, the sea and the clouds are drawn but cast no shadow (see SunShadows). */
+    this.sky.group.traverse((o) => o.layers.set(NO_CAST));
+    this.camera.layers.enable(NO_CAST);
     /*
      * The pack models (animals, trees, rocks) are lit like the rest of the
      * world: one sun from where the sky draws it, a violet sky above and the
@@ -635,6 +643,8 @@ export class Game {
     this.bikes.dispose();
     this.dropWorld();
     this.sky.dispose();
+    this.clouds.dispose();
+    this.shadows.dispose();
     this.post.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
@@ -1191,6 +1201,9 @@ export class Game {
       this.camera.rotation.set(v.pitch, v.yaw, 0, "YXZ");
     }
     this.sky.follow(this.camera);
+    this.clouds.update(this.worldTime(), this.camera.position);
+    this.camera.updateMatrixWorld();
+    this.shadows.render(this.renderer, this.scene, this.camera.position);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
     this.under += (under - this.under) * Math.min(1, dt * 10);

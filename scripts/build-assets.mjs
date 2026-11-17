@@ -38,6 +38,9 @@ const RAMP = {
   foliage: [hex(0xa8404f), hex(0xe0606a), hex(0xff8882), hex(0xffb4a6)],
   /* Bark: the deep teal of the palette's bark, lifting toward slate. */
   bark: [hex(0x10303c), hex(0x194350), hex(0x285c6a), hex(0x3d7684)],
+  /* The other leaf colours: teal for pines and grass, peach for blossom. */
+  teal: [hex(0x103641), hex(0x1b5260), hex(0x2f7383), hex(0x5aa3ad)],
+  peach: [hex(0xc8606a), hex(0xf09a92), hex(0xffc1ae), hex(0xffe3d4)],
   /* Stone: lavender. */
   rock: [hex(0x5d5f86), hex(0x7d80a6), hex(0x9c9ebe), hex(0xc4c5dd)],
 };
@@ -73,7 +76,7 @@ function hsl([r, g, b]) {
  */
 function grade(rgb, opts) {
   const [h, s, l] = hsl(rgb);
-  if (s > 0.22 && h >= 62 && h <= 170) return ramp(RAMP.foliage, l * 1.25 - 0.05);
+  if (s > 0.22 && h >= 62 && h <= 170) return ramp(RAMP[opts.leaf ?? "foliage"], l * 1.25 - 0.05);
   if (opts.bark && s > 0.3 && (h < 40 || h > 340) && l < 0.75)
     return ramp(RAMP.bark, l * 1.4 - 0.1);
   if (opts.stone && s < 0.16 && l > 0.18 && l < 0.92) return ramp(RAMP.rock, (l - 0.2) * 1.45);
@@ -81,16 +84,23 @@ function grade(rgb, opts) {
 }
 
 async function palette(src, out, opts = {}) {
-  let img = sharp(src).removeAlpha();
-  if (opts.resize) img = img.resize(opts.resize[0], opts.resize[1], { kernel: "nearest" });
-  const { data, info } = await img.raw().toBuffer({ resolveWithObject: true });
-  for (let i = 0; i < data.length; i += 3) {
-    const c = grade([data[i], data[i + 1], data[i + 2]], opts);
-    data[i] = Math.round(c[0]);
-    data[i + 1] = Math.round(c[1]);
-    data[i + 2] = Math.round(c[2]);
+  const raw = await sharp(src).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  /* Resampled by hand, point-sampling the middle of each cell: sharp's own shrink blends the bands. */
+  const [w, h] = opts.resize ?? [raw.info.width, raw.info.height];
+  const data = Buffer.alloc(w * h * 3);
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const sx = Math.floor(((i + 0.5) / w) * raw.info.width);
+      const sy = Math.floor(((j + 0.5) / h) * raw.info.height);
+      const k = (sy * raw.info.width + sx) * 3;
+      const c = grade([raw.data[k], raw.data[k + 1], raw.data[k + 2]], opts);
+      const o = (j * w + i) * 3;
+      data[o] = Math.round(c[0]);
+      data[o + 1] = Math.round(c[1]);
+      data[o + 2] = Math.round(c[2]);
+    }
   }
-  await sharp(data, { raw: { width: info.width, height: info.height, channels: 3 } })
+  await sharp(data, { raw: { width: w, height: h, channels: 3 } })
     .png({ compressionLevel: 9 })
     .toFile(out);
 }
@@ -187,11 +197,13 @@ const fresh = (pack) => {
     "forest",
     (n) => n.endsWith("_Color1") && !n.includes("Singlesided"),
   );
-  await palette(join(dir, "Textures/forest_texture.png"), join(OUT, "forest/palette.png"), {
-    resize: [32, 256],
-    bark: true,
-    stone: true,
-  });
+  for (const [name, leaf] of [["palette", "foliage"], ["palette-teal", "teal"], ["palette-peach", "peach"]])
+    await palette(join(dir, "Textures/forest_texture.png"), join(OUT, `forest/${name}.png`), {
+      resize: [32, 256],
+      bark: true,
+      stone: true,
+      leaf,
+    });
 }
 
 /* Characters: the KayKit adventurers and skeletons, all on the medium rig. */

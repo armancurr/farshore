@@ -132,11 +132,10 @@ export function bakeModel(id: ModelId | string): Promise<Baked> {
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
-      const g = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
-      /* Quantised attributes come back as normalised ints: make them floats to merge. */
-      for (const name of Object.keys(g.attributes)) {
-        if (!["position", "normal", "uv"].includes(name)) g.deleteAttribute(name);
-      }
+      const src = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
+      /* Quantised attributes are normalised ints: copy them out as floats before moving them, or they'd clamp. */
+      const g = toFloat(src);
+      if (src !== mesh.geometry) src.dispose();
       g.applyMatrix4(mesh.matrixWorld);
       parts.push(g);
     });
@@ -148,6 +147,19 @@ export function bakeModel(id: ModelId | string): Promise<Baked> {
   baked.set(id, p);
   p.catch(() => baked.delete(id));
   return p;
+}
+
+function toFloat(src: THREE.BufferGeometry) {
+  const out = new THREE.BufferGeometry();
+  for (const name of ["position", "normal", "uv"]) {
+    const a = src.getAttribute(name);
+    if (!a) continue;
+    const arr = new Float32Array(a.count * a.itemSize);
+    for (let i = 0; i < a.count; i++)
+      for (let c = 0; c < a.itemSize; c++) arr[i * a.itemSize + c] = a.getComponent(i, c);
+    out.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize));
+  }
+  return out;
 }
 
 function mergeFloat(parts: THREE.BufferGeometry[]) {

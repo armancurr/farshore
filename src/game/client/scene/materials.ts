@@ -57,7 +57,69 @@ export const shared = {
   uSun: { value: new THREE.Vector3(-0.33, 0.82, -0.47).normalize() },
   uLight: { value: 1 },
   uTime: { value: 0 },
+  /* The sun's shadow maps and the clouds' shade (scene/shadows.ts, scene/clouds.ts). */
+  uShadow0: { value: null as THREE.Texture | null },
+  uShadow1: { value: null as THREE.Texture | null },
+  uShadowM0: { value: new THREE.Matrix4() },
+  uShadowM1: { value: new THREE.Matrix4() },
+  uShadowOn: { value: 0 },
+  uShadowRange: { value: new THREE.Vector2() },
+  uCloudMap: { value: null as THREE.Texture | null },
+  /* The clouds' footprint map: its centre (x, z), its width, and the clouds' height. */
+  uCloudArea: { value: new THREE.Vector4(0, 0, 0, 0) },
 };
+
+/*
+ * Sampling the maps and the clouds' shade, for any shader: the near map where
+ * it reaches, the far one beyond it, nothing past that.
+ */
+export const GLSL_SHADOW_SAMPLING = /* glsl */ `
+  uniform highp sampler2DShadow uShadow0;
+  uniform highp sampler2DShadow uShadow1;
+  uniform mat4 uShadowM0;
+  uniform mat4 uShadowM1;
+  uniform float uShadowOn;
+  uniform vec2 uShadowRange;
+  uniform sampler2D uCloudMap;
+  uniform vec4 uCloudArea;
+
+  float shadowPcf(highp sampler2DShadow map, vec3 p, float texel, float bias) {
+    float z = p.z - bias;
+    float s = 0.0;
+    s += texture(map, vec3(p.xy + vec2(-0.5, -0.5) * texel, z));
+    s += texture(map, vec3(p.xy + vec2(0.5, -0.5) * texel, z));
+    s += texture(map, vec3(p.xy + vec2(-0.5, 0.5) * texel, z));
+    s += texture(map, vec3(p.xy + vec2(0.5, 0.5) * texel, z));
+    return s * 0.25;
+  }
+
+  float sunShadow(vec3 world) {
+    if (uShadowOn < 0.5) return 1.0;
+    vec3 p0 = (uShadowM0 * vec4(world, 1.0)).xyz;
+    vec2 e0 = abs(p0.xy - 0.5);
+    float in0 = 1.0 - smoothstep(0.42, 0.49, max(e0.x, e0.y));
+    float s0 = 1.0;
+    if (in0 > 0.0) s0 = shadowPcf(uShadow0, p0, 1.0 / 2048.0, 0.0008);
+    vec3 p1 = (uShadowM1 * vec4(world, 1.0)).xyz;
+    vec2 e1 = abs(p1.xy - 0.5);
+    float in1 = 1.0 - smoothstep(0.4, 0.49, max(e1.x, e1.y));
+    float s1 = 1.0;
+    if (in0 < 1.0 && in1 > 0.0) s1 = mix(1.0, shadowPcf(uShadow1, p1, 1.5 / 2048.0, 0.0012), in1);
+    return mix(s1, s0, in0);
+  }
+
+  /* The clouds' shadows: the clouds' footprint, cast along the sun's ray down onto this spot. */
+  float cloudShade(vec3 world) {
+    if (uCloudArea.z <= 0.0) return 1.0;
+    vec2 xz = world.xz + uSun.xz / max(uSun.y, 0.2) * (uCloudArea.w - world.y);
+    vec2 uv = (xz - uCloudArea.xy) / uCloudArea.z + 0.5;
+    return 1.0 - 0.42 * texture2D(uCloudMap, uv).r;
+  }
+
+  float worldShadow(vec3 world) {
+    return min(sunShadow(world), cloudShade(world));
+  }
+`;
 
 export const GLSL_COMMON = /* glsl */ `
   uniform float uFog;
@@ -66,6 +128,7 @@ export const GLSL_COMMON = /* glsl */ `
   uniform float uLight;
   uniform float uTime;
   const float SEA_LEVEL = 0.0;
+  ${GLSL_SHADOW_SAMPLING}
 
   float fogFactor(vec3 world) {
     float d = length(cameraPosition - world);
@@ -118,7 +181,8 @@ export const INK_FRAGMENT = /* glsl */ `
   void main() {
     vec3 n = normalize(vNormal);
     if (!gl_FrontFacing) n = -n;
-    float diff = sunlight(n);
+    /* The sun, less whatever shadow falls here. */
+    float diff = sunlight(n) * worldShadow(vWorld + n * 0.06);
     /* Flat colour, shaded in two or three soft steps by the sun. */
     vec3 c = uColor * (0.62 + 0.48 * diff) + uLit;
     /* Anything below the waterline takes on the sea. */
