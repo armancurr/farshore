@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { GLSL_SHADOW_SAMPLING, shared } from "./materials";
-import { addShadeHook } from "./packs";
+import { addShadeHook } from "./shade";
 
 /*
  * The sun's shadows. It's always day and the sun never moves, so every
