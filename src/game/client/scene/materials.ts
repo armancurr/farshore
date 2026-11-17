@@ -110,7 +110,8 @@ export const GLSL_SHADOW_SAMPLING = /* glsl */ `
 
   /* The clouds' shadows: the clouds' footprint, cast along the sun's ray down onto this spot. */
   float cloudShade(vec3 world) {
-    if (uCloudArea.z <= 0.0) return 1.0;
+    /* Nothing above the clouds is under them (the first-person weapon is drawn far up). */
+    if (uCloudArea.z <= 0.0 || world.y > uCloudArea.w) return 1.0;
     vec2 xz = world.xz + uSun.xz / max(uSun.y, 0.2) * (uCloudArea.w - world.y);
     vec2 uv = (xz - uCloudArea.xy) / uCloudArea.z + 0.5;
     return 1.0 - 0.42 * texture2D(uCloudMap, uv).r;
