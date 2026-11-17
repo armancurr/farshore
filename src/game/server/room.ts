@@ -1678,7 +1678,8 @@ export class Room {
 
   private attack(m: Member, charge: number) {
     const now = this.now();
-    if (now < m.attackReadyAt || m.blocking) return;
+    /* Hands on the wheel, the reins or the oars. */
+    if (now < m.attackReadyAt || m.blocking || m.ride) return;
     const kind = this.weaponOf(m);
     const def = weaponDef(kind);
     m.attackReadyAt = now + def.cooldown;

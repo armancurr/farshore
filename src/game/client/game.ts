@@ -1350,7 +1350,8 @@ export class Game {
       const b = this.body;
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
-      this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
+      this.blocking =
+        this.weapon === "shield" && active && this.input.altHeld && !this.build && !this.ride;
       const charging = this.chargeStart !== null;
       if (active && this.input.take("creative") && !this.ride) this.toggleCreative(b);
       if (active && this.input.take("fly") && this.creative && !this.ride)
@@ -1422,7 +1423,7 @@ export class Game {
       /* Attack: instant swings on press; the warhammer and greatsword charge until release. */
       const now = performance.now() / 1000;
       if (this.build) this.buildInput(b);
-      else if (this.input.take("attack") && !this.blocking) {
+      else if (this.input.take("attack") && !this.blocking && !this.ride) {
         if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
         } else this.tryAttack(b, 0);
