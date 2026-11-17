@@ -60,8 +60,32 @@ function boundsOf(kind: WeaponKind) {
 }
 
 /*
- * A weapon, ready to hold. The group comes back at once and the model drops
- * into it when it has loaded (straight away after the first time).
+ * Each weapon's model once it has loaded, to copy from. Copies share its
+ * geometry and its pack's material, so they're never disposed one by one.
+ */
+const loaded = new Map<WeaponKind, THREE.Group>();
+const loading = new Map<WeaponKind, Promise<THREE.Group>>();
+
+function load(kind: WeaponKind) {
+  let p = loading.get(kind);
+  if (!p) {
+    const s = SPECS[kind];
+    p = packModel(s.id, s.texture).then((model) => {
+      model.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) o.userData.shared = true;
+      });
+      loaded.set(kind, model);
+      return model;
+    });
+    loading.set(kind, p);
+    p.catch(() => loading.delete(kind));
+  }
+  return p;
+}
+
+/*
+ * A weapon, ready to hold. The group comes back at once, with the model in it
+ * if it has loaded before, or dropped in as soon as it has.
  */
 export function buildWeapon(kind: WeaponKind): THREE.Group {
   const s = SPECS[kind];
@@ -71,12 +95,9 @@ export function buildWeapon(kind: WeaponKind): THREE.Group {
   holder.scale.setScalar(s.scale);
   holder.position.y = -(s.grip ?? 0) * s.scale;
   group.add(holder);
-  void packModel(s.id, s.texture).then((model) => {
-    model.traverse((o) => {
-      if ((o as THREE.Mesh).isMesh) o.userData.weapon = kind;
-    });
-    holder.add(model);
-  });
+  const ready = loaded.get(kind);
+  if (ready) holder.add(ready.clone(true));
+  else void load(kind).then((model) => holder.add(model.clone(true)));
   return group;
 }
 
@@ -85,7 +106,7 @@ export function buildWeapon(kind: WeaponKind): THREE.Group {
  * picture of them isn't empty (or white).
  */
 export async function weaponsReady(kinds: readonly WeaponKind[]) {
-  const models = await Promise.all(kinds.map((k) => packModel(SPECS[k].id, SPECS[k].texture)));
+  const models = await Promise.all(kinds.map(load));
   const maps = new Set<THREE.Texture>();
   for (const m of models)
     m.traverse((o) => {

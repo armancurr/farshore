@@ -1576,7 +1576,7 @@ export class Room {
     return !this.sheltered(o) && !((by.flags | o.flags) & FLAG.creative);
   }
 
-  /* A sickle's bleed runs out a second at a time; the Harbor staunches it. */
+  /* A bleed runs out a second at a time; the Harbor staunches it. */
   private tickBleed(m: Member, now: number) {
     const b = m.bleed;
     if (!b || now < b.nextAt) return;

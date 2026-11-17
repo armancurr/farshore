@@ -51,6 +51,8 @@ function displayWeapon(kind: WeaponKind) {
   /* Lift it so the bottom clears the plinth, then lean it a touch. */
   model.position.y = -span.from * scale;
   if (shield) model.rotation.y = Math.PI;
+  /* Knuckledusters lie flat in the hand's frame: tip them up so the rings face out. */
+  if (kind === "knuckles") model.rotation.x = -1.2;
   const tilt = new THREE.Group();
   tilt.add(model);
   tilt.position.y = kind === "knuckles" ? 0.75 : 0.25;
@@ -101,10 +103,13 @@ function frameVehicle(camera: THREE.PerspectiveCamera, dist: number) {
   camera.lookAt(0, 0.45, 0);
 }
 
-/* A weapon's or vehicle's geometry is its own; its materials are shared and stay. */
+/*
+ * A vehicle's geometry is its own; its materials are shared and stay. A
+ * weapon's model is shared with every copy of it (userData.shared), so it stays too.
+ */
 function disposeWeapon(root: THREE.Object3D) {
   root.traverse((o) => {
-    if ((o as THREE.Mesh).geometry) (o as THREE.Mesh).geometry.dispose();
+    if ((o as THREE.Mesh).geometry && !o.userData.shared) (o as THREE.Mesh).geometry.dispose();
   });
 }
 
@@ -258,10 +263,48 @@ export function portraitsOf(skins: readonly SkinId[], width = 224): Map<SkinId, 
 }
 
 /*
- * The same for the weapons: each stood up and turned three-quarters on. Their
- * models load first, so this one answers once they have.
+ * The same for the weapons. Each is leant corner to corner across its tile,
+ * so a dagger fills it as well as a halberd does, and framed to its own size
+ * with room left at the bottom for the name. Their models load first, so
+ * this one answers once they have.
  */
 const weaponPortraits = new Map<WeaponKind, string>();
+
+function portraitWeapon(kind: WeaponKind) {
+  const model = buildWeapon(kind);
+  const root = new THREE.Group();
+  root.add(model);
+  switch (gripOf(kind)) {
+    case "shield":
+      /* Face on, turned a little. */
+      model.rotation.y = Math.PI + 0.35;
+      break;
+    case "dual":
+      if (kind === "knuckles") {
+        /* Looked down on, so the finger rings show. */
+        model.rotation.set(-1.1, 0.4, 0);
+        break;
+      }
+    /* falls through: a dagger leans like any blade */
+    default:
+      model.rotation.y = -0.35;
+      root.rotation.z = -0.62;
+  }
+  root.updateMatrixWorld(true);
+  return root;
+}
+
+/* Back the camera off until `box` fits the tile, its name clear underneath. */
+function framePortrait(camera: THREE.PerspectiveCamera, box: THREE.Box3) {
+  const size = box.getSize(new THREE.Vector3());
+  const centre = box.getCenter(new THREE.Vector3());
+  const tall = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const fit = Math.max(size.y / 0.78, size.x / 0.86 / camera.aspect) / 2;
+  const dist = fit / tall + size.z / 2;
+  /* Nudge it up a little so the caption sits under it, not over it. */
+  camera.position.set(centre.x, centre.y - fit * 0.12, centre.z - dist);
+  camera.lookAt(centre.x, centre.y - fit * 0.12, centre.z);
+}
 
 export async function weaponPortraitsOf(
   kinds: readonly WeaponKind[],
@@ -272,17 +315,17 @@ export async function weaponPortraitsOf(
     await weaponsReady(missing);
     const canvas = document.createElement("canvas");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    renderer.setPixelRatio(1);
+    /* Twice over, so the small ones stay crisp on a sharp screen. */
+    renderer.setPixelRatio(2);
     renderer.setSize(width, Math.round(width * 1.25), false);
     renderer.setClearColor(0x000000, 0);
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
-    frame(camera, 2.3, 0.6);
+    const camera = new THREE.PerspectiveCamera(24, 0.8, 0.01, 50);
     scene.add(weaponLights());
     for (const kind of missing) {
-      const root = displayWeapon(kind);
-      root.rotation.y = gripOf(kind) === "shield" ? 0.4 : 0.6;
+      const root = portraitWeapon(kind);
       scene.add(root);
+      framePortrait(camera, new THREE.Box3().setFromObject(root));
       renderer.render(scene, camera);
       weaponPortraits.set(kind, canvas.toDataURL("image/png"));
       scene.remove(root);
