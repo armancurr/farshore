@@ -175,7 +175,7 @@ function stepOnce(
     : clamp(Math.atan2(ahead - behind, 1.6), -0.4, 0.4);
   b.pitch += (pitch - b.pitch) * Math.min(1, dt * 6);
   /* Leaning into a turn at speed. */
-  b.roll += (clamp(-b.turn * b.speed * 0.02, -0.15, 0.15) - b.roll) * Math.min(1, dt * 5);
+  b.roll += (clamp(b.turn * b.speed * 0.02, -0.15, 0.15) - b.roll) * Math.min(1, dt * 5);
   return bumped;
 }
 

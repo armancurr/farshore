@@ -299,7 +299,8 @@ const HULL_SMALL: readonly Native[] = [
   [-1.25, 2.1, -1.75, DECK],
 ];
 const HULL_MEDIUM: readonly Native[] = [
-  [0, 3.5, -4.35, HELM],
+  /* Behind the wheel, well aft of the mizzen. */
+  [0, 3.5, -4.8, HELM],
   [1.3, 2.1, -0.1, DECK],
   [-1.3, 2.1, -0.1, DECK],
   [1.3, 2.1, 2.5, DECK],

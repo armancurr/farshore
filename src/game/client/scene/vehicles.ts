@@ -450,7 +450,8 @@ function buildWake(def: VehicleDef) {
   /* The plane's near edge at the stern. */
   geo.translate(0, 0, len / 2);
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = 1;
+  /* After the sea, which is see-through and drawn late (renderOrder 2). */
+  mesh.renderOrder = 3;
   return mesh;
 }
 
@@ -831,10 +832,14 @@ export class VehicleView {
       w.node.position.y = w.restY + s.travel[i] / def.scale;
     });
     if (b.body) {
-      /* Lean out of a turn, squat as it pulls away and dive under braking. */
+      /*
+       * Lean out of a turn, squat as it pulls away and dive under braking.
+       * The model is turned round inside the vehicle, so its x and z axes
+       * point the other way: a positive roll here is the car's right side down.
+       */
       const lean = clamp(p.turn * p.speed * 0.01, -0.07, 0.07);
       b.body.rotation.z += (lean - b.body.rotation.z) * Math.min(1, dt * 6);
-      b.body.rotation.x = s.dive;
+      b.body.rotation.x = -s.dive;
     }
   }
 

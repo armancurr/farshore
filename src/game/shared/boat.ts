@@ -152,10 +152,10 @@ function stepOnce(
   const pitch = spec.mode === "motor" ? Math.max(0, pace) * 0.07 * (1.2 - pace * 0.5) : 0;
   const roll =
     spec.mode === "motor"
-      ? clamp(-b.turn * pace * 0.22, -0.2, 0.2)
+      ? clamp(b.turn * pace * 0.22, -0.2, 0.2)
       : spec.mode === "sail"
         ? heel * 0.14
-        : -b.turn * 0.03;
+        : b.turn * 0.03;
   b.pitch += (pitch - b.pitch) * Math.min(1, dt * 2);
   b.roll += (roll - b.roll) * Math.min(1, dt * 2);
   b.y = SEA_LEVEL;

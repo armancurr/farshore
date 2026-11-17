@@ -337,7 +337,7 @@ test("a motorboat planes, banks into a turn and backs slowly astern", () => {
   assert(b.pitch > 0.02, "bow up on the plane");
   for (let i = 0; i < 90; i++)
     stepHull(b, intent({ forward: 1, right: 1 }), 1 / 60, sea(), spec, 0);
-  assert(b.turn < -0.3 && b.roll > 0.05, "turning right, it leans into the turn");
+  assert(b.turn < -0.3 && b.roll < -0.05, "turning right, it banks into the turn: right side down");
   const r = createVehicle(0, 0, 0, 0);
   for (let i = 0; i < 600; i++) stepHull(r, intent({ forward: -1 }), 1 / 60, sea(), spec, 0);
   assert(r.speed < 0 && r.speed >= -spec.reverse - 1e-9);
@@ -598,4 +598,42 @@ test("a land vehicle is put down on dry ground near you, never in the sea", () =
   const you = a.last("world").you;
   assert(Math.hypot(v.x - you.x, v.z - you.z) < 40);
   room.leave(a.id);
+});
+
+test("leaving at the helm keeps your vehicle: you come back in it, where you left it", () => {
+  let now = 100;
+  const room = new Room({ online: true, grand: true, now: () => now });
+  const hello = { name: "sailor", token: "sailortoken1", own: true };
+  const join = () => {
+    const messages = [];
+    const id = room.join({ send: (m) => messages.push(m) }, hello);
+    return { id, messages, last: (t) => messages.findLast((m) => m.t === t) };
+  };
+  const a = join();
+  room.tick();
+  const you = a.last("world").you;
+  let boat = null;
+  for (let r = 20; r < 700 && !boat; r += 5) {
+    room.handle(a.id, moveAt(you.x + r, 0.2, you.z, { yaw: -Math.PI / 2 }));
+    room.handle(a.id, { t: "spawn", kind: "rowboat" });
+    now += 0.05;
+    room.tick();
+    const snap = a.last("snap")?.v.find((v) => vehicleFromIndex(v[1]) === "rowboat");
+    boat = snap ? unpackVehicle(snap) : null;
+  }
+  assert(boat, "a rowboat launched off the Harbor");
+  room.handle(a.id, moveAt(boat.state.x, -0.4, boat.state.z));
+  room.handle(a.id, { t: "interact", kind: "vehicle", id: boat.id });
+  assert.equal(a.last("aboard").seat, 0);
+  room.leave(a.id);
+  now += 0.05;
+  room.tick();
+  const back = join();
+  room.tick();
+  const aboard = back.last("aboard");
+  assert(aboard && aboard.id !== null && aboard.seat === 0, "back at the oars");
+  const v = unpackVehicle(back.last("snap").v.find((s) => s[0] === aboard.id));
+  assert.equal(vehicleFromIndex(v.index), "rowboat");
+  assert(Math.hypot(v.state.x - boat.state.x, v.state.z - boat.state.z) < 0.1);
+  room.leave(back.id);
 });
