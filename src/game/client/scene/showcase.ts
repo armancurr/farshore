@@ -1,12 +1,12 @@
 import * as THREE from "three";
 import type { SkinId } from "../../shared/skins";
 import type { VehicleKind } from "../../shared/vehicles";
-import type { WeaponKind } from "../../shared/weapons";
+import { gripOf, type WeaponKind } from "../../shared/weapons";
 import { buildRowboat } from "./boats";
 import { buildDesertBike } from "./bikes";
-import { edges, flatten, inkMaterial, lineMaterial } from "./materials";
+import { edges, flatten, inkMaterial, lineMaterial, PALETTE } from "./materials";
 import { buildRig, disposeRig, type Rig } from "./skins";
-import { buildWeapon, WEAPON_SPAN } from "./weapons";
+import { buildWeapon, WEAPON_SPAN, weaponsReady } from "./weapons";
 
 /*
  * The marketplace's fitting room: one skin on a plinth, turning slowly and
@@ -36,22 +36,41 @@ function frame(camera: THREE.PerspectiveCamera, height: number, margin = 0.45) {
   camera.lookAt(0, mid, 0);
 }
 
-/* A weapon on display: stood on its pommel just over the plinth, about as tall as a person. */
+/*
+ * A weapon on display: stood on its pommel just over the plinth, about as
+ * tall as a person, its flat (or a shield's face) toward the camera.
+ */
 function displayWeapon(kind: WeaponKind) {
   const span = WEAPON_SPAN[kind];
   const length = span.to - span.from;
-  const scale = Math.min(kind === "shield" ? 1.6 : 3, 1.85 / length);
+  const shield = gripOf(kind) === "shield";
+  /* Knuckledusters are a hand's width: they'd be a speck stood up at a person's height. */
+  const scale = Math.min(shield ? 1.6 : kind === "knuckles" ? 9 : 3, 1.85 / length);
   const model = buildWeapon(kind);
   model.scale.setScalar(scale);
   /* Lift it so the bottom clears the plinth, then lean it a touch. */
   model.position.y = -span.from * scale;
+  if (shield) model.rotation.y = Math.PI;
   const tilt = new THREE.Group();
   tilt.add(model);
-  tilt.position.y = 0.25;
-  tilt.rotation.z = kind === "shield" ? 0 : 0.12;
+  tilt.position.y = kind === "knuckles" ? 0.75 : 0.25;
+  tilt.rotation.z = shield ? 0 : 0.12;
   const root = new THREE.Group();
   root.add(tilt);
   return root;
+}
+
+/*
+ * The weapons are lit models (the skins and vehicles are inked): a sun over
+ * the camera's shoulder and the world's violet sky, so they look as they do
+ * out on the islands.
+ */
+function weaponLights() {
+  const g = new THREE.Group();
+  const sun = new THREE.DirectionalLight(0xffffff, 2.3);
+  sun.position.set(-2.5, 4, -4);
+  g.add(sun, new THREE.HemisphereLight(0xd9d3ff, PALETTE.land, 1.35));
+  return g;
 }
 
 /* A vehicle on display: shrunk to sit on the plinth, a little above it as if afloat. */
@@ -96,6 +115,7 @@ export class Showcase {
   private rig: Rig | null = null;
   /* A weapon or a vehicle: something that stands still and turns. */
   private weapon: THREE.Group | null = null;
+  private lights = weaponLights();
   private yaw = 0.55;
   private spinning = true;
   private walking = true;
@@ -127,7 +147,7 @@ export class Showcase {
   showWeapon(kind: WeaponKind) {
     this.clear();
     this.weapon = displayWeapon(kind);
-    this.scene.add(this.weapon);
+    this.scene.add(this.weapon, this.lights);
     frame(this.camera, 2.3);
   }
 
@@ -145,7 +165,7 @@ export class Showcase {
       this.rig = null;
     }
     if (this.weapon) {
-      this.scene.remove(this.weapon);
+      this.scene.remove(this.weapon, this.lights);
       disposeWeapon(this.weapon);
       this.weapon = null;
     }
@@ -237,15 +257,19 @@ export function portraitsOf(skins: readonly SkinId[], width = 224): Map<SkinId, 
   return new Map(skins.map((s) => [s, portraits.get(s) as string]));
 }
 
-/* The same for the weapons: each stood up and turned three-quarters on. */
+/*
+ * The same for the weapons: each stood up and turned three-quarters on. Their
+ * models load first, so this one answers once they have.
+ */
 const weaponPortraits = new Map<WeaponKind, string>();
 
-export function weaponPortraitsOf(
+export async function weaponPortraitsOf(
   kinds: readonly WeaponKind[],
   width = 224,
-): Map<WeaponKind, string> {
+): Promise<Map<WeaponKind, string>> {
   const missing = kinds.filter((k) => !weaponPortraits.has(k));
   if (missing.length) {
+    await weaponsReady(missing);
     const canvas = document.createElement("canvas");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(1);
@@ -254,9 +278,10 @@ export function weaponPortraitsOf(
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
     frame(camera, 2.3, 0.6);
+    scene.add(weaponLights());
     for (const kind of missing) {
       const root = displayWeapon(kind);
-      root.rotation.y = kind === "shield" ? 0.4 : 0.6;
+      root.rotation.y = gripOf(kind) === "shield" ? 0.4 : 0.6;
       scene.add(root);
       renderer.render(scene, camera);
       weaponPortraits.set(kind, canvas.toDataURL("image/png"));

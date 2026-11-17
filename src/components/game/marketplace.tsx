@@ -57,7 +57,9 @@ export function Marketplace(props: {
       else if (now.tab === "weapons") showcase.current.showWeapon(now.eyed);
       else showcase.current.showVehicle(now.ride);
       setPortraits(mod.portraitsOf(SKINS.map((s) => s.id)));
-      setWeaponPortraits(mod.weaponPortraitsOf(WEAPON_KINDS));
+      void mod.weaponPortraitsOf(WEAPON_KINDS).then((p) => {
+        if (!disposed) setWeaponPortraits(p);
+      });
       setVehiclePortraits(mod.vehiclePortraitsOf(VEHICLE_KINDS));
     });
     return () => {

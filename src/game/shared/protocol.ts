@@ -6,7 +6,7 @@ import type { Prefab } from "./prefabs";
 import { isSkinId, type SkinId } from "./skins";
 import type { SpeciesId } from "./species";
 import { isVehicleKind, type VehicleKind } from "./vehicles";
-import { isWeaponKind, type WeaponKind } from "./weapons";
+import { toWeaponKind, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string; skin: SkinId };
 
@@ -237,13 +237,15 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         token: isToken(m.token) ? m.token : undefined,
         own: m.own === true,
         skin: isSkinId(m.skin) ? m.skin : undefined,
-        weapon: m.weapon === null ? null : isWeaponKind(m.weapon) ? m.weapon : undefined,
+        weapon: m.weapon === null ? null : (toWeaponKind(m.weapon) ?? undefined),
       };
     case "skin":
       return isSkinId(m.skin) ? { t: "skin", skin: m.skin } : null;
-    case "arm":
-      if (m.kind !== null && !isWeaponKind(m.kind)) return null;
-      return { t: "arm", kind: m.kind };
+    case "arm": {
+      if (m.kind === null) return { t: "arm", kind: null };
+      const kind = toWeaponKind(m.kind);
+      return kind ? { t: "arm", kind } : null;
+    }
     case "spawn":
       return isVehicleKind(m.kind) ? { t: "spawn", kind: m.kind } : null;
     case "attack":
