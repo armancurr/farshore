@@ -16,7 +16,8 @@
     "fmt": "biome format --write .",
     "fmt:check": "biome format .",
     "typecheck": "tsc --noEmit",
-    "test:vehicles": "node --import ./tests/register-typescript.mjs --test tests/vehicles.test.mjs",
+    "test": "bun test tests",
+    "test:vehicles": "bun test tests/vehicles.test.mjs",
     "assets:fetch": "bash scripts/fetch-assets.sh",
     "assets:build": "node scripts/build-assets.mjs"
   },
