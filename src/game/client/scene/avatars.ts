@@ -56,6 +56,7 @@ export class Avatar {
     readonly id: number,
     private name: string,
     private skin: SkinId,
+    private showLabel = true,
   ) {
     this.rig = buildRig(skin);
     this.rig.hand.add(this.hand);
@@ -129,12 +130,20 @@ export class Avatar {
     flags: number,
     dt: number,
     camera: THREE.Vector3,
+    vehicle?: {
+      kind: "bike" | "boat";
+      stroke?: number;
+      pitch?: number;
+      roll?: number;
+      bob?: number;
+    },
   ) {
     const moved = Math.hypot(x - this.last.x, z - this.last.z);
     this.last.set(x, y, z);
     const speed = dt > 0 ? Math.min(12, moved / dt) : 0;
     const grounded = (flags & FLAG.grounded) !== 0;
-    const riding = (flags & FLAG.riding) !== 0;
+    const riding = !!vehicle || (flags & FLAG.riding) !== 0;
+    const rideKind = vehicle?.kind ?? "bike";
     if (grounded) this.stride += moved * STRIDE * this.rig.cadence;
     this.sway += ((speed > 0.5 && grounded ? 1 : 0) - this.sway) * Math.min(1, dt * 6);
     this.clock += dt;
@@ -150,8 +159,13 @@ export class Avatar {
 
     const holding = this.weapon !== null;
     this.rig.update(this.clock, this.stride, riding ? 0 : this.sway, holding && !riding);
-    this.body.position.y = riding ? -0.45 : 0;
-    if (riding) this.rig.ride?.();
+    this.body.position.y = riding ? (rideKind === "bike" ? -0.4 : -0.92) + (vehicle?.bob ?? 0) : 0;
+    if (riding) {
+      this.body.rotation.x =
+        (vehicle?.pitch ?? 0) + (rideKind === "bike" ? 0.2 : (vehicle?.stroke ?? 0) * 0.16);
+      this.body.rotation.z = vehicle?.roll ?? 0;
+      this.rig.ride?.(rideKind, vehicle?.stroke ?? 0);
+    } else this.body.rotation.z = 0;
     this.hand.visible = !riding;
     this.label.position.y = this.rig.top + (riding ? -0.35 : 0.1);
     this.rig.head.rotation.x += -pitch * 0.6;
@@ -178,7 +192,7 @@ export class Avatar {
     const d = camera.distanceTo(this.group.position);
     const mat = this.label.material;
     mat.opacity = Math.max(0, Math.min(1, (60 - d) / 25, (d - 2.5) / 2));
-    this.label.visible = mat.opacity > 0.02;
+    this.label.visible = this.showLabel && mat.opacity > 0.02;
   }
 
   dispose() {

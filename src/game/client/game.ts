@@ -278,6 +278,9 @@ export class Game {
   private sky = new Sky();
   private audio = new TideAudio();
   private viewmodel = new ViewModel();
+  private tmpAim = new THREE.Vector3();
+  private thirdPerson = false;
+  private localAvatar: Avatar | null = null;
   private world: World | null = null;
   private conn: Connection | null = null;
   private mode: Mode = "attract";
@@ -480,6 +483,11 @@ export class Game {
   }
 
   private reset() {
+    if (this.localAvatar) {
+      this.scene.remove(this.localAvatar.group);
+      this.localAvatar.dispose();
+      this.localAvatar = null;
+    }
     for (const r of this.remotes.values()) {
       this.scene.remove(r.avatar.group);
       r.avatar.dispose();
@@ -982,6 +990,81 @@ export class Game {
     }
   }
 
+  private onLine(msg: Extract<ServerMsg, { t: "line" }>) {
+    const from = this.tmpV;
+    if (msg.by === this.myId) {
+      if (msg.state === "none") {
+        this.myLine = null;
+        this.bite = null;
+      } else {
+        const depth = this.world ? depthAt(this.world.ground.heightAt(msg.x, msg.z)) : 0;
+        if (msg.state === "cast") this.audio.splash(0.25);
+        this.myLine = { state: msg.state, depth };
+      }
+      this.rodTipWorld(from);
+    } else {
+      const r = this.remotes.get(msg.by);
+      if (r) from.copy(r.avatar.group.position).setY(r.avatar.group.position.y + 2);
+    }
+    this.lines.set(msg.by, msg.x, msg.z, msg.state, from);
+  }
+
+  /* The held rod's tip, placed in the world where it shows on screen. */
+  private rodTipWorld(out: THREE.Vector3) {
+    if (this.thirdPerson && this.body) {
+      out.set(this.body.x, this.body.y + EYE_HEIGHT, this.body.z);
+      return true;
+    }
+    if (!this.viewmodel.rodTip(out)) {
+      out.copy(this.camera.position);
+      return false;
+    }
+    out.z = 0.5;
+    out.unproject(this.camera).sub(this.camera.position).normalize();
+    out.multiplyScalar(1.4).add(this.camera.position);
+    return true;
+  }
+
+  private tipOf = (by: number, out: THREE.Vector3) => {
+    if (by === this.myId) return !this.down && this.rodTipWorld(out);
+    const r = this.remotes.get(by);
+    if (!r?.avatar.group.visible) return false;
+    out.copy(r.avatar.group.position);
+    out.y += 2.1;
+    return true;
+  };
+
+  /* Cast where you're looking: onto the water, as far as the rod reaches. */
+  private castOrStrike() {
+    const tool = heldTool(this.inv);
+    const rod = tool && TOOLS[tool.kind].rod;
+    const b = this.body;
+    const world = this.world;
+    if (!rod || !b || !world) return;
+    const now = performance.now() / 1000;
+    if (this.myLine) {
+      this.conn?.send({ t: "reel", at: this.bite ? now - this.bite.at : -1 });
+      this.viewmodel.swing(false);
+      return;
+    }
+    if (now < this.attackReadyAt) return;
+    this.attackReadyAt = now + 0.6;
+    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const flat = Math.hypot(dir.x, dir.z) || 1;
+    let reach = rod.cast;
+    if (dir.y < -0.02) reach = Math.min(rod.cast, ((b.y + EYE_HEIGHT) / -dir.y) * flat);
+    reach = Math.max(3, reach);
+    const x = b.x + (dir.x / flat) * reach;
+    const z = b.z + (dir.z / flat) * reach;
+    this.viewmodel.swing(false);
+    this.audio.swing(null, false);
+    if (depthAt(world.ground.heightAt(x, z)) < MIN_CAST_DEPTH) {
+      this.say("Cast out over the water", 2);
+      return;
+    }
+    this.conn?.send({ t: "cast", x, z });
+  }
+
   private place(s: Spawn) {
     this.body = createBody(s.x, s.y, s.z, s.yaw);
     this.input.yaw = s.yaw;
@@ -1131,6 +1214,7 @@ export class Game {
     this.lastSwingAt = now;
     this.conn?.send({ t: "attack", charge });
     this.viewmodel.swing(heavy);
+    this.localAvatar?.strike();
     this.audio.swing(kind, heavy);
     this.kick = kind ? -0.3 : -0.6;
   }
@@ -1177,11 +1261,12 @@ export class Game {
       blocking: this.blocking,
       kick: this.kick,
     });
+    this.boats.update(t, dt);
+    this.updateLocalAvatar(dt);
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
     this.herd.update(dt, this.camera.position);
     this.built.update(t);
-    this.boats.update(t, dt);
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
@@ -1198,7 +1283,7 @@ export class Game {
       this.renderer,
       this.scene,
       this.camera,
-      this.viewmodel.visible ? this.viewmodel : undefined,
+      this.viewmodel.visible && !this.thirdPerson ? this.viewmodel : undefined,
     );
 
     this.hudAcc += dt;
@@ -1217,6 +1302,10 @@ export class Game {
       this.fallen(dt, this.body);
     } else if (world && this.body) {
       const b = this.body;
+      if (active && this.input.take("view")) {
+        this.thirdPerson = !this.thirdPerson;
+        this.say(this.thirdPerson ? "Third-person view" : "First-person view", 2);
+      }
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
       this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
@@ -1376,6 +1465,7 @@ export class Game {
       const strain = this.health / 30;
       if (strain < 1) this.audio.heartbeat(lerp(0.45, 1.1, strain));
       this.firstPerson(dt, b);
+      if (this.thirdPerson) this.positionThirdPerson(b);
     } else {
       this.dropInputs();
       this.orbitCamera(dt);
@@ -1576,7 +1666,7 @@ export class Game {
     const world = this.world!;
     const def = PREFABS[kind];
     const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    const p = this.tmpV.copy(this.camera.position);
+    const p = this.tmpV.set(b.x, b.y + EYE_HEIGHT, b.z);
     let hit: { x: number; y: number; z: number } | null = null;
     for (let d = 0; d < BUILD_REACH + 2; d += 0.25) {
       p.addScaledVector(dir, d === 0 ? 0 : 0.25);
@@ -1679,6 +1769,7 @@ export class Game {
   wear(skin: SkinId) {
     if (!canWear(skin)) return;
     keepSkin(skin);
+    this.localAvatar?.setSkin(skin);
     if (this.conn?.kind === "online") this.conn.send({ t: "skin", skin });
   }
 
@@ -1874,6 +1965,70 @@ export class Game {
     this.setFov(this.fov);
   }
 
+  private positionThirdPerson(b: Body) {
+    const origin = this.tmpAim.set(b.x, this.smoothEye, b.z);
+    const back = this.tmpF.set(0, 0, 1).applyQuaternion(this.camera.quaternion);
+    let distance = 4.5;
+    // Keep the camera in front of terrain rather than burying it in a hillside.
+    if (this.world) {
+      for (let d = 0.25; d <= distance; d += 0.25) {
+        const x = origin.x + back.x * d;
+        const y = origin.y + back.y * d;
+        const z = origin.z + back.z * d;
+        if (y < this.world.ground.heightAt(x, z) + 0.2) {
+          distance = Math.max(0.25, d - 0.25);
+          break;
+        }
+      }
+    }
+    this.camera.position.copy(origin).addScaledVector(back, distance);
+  }
+
+  private updateLocalAvatar(dt: number) {
+    const b = this.body;
+    if (!this.thirdPerson || !b || this.down) {
+      if (this.localAvatar) this.localAvatar.group.visible = false;
+      return;
+    }
+    if (!this.localAvatar) {
+      this.localAvatar = new Avatar(this.myId, this.myName, readSkin(), false);
+      this.scene.add(this.localAvatar.group);
+    }
+    const avatar = this.localAvatar;
+    avatar.group.visible =
+      this.camera.position.distanceToSquared(this.tmpAim.set(b.x, b.y + EYE_HEIGHT, b.z)) > 1;
+    avatar.setGear(this.weapon, 0);
+    const bike = this.bike === null ? undefined : this.bikes.pose(this.bike);
+    const vehicle = bike
+      ? { kind: "bike" as const, pitch: bike.pitch, roll: bike.roll }
+      : this.boat
+        ? {
+            kind: "boat" as const,
+            stroke: this.boats.stroke(this.boat.id),
+            bob: Math.sin((performance.now() / 1000) * 1.3 + this.boat.id) * 0.04,
+          }
+        : undefined;
+    avatar.setPose(
+      b.x,
+      b.y,
+      b.z,
+      bike?.rot ?? this.boat?.rot ?? b.yaw,
+      this.input.pitch,
+      (b.grounded ? FLAG.grounded : 0) |
+        (this.bike !== null || this.boat ? FLAG.riding : 0) |
+        (this.blocking ? FLAG.block : 0) |
+        (this.chargeStart !== null ? FLAG.charge : 0),
+      dt,
+      this.camera.position,
+      vehicle,
+    );
+  }
+
+  private rodPose(): RodPose {
+    if (this.bite) return "bite";
+    return this.myLine ? "out" : "idle";
+  }
+
   /* Down: the view slumps to the ground and tips over. */
   private fallen(dt: number, b: Body) {
     const k = clamp((performance.now() / 1000 - this.downAt) / 1.1, 0, 1);
@@ -2006,7 +2161,11 @@ export class Game {
         if (!r.avatar.group.visible) continue;
         const to = this.tmpV.copy(r.avatar.group.position);
         to.y += 1.2;
-        to.sub(this.camera.position);
+        to.sub(
+          this.thirdPerson && this.body
+            ? this.tmpAim.set(this.body.x, this.body.y + EYE_HEIGHT, this.body.z)
+            : this.camera.position,
+        );
         const d = to.length();
         if (d > 8) continue;
         const dot = to.normalize().dot(fwd);
@@ -2017,6 +2176,12 @@ export class Game {
       }
       for (const a of this.herd.list().values()) {
         if (a.state === ANIMAL_STATE.dead) continue;
+        const to = this.tmpV.set(a.x, a.y + (a.kind === "deer" ? 1.1 : 0.6), a.z);
+        to.sub(
+          this.thirdPerson && this.body
+            ? this.tmpAim.set(this.body.x, this.body.y + EYE_HEIGHT, this.body.z)
+            : this.camera.position,
+        );
         const to = this.tmpV.set(a.x, a.y + this.herd.aimHeight(a), a.z);
         to.sub(this.camera.position);
         const d = to.length();

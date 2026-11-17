@@ -34,6 +34,7 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Walk around", ["W", "A", "S", "D"]],
     ["Jump", ["Space"]],
     ["Run", ["Shift"]],
+    ["Change view", ["V"]],
   ],
   [
     ["Use what you hold", ["Click", "F"]],

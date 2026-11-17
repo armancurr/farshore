@@ -174,6 +174,9 @@ export function TouchControls(props: {
       />
       {/* Modes, beside the thumb buttons: build, creative, and taking off in it. */}
       <div className="pointer-events-none absolute right-[10.5rem] bottom-4 flex flex-col gap-2">
+        <Button variant="touch" size="touch" className={side} {...tap("view")}>
+          View
+        </Button>
         {creative && !building && (
           <Button variant="touch" size="touch" className={side} {...tap("fly")}>
             {flying ? "Land" : "Fly"}

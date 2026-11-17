@@ -9,6 +9,7 @@ export type Action =
   | "inventory"
   | "build"
   | "rotate"
+  | "view"
   | "creative"
   /* Creative: take off or come down (the touch button for a double tap of Space). */
   | "fly";
@@ -55,6 +56,7 @@ export class Input {
       if (e.code === "KeyF") this.setAttack(true);
       if (e.code === "KeyE") this.queued.add("interact");
       if (e.code === "Tab" || e.code === "KeyI") this.queued.add("inventory");
+      if (e.code === "KeyV") this.queued.add("view");
       if (e.code === "KeyB") this.queued.add("build");
       /* ⌘R / Ctrl+R is the reload key, which the island menu catches. */
       if (e.code === "KeyR" && !e.metaKey && !e.ctrlKey) this.queued.add("rotate");
