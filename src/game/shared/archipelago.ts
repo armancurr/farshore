@@ -1,5 +1,6 @@
 import { SEA_FLOOR } from "./constants";
 import type { IslandInfo } from "./islands";
+import type { Berth } from "./places";
 import type { Ladder } from "./structures";
 import { type Ground, type Solid, Terrain } from "./terrain";
 
@@ -17,6 +18,8 @@ const NONE: readonly Solid[] = [];
 export class Archipelago implements Ground {
   readonly islands = new Map<number, Island>();
   ladders: Ladder[] = [];
+  /* Every pier's berths, on every island. */
+  berths: Berth[] = [];
   /* Everything built, by key, so an island that arrives later still collides with it. */
   private dynamic = new Map<number, readonly Solid[]>();
   /* The same, all together: what's out on the open sea between the tiles. */
@@ -35,6 +38,7 @@ export class Archipelago implements Ground {
     const island = { info: { ...info }, terrain };
     this.islands.set(info.id, island);
     this.ladders = [...this.islands.values()].flatMap((o) => o.terrain.ladders);
+    this.berths = [...this.islands.values()].flatMap((o) => o.terrain.berths);
     for (const [key, solids] of this.dynamic) this.register(terrain, key, solids);
     return island;
   }

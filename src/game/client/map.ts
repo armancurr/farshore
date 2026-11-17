@@ -1,5 +1,6 @@
 import { GRAND_SIZE } from "../shared/constants";
 import type { IslandInfo } from "../shared/islands";
+import { ROAD_HALF } from "../shared/paths";
 
 /*
  * The grand map, drawn flat from above in the world's colours: teal sea,
@@ -193,8 +194,8 @@ export function drawMap(ctx: CanvasRenderingContext2D, f: MapFrame, view: MapVie
 }
 
 /*
- * The island's trails and places, inked over its picture: the paths as fine
- * dashed lines, each place a small ring, so the map shows where to go.
+ * The island's roads and places, inked over its picture: the roads as
+ * solid lines, each place a small ring, so the map shows where to go.
  */
 export function drawRoutes(
   canvas: HTMLCanvasElement,
@@ -203,7 +204,12 @@ export function drawRoutes(
     oz: number;
     half: number;
     paths: readonly (readonly { x: number; z: number }[])[];
-    places: readonly { x: number; z: number; kind: string }[];
+    places: readonly {
+      x: number;
+      z: number;
+      kind: string;
+      deck?: { x: number; z: number; hx: number; hz: number; rot: number };
+    }[];
   },
 ) {
   const ctx = canvas.getContext("2d");
@@ -212,19 +218,31 @@ export function drawRoutes(
   const px = (x: number) => (x - island.ox + island.half) * k;
   const pz = (z: number) => (z - island.oz + island.half) * k;
   ctx.save();
-  ctx.strokeStyle = "rgba(255, 236, 214, 0.85)";
-  ctx.lineWidth = Math.max(1, canvas.width / 160);
-  ctx.setLineDash([3, 2]);
+  ctx.strokeStyle = "rgba(255, 236, 214, 0.9)";
+  /* As wide as the road itself, but never a hairline. */
+  ctx.lineWidth = Math.max(1.5, ROAD_HALF * 2 * k);
   ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   for (const line of island.paths) {
     ctx.beginPath();
     line.forEach((p, i) => (i ? ctx.lineTo(px(p.x), pz(p.z)) : ctx.moveTo(px(p.x), pz(p.z))));
     ctx.stroke();
   }
-  ctx.setLineDash([]);
+  /* The piers, drawn to size, out over the water. */
+  ctx.fillStyle = "#a8774f";
+  for (const p of island.places) {
+    const d = p.deck;
+    if (!d) continue;
+    ctx.save();
+    ctx.translate(px(d.x), pz(d.z));
+    ctx.rotate(-d.rot);
+    ctx.fillRect(-Math.max(1.5, d.hx * k), -d.hz * k, Math.max(3, d.hx * 2 * k), d.hz * 2 * k);
+    ctx.restore();
+  }
   ctx.fillStyle = "#f2665e";
   ctx.strokeStyle = "#f4efe6";
   for (const p of island.places) {
+    if (p.deck) continue;
     ctx.beginPath();
     ctx.arc(px(p.x), pz(p.z), Math.max(2, canvas.width / 70), 0, Math.PI * 2);
     ctx.fill();

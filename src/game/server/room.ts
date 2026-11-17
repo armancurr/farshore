@@ -237,6 +237,8 @@ const PROBES = [
 
 /* How far from you a vehicle from the marketplace may be put down, in metres (more for big ships). */
 const LAUNCH_RANGE = 32;
+/* Within this far of a pier, a boat from the marketplace is put in a free berth alongside it. */
+const BERTH_RANGE = 70;
 /* Under water in a car: seconds of breath, then this much health a second. */
 const DROWN_BREATH = 3;
 const DROWN_DAMAGE = 12;
@@ -899,11 +901,13 @@ export class Room {
     m.vehicle = r.id;
     m.peer.send({
       t: "feed",
-      text: afloat(kind)
-        ? `Your ${def.name.toLowerCase()} is in the water · E to climb aboard`
-        : def.class === "mount"
-          ? `Your ${def.name.toLowerCase()} is saddled · E to mount`
-          : `Your ${def.name.toLowerCase()} is ready · E to get in`,
+      text: at.moored
+        ? `Your ${def.name.toLowerCase()} is tied up at the pier · E to climb aboard`
+        : afloat(kind)
+          ? `Your ${def.name.toLowerCase()} is in the water · E to climb aboard`
+          : def.class === "mount"
+            ? `Your ${def.name.toLowerCase()} is saddled · E to mount`
+            : `Your ${def.name.toLowerCase()} is ready · E to get in`,
     });
   }
 
@@ -935,7 +939,20 @@ export class Room {
    * range in front is searched before turning aside, and the sides before
    * behind, so a puddle at your heels never beats the sea you're looking at.
    */
-  private launchSpot(m: Member, kind: VehicleKind) {
+  private launchSpot(
+    m: Member,
+    kind: VehicleKind,
+  ): {
+    x: number;
+    y: number;
+    z: number;
+    rot: number;
+    moored?: boolean;
+  } | null {
+    if (afloat(kind)) {
+      const berth = this.berthSpot(m, kind);
+      if (berth) return berth;
+    }
     const def = VEHICLES[kind];
     const { x: px, z: pz, yaw } = m.body;
     const range = Math.max(LAUNCH_RANGE, def.length * 2.2);
@@ -962,6 +979,37 @@ export class Room {
         }
       }
     return null;
+  }
+
+  /*
+   * Near a pier, a boat is tied up alongside it, bow to the sea: the free
+   * berth nearest you with water deep enough for its hull, clear of the
+   * boats already there. Null when you're nowhere near a pier, or it's full.
+   */
+  private berthSpot(m: Member, kind: VehicleKind) {
+    const def = VEHICLES[kind];
+    const { x: px, z: pz } = m.body;
+    const off = def.beam / 2 + 0.6;
+    let best: { x: number; y: number; z: number; rot: number; moored: true; d: number } | null =
+      null;
+    for (const b of this.world.berths) {
+      const along = clamp((px - b.x) * b.dx + (pz - b.z) * b.dz, 0, b.length);
+      if (Math.hypot(b.x + b.dx * along - px, b.z + b.dz * along - pz) > BERTH_RANGE) continue;
+      const rot = Math.atan2(-b.dx, -b.dz);
+      /* A big ship may stand a little past the end. */
+      const last = b.length - def.length * 0.25;
+      for (let s = def.length / 2; s <= last; s += 1.5) {
+        const x = b.x + b.dx * s + b.nx * off;
+        const z = b.z + b.dz * s + b.nz * off;
+        const d = Math.hypot(x - px, z - pz);
+        if (best && d >= best.d) continue;
+        if (distanceTo(kind, { x, z, rot }, px, pz) < 0.9) continue;
+        const y = placeAt(kind, this.world, x, z, rot);
+        if (y === null) continue;
+        best = { x, y, z, rot, moored: true, d };
+      }
+    }
+    return best;
   }
 
   /* Take back the vehicle you spawned, unless someone is sitting in it. */

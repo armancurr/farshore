@@ -1,12 +1,19 @@
 import { BASE_TILE, ISLAND_RADIUS, STEP_HEIGHT } from "./constants";
 import { FEATURES } from "./features";
 import { type Flora, floraFor } from "./flora";
-import { type BiomeId, gridOf, type IslandInfo, islandHeights, type ShapeId } from "./islands";
+import {
+  type BiomeId,
+  gridOf,
+  type IslandInfo,
+  islandHeights,
+  type ShapeId,
+  WORLD,
+} from "./islands";
 import { angleTo, clamp, mulberry32, range, type Rng, smoothstep } from "./math";
 import type { ModelId } from "./models.gen";
 import { BOULDERS, COLUMNS, SPECIES_TREES, type TreeSpecies, WOODLAND } from "./nature";
-import { type PathPoint, pathDistance, planPaths } from "./paths";
-import { modelExtent, type Place, planPlaces } from "./places";
+import { type PathPoint, pathDistance, ROAD_GRADE, ROAD_HALF, RoadNet } from "./paths";
+import { type Berth, DECK, makeView, modelExtent, type Place, planPlaces } from "./places";
 import {
   type Block,
   type Ladder,
@@ -45,6 +52,8 @@ export type Prop = {
 export type Solid = {
   /* Bike tires may roll over the rounded shoulders of low natural rocks. */
   surface?: "rounded";
+  /* A deck to drive onto, however far below it the ground or the sea floor is (a pier). */
+  deck?: boolean;
   x: number;
   z: number;
   r: number;
@@ -62,6 +71,9 @@ export type Spot = { x: number; y: number; z: number };
 export type Site = Spot & { rot: number };
 
 const BUCKET = 12;
+
+/* The lighthouse square on the Harbor: its radius, cobbled and level, every avenue running into it. */
+export const PLAZA = 30;
 
 const NO_SOLIDS: Solid[] = [];
 
@@ -156,9 +168,11 @@ export class Terrain implements Ground {
   readonly solids: Solid[] = [];
   readonly structures: Structure[] = [];
   readonly ladders: Ladder[] = [];
-  /* The places someone made something of (camps, lookouts, jetties), and the paths between them. */
+  /* The places someone made something of (piers, camps, lookouts), and the roads between them. */
   readonly places: Place[] = [];
   paths: PathPoint[][] = [];
+  /* Where boats tie up: down both sides of every pier. */
+  readonly berths: Berth[] = [];
   /* Distance to the nearest path, sampled every pathCell metres over the tile (island-local grid). */
   pathField: Float32Array = new Float32Array(1);
   pathRes = 1;
@@ -177,6 +191,8 @@ export class Terrain implements Ground {
   private bucketsPerSide: number;
   /* Solids added after generation (placed prefabs), by owner key. */
   private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
+  /* While the roads are cut: the height samples already under one, which later roads leave be. */
+  private paved: Uint8Array | null = null;
 
   /* The Harbor: the lighthouse at its centre, whatever the features say. */
   readonly harbor: boolean;
@@ -200,9 +216,14 @@ export class Terrain implements Ground {
     this.heights = islandHeights(info.shape, this.seed, this.grid, info.lift);
     this.raiseLighthouse();
     this.raiseStructures();
-    /* Where the Harbor is from here: the landing faces it. The Harbor's main quay faces north. */
-    const toward = this.harbor ? -Math.PI / 2 : Math.atan2(-info.z, -info.x);
-    this.layPlaces(toward);
+    /*
+     * A hunting island's pier faces the Harbor; the Harbor has a pier facing
+     * each hunting island (the first, due north, is the main quay).
+     */
+    const piers = this.harbor
+      ? WORLD.filter((o) => !o.harbor).map((o) => Math.atan2(o.z - info.z, o.x - info.x))
+      : [Math.atan2(-info.z, -info.x)];
+    this.layPlaces(piers);
     this.scatterProps();
     this.findHome();
     this.moveTo(info.x, info.z);
@@ -249,8 +270,11 @@ export class Terrain implements Ground {
     for (const pl of this.places) {
       at(pl);
       at(pl.door);
+      if (pl.quay) at(pl.quay);
+      if (pl.deck) at(pl.deck);
       for (const m of pl.models) at(m);
     }
+    for (const b of this.berths) at(b);
     for (const line of this.paths) for (const pt of line) at(pt);
     at(this.lighthouse);
     at(this.home);
@@ -454,102 +478,434 @@ export class Terrain implements Ground {
   }
 
   /*
-   * The island's places and the paths between them. Places get level ground,
-   * the paths are found across the ground as it then stands and cut into it
-   * with an even grade, and only then is everything set down on the ground
-   * (so a crate sits on the path's cutting, not on the hill that was there).
+   * The island's places and the roads between them. Places get level ground
+   * (a pier a quay at deck height), then the roads are laid one by one, each
+   * found across the ground as it then stands and cut straight into it, and
+   * only then is everything set down on the ground (so a crate sits on the
+   * road's cutting, not on the hill that was there).
    */
-  private layPlaces(toward: number) {
+  private layPlaces(piers: number[]) {
     const kind = this.harbor ? "harbor" : (this.biome ?? "meadow");
+    const lh = this.lighthouse;
+    /* What the roads must go round: the lighthouse and anything else built before the places. */
+    const built = [...this.taken];
     const places = planPlaces(this, this.seed, kind, this.taken, {
-      toward,
-      lighthouse: this.harbor ? this.lighthouse : undefined,
+      piers,
+      lighthouse: this.harbor ? lh : undefined,
+      summit: this.harbor ? undefined : lh,
     });
     for (const pl of places) {
-      if (pl.kind === "landing" || pl.kind === "dock" || pl.kind === "wreck") continue;
-      this.levelPad(pl.x, pl.z, pl.r * 0.85, pl.r + 7, pl.y);
+      if (pl.quay) this.levelPad(pl.quay.x, pl.quay.z, pl.quay.r * 0.85, pl.quay.r + 7, DECK);
+      else if (pl.kind !== "wreck") this.levelPad(pl.x, pl.z, pl.r * 0.85, pl.r + 7, pl.y);
+      if (pl.berths) this.berths.push(...pl.berths);
     }
     this.places.push(...places);
 
-    const doors = places.map((pl) => pl.door);
-    if (this.harbor) {
-      /* Every path on the Harbor leads back to the lighthouse door. */
-      const lh = this.lighthouse;
-      doors.unshift({ x: lh.x, z: lh.z + 16 });
-    }
-    this.paths = planPaths(this, doors);
-    this.carvePaths();
+    const net = new RoadNet(this);
+    this.paved = new Uint8Array(this.grid * this.grid);
+    for (const t of built) net.avoid(t.x, t.z, t.r + 2);
+    for (const pl of places) if (pl.kind !== "pier") net.avoid(pl.x, pl.z, pl.r + 1);
+    const lay = (line: PathPoint[] | null) => {
+      if (!line || line.length < 2) return;
+      this.carveRoad(line);
+      net.mark(line);
+      this.paths.push(line);
+    };
+    const quays = places.filter((pl) => pl.kind === "pier");
+    for (const q of quays)
+      if (q.quay) {
+        net.markArea(q.quay.x, q.quay.z, q.quay.r);
+        this.pave(q.quay.x, q.quay.z, q.quay.r * 0.85);
+      }
 
-    /* The path field: trails are drawn from it, and trees keep off it. */
+    if (this.harbor) {
+      /* The lighthouse square: the hub every avenue runs into. */
+      this.levelPad(lh.x, lh.z, PLAZA, PLAZA + 9, lh.y);
+      net.markArea(lh.x, lh.z, PLAZA - 2);
+      this.pave(lh.x, lh.z, PLAZA);
+      /* An avenue from every pier to the square, each on its own line. */
+      const avenues: PathPoint[][] = [];
+      for (const q of quays) {
+        const a = Math.atan2(q.z - lh.z, q.x - lh.x);
+        const end = { x: lh.x + Math.cos(a) * (PLAZA - 3), z: lh.z + Math.sin(a) * (PLAZA - 3) };
+        const line = net.route(q.door, end, false);
+        lay(line);
+        if (line) avenues.push(line);
+      }
+      /* Two ring roads crossing the avenues: one round the town, one along the waterfront. */
+      for (const frac of [0.4, 0.74]) this.ringRoad(net, lay, avenues, frac);
+    } else {
+      /* The trunk road: from the pier to the very top. */
+      const pier = quays[0];
+      const summit = places.find((pl) => pl.kind === "summit");
+      if (pier && summit) lay(net.route(pier.door, summit.door));
+      /* A ring road round the island's middle, so every part of it is a short way from a road. */
+      this.ringRoad(net, lay, [], 0.6);
+    }
+    /* A track from each place to the nearest road. */
+    for (const pl of places)
+      if (pl.kind !== "pier" && !net.reaches(pl.door)) lay(net.join(pl.door));
+    /* Out to the far corners: wherever the land is still a long way from a road, one out to its high ground. */
+    for (const view of this.reachOut(net, lay, this.harbor ? 120 : 115)) {
+      this.levelPad(view.x, view.z, view.r, view.r + 5, view.y);
+      places.push(view);
+      this.places.push(view);
+    }
+    /* And if any piece came out on its own, join it on. */
+    for (let k = 0; k < 12; k++) {
+      const line = net.stitch();
+      if (!line) break;
+      lay(line);
+    }
+
+    /* The road field: roads are drawn from it, and trees keep off it. */
     this.pathRes = Math.round(this.size / 4);
     this.pathCell = this.size / this.pathRes;
     this.pathField = pathDistance(this.paths, this.half, this.pathRes, 24);
 
+    this.paved = null;
     for (const pl of places) this.seatPlace(pl);
   }
 
-  /* Cut each path into the ground: its own profile, smoothed and held to an easy grade. */
-  private carvePaths() {
-    const MAX_GRADE = 0.42; // metres per 2 m sample, about 12°
+  /* Mark a level square as already paved, so no road cut later disturbs it. */
+  private pave(x: number, z: number, r: number) {
+    const paved = this.paved;
+    if (!paved) return;
     const g = this.grid;
-    const best = new Float32Array(g * g).fill(99);
-    const target = new Float32Array(g * g);
-    for (const line of this.paths) {
-      const raw = line.map((p) => this.heightAt(p.x, p.z));
-      /* Smooth it along its length, then clamp the grade both ways. */
-      const prof = raw.map((_, k) => {
-        let sum = 0;
-        let n = 0;
-        for (let j = Math.max(0, k - 5); j <= Math.min(raw.length - 1, k + 5); j++) {
-          sum += raw[j];
+    for (let i = 0; i < g; i++) {
+      const pz = -this.half + i * this.cell;
+      if (Math.abs(pz - z) > r) continue;
+      for (let j = 0; j < g; j++)
+        if (Math.hypot(-this.half + j * this.cell - x, pz - z) <= r) paved[i * g + j] = 1;
+    }
+  }
+
+  /*
+   * Spurs out to whatever open ground is still more than `gap` metres from
+   * any road, each ending on the high point near there (the view's the
+   * reason to go), until nowhere is that far.
+   */
+  private reachOut(net: RoadNet, lay: (line: PathPoint[] | null) => void, gap: number) {
+    const views: Place[] = [];
+    const step = 16;
+    const spots: { x: number; z: number; y: number }[] = [];
+    for (let z = -this.half + step / 2; z < this.half; z += step)
+      for (let x = -this.half + step / 2; x < this.half; x += step) {
+        const y = this.heightAt(x, z);
+        if (y < 3 || this.normalAt(x, z)[1] < 0.86) continue;
+        if (this.taken.some((t) => Math.hypot(t.x - x, t.z - z) < t.r + 6)) continue;
+        spots.push({ x, z, y });
+      }
+    for (let round = 0; round < 10; round++) {
+      const points = this.paths.flat();
+      let best: { x: number; z: number; score: number } | null = null;
+      for (const p of spots) {
+        let d = Infinity;
+        for (const q of points) {
+          const e = (q.x - p.x) ** 2 + (q.z - p.z) ** 2;
+          if (e < d) d = e;
+        }
+        d = Math.sqrt(d);
+        if (d < gap) continue;
+        const score = d + p.y * 1.5;
+        if (!best || score > best.score) best = { x: p.x, z: p.z, score };
+      }
+      if (!best) return views;
+      /* Up onto the rise nearby, if there is one. */
+      let top = { x: best.x, z: best.z, y: this.heightAt(best.x, best.z) };
+      for (let a = 0; a < 12; a++)
+        for (const r of [12, 24, 36]) {
+          const x = best.x + Math.cos(a * 0.524) * r;
+          const z = best.z + Math.sin(a * 0.524) * r;
+          const y = this.heightAt(x, z);
+          if (y > top.y && this.normalAt(x, z)[1] > 0.86) top = { x, z, y };
+        }
+      const line = net.join(top);
+      if (!line) {
+        /* Nothing reaches it: don't ask again. */
+        const out = spots.filter((p) => Math.hypot(p.x - best.x, p.z - best.z) > gap);
+        spots.length = 0;
+        spots.push(...out);
+        continue;
+      }
+      lay(line);
+      /* A bench at the end, looking on the way the road came. */
+      const a = line[1] ?? line[0];
+      const b = line[0];
+      views.push(
+        makeView(b.x, b.z, this.heightAt(b.x, b.z), b.x - a.x, b.z - a.z, this.seed + round * 7919),
+      );
+    }
+    return views;
+  }
+
+  /*
+   * A ring road round the island's middle, `frac` of the way out to the
+   * coast on every bearing. Where an avenue runs out that way, the ring
+   * crosses it there; between, it bends through the best ground it finds.
+   */
+  private ringRoad(
+    net: RoadNet,
+    lay: (line: PathPoint[] | null) => void,
+    avenues: PathPoint[][],
+    frac: number,
+  ) {
+    const c = this.landCentre();
+    type Node = { x: number; z: number; a: number };
+    const nodes: Node[] = [];
+    for (const line of avenues) {
+      const far = line[0];
+      const a = Math.atan2(far.z - c.z, far.x - c.x);
+      const want = frac * this.coastDistance(c, a);
+      let best = line[0];
+      for (const p of line)
+        if (
+          Math.abs(Math.hypot(p.x - c.x, p.z - c.z) - want) <
+          Math.abs(Math.hypot(best.x - c.x, best.z - c.z) - want)
+        )
+          best = p;
+      nodes.push({ ...best, a });
+    }
+    /* Fill in between (or all the way round, with no avenues) so no stretch is long. */
+    const sorted = () => nodes.sort((p, q) => p.a - q.a);
+    const count = avenues.length ? avenues.length * 2 : 10;
+    if (!avenues.length)
+      for (let k = 0; k < count; k++) {
+        const node = this.ringNode(c, (k / count) * Math.PI * 2, frac);
+        if (node) nodes.push(node);
+      }
+    else {
+      sorted();
+      const n = nodes.length;
+      for (let k = 0; k < n; k++) {
+        const a0 = nodes[k].a;
+        let a1 = nodes[(k + 1) % n].a;
+        if (a1 <= a0) a1 += Math.PI * 2;
+        const node = this.ringNode(c, (a0 + a1) / 2, frac);
+        if (node) nodes.push(node);
+      }
+    }
+    sorted();
+    /*
+     * Plan every leg, then drop any waypoint the ring only reaches by
+     * doubling back on itself (a spur up onto a bench and down again): the
+     * legs either side of it are replanned as one.
+     */
+    const leg = (a: Node, b: Node) =>
+      /* Too far round to be a ring (a bay in the way): leave that stretch out. */
+      Math.hypot(a.x - b.x, a.z - b.z) > this.radius * 1.2 ? null : net.route(a, b, false);
+    const legs = nodes.map((a, k) => leg(a, nodes[(k + 1) % nodes.length]));
+    for (let k = 0; k < nodes.length && nodes.length > 3; ) {
+      const into = legs[(k - 1 + nodes.length) % nodes.length];
+      const out = legs[k];
+      if (!into || !out || !hairpin(into, out)) {
+        k++;
+        continue;
+      }
+      const prev = (k - 1 + nodes.length) % nodes.length;
+      nodes.splice(k, 1);
+      legs.splice(k, 1);
+      const p = k > prev ? prev : prev - 1;
+      legs[p] = leg(nodes[p], nodes[(p + 1) % nodes.length]);
+      k = Math.max(0, p);
+    }
+    for (const line of legs) lay(line);
+  }
+
+  /* The middle of the land: where the rings are drawn round. */
+  private landCentre() {
+    let x = 0;
+    let z = 0;
+    let n = 0;
+    const step = this.size / 64;
+    for (let i = 0; i < 64; i++)
+      for (let j = 0; j < 64; j++) {
+        const px = -this.half + (j + 0.5) * step;
+        const pz = -this.half + (i + 0.5) * step;
+        if (this.heightAt(px, pz) < 1) continue;
+        x += px;
+        z += pz;
+        n++;
+      }
+    return n ? { x: x / n, z: z / n } : { x: 0, z: 0 };
+  }
+
+  /* How far from c the land runs along bearing a, out to the last of the shore. */
+  private coastDistance(c: { x: number; z: number }, a: number) {
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    for (let d = this.half; d > 0; d -= 4)
+      if (this.heightAt(c.x + ca * d, c.z + sa * d) > 0.5) return d;
+    return 0;
+  }
+
+  /*
+   * A ring road's waypoint on bearing a: `frac` of the way out to the coast,
+   * shifted to the most level open ground near there (not a camp, not the sea).
+   */
+  private ringNode(c: { x: number; z: number }, a: number, frac: number) {
+    const reach = this.coastDistance(c, a);
+    if (reach < 60) return null;
+    const d0 = frac * reach;
+    let best: { x: number; z: number; a: number; score: number } | null = null;
+    for (const dd of [-24, -12, 0, 12, 24])
+      for (const da of [-16, 0, 16]) {
+        const d = d0 + dd;
+        const b = a + da / Math.max(d, 1);
+        const x = c.x + Math.cos(b) * d;
+        const z = c.z + Math.sin(b) * d;
+        const y = this.heightAt(x, z);
+        if (y < 2) continue;
+        if (this.places.some((p) => Math.hypot(p.x - x, p.z - z) < p.r + ROAD_HALF + 4)) continue;
+        const slope = 1 - this.normalAt(x, z)[1];
+        const score = -slope * 60 - Math.abs(dd) * 0.04 - Math.abs(da) * 0.04;
+        if (!best || score > best.score) best = { x, z, a, score };
+      }
+    return best;
+  }
+
+  /*
+   * Cut a road into the ground: its own profile along its length, smoothed,
+   * held to an even grade, then levelled flat across its width with a
+   * shoulder blending back into the land either side. The ends keep the
+   * ground's own height, so a road meets the road (or the quay) it joins.
+   */
+  private carveRoad(line: PathPoint[]) {
+    const g = this.grid;
+    const paved = this.paved;
+    const raw = line.map((p) => this.heightAt(p.x, p.z));
+    const last = raw.length - 1;
+    /*
+     * Where it runs onto a road already cut (a crossing, a junction, a
+     * stretch shared) it takes that road's surface, and its ends keep the
+     * ground they start from (a quay, a door); in between it's the ground's
+     * own line, smoothed, and held to an even grade either way from each of
+     * those, so it eases in and out of every junction.
+     */
+    const rise = (k: number) =>
+      ROAD_GRADE * Math.hypot(line[k + 1].x - line[k].x, line[k + 1].z - line[k].z);
+    const pin: (number | null)[] = line.map((p, k) => {
+      if (k === 0 || k === last) return raw[k];
+      if (!paved) return null;
+      /* On it, not merely brushing its edge. */
+      const near =
+        Math.round((p.z + this.half) / this.cell) * g + Math.round((p.x + this.half) / this.cell);
+      if (paved[near] !== 1) return null;
+      const j = Math.floor((p.x + this.half) / this.cell);
+      const i = Math.floor((p.z + this.half) / this.cell);
+      let sum = 0;
+      let n = 0;
+      for (const [di, dj] of [
+        [0, 0],
+        [0, 1],
+        [1, 0],
+        [1, 1],
+      ]) {
+        const o = (i + di) * g + j + dj;
+        if (i + di < g && j + dj < g && i + di >= 0 && j + dj >= 0 && paved[o] === 1) {
+          sum += this.heights[o];
           n++;
         }
-        return Math.max(0.7, sum / n);
-      });
-      for (let k = 1; k < prof.length; k++)
-        prof[k] = clamp(prof[k], prof[k - 1] - MAX_GRADE, prof[k - 1] + MAX_GRADE);
-      for (let k = prof.length - 2; k >= 0; k--)
-        prof[k] = clamp(prof[k], prof[k + 1] - MAX_GRADE, prof[k + 1] + MAX_GRADE);
-      const reach = 6;
-      for (let k = 0; k < line.length - 1; k++) {
-        const a = line[k];
-        const b = line[k + 1];
-        const j0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - reach + this.half) / this.cell));
-        const j1 = Math.min(g - 1, Math.ceil((Math.max(a.x, b.x) + reach + this.half) / this.cell));
-        const i0 = Math.max(0, Math.floor((Math.min(a.z, b.z) - reach + this.half) / this.cell));
-        const i1 = Math.min(g - 1, Math.ceil((Math.max(a.z, b.z) + reach + this.half) / this.cell));
-        const dx = b.x - a.x;
-        const dz = b.z - a.z;
-        const len2 = dx * dx + dz * dz || 1;
-        for (let i = i0; i <= i1; i++) {
-          const pz = -this.half + i * this.cell;
-          for (let j = j0; j <= j1; j++) {
-            const px = -this.half + j * this.cell;
-            const t = clamp(((px - a.x) * dx + (pz - a.z) * dz) / len2, 0, 1);
-            const d = Math.hypot(px - a.x - dx * t, pz - a.z - dz * t);
-            const o = i * g + j;
-            if (d < best[o]) {
-              best[o] = d;
-              target[o] = prof[k] + (prof[k + 1] - prof[k]) * t;
-            }
+      }
+      return n ? sum / n : null;
+    });
+    const prof = raw.map((h, k) => {
+      const at = pin[k];
+      if (at !== null) return at;
+      let sum = 0;
+      let n = 0;
+      for (let j = Math.max(0, k - 6); j <= Math.min(last, k + 6); j++) {
+        sum += raw[j];
+        n++;
+      }
+      return Math.max(DECK, sum / n);
+    });
+    /* Between two fixed heights too far apart to join at that grade, an even ramp: steeper, never a step. */
+    for (let k = 0, from = 0; k <= last; k++) {
+      if (pin[k] === null) continue;
+      if (k > from + 1) {
+        let run = 0;
+        for (let j = from; j < k; j++) run += rise(j) / ROAD_GRADE;
+        const a = pin[from] as number;
+        const b = pin[k] as number;
+        if (Math.abs(b - a) > ROAD_GRADE * run) {
+          let at = 0;
+          for (let j = from + 1; j < k; j++) {
+            at += rise(j - 1) / ROAD_GRADE;
+            pin[j] = a + ((b - a) * at) / run;
           }
         }
       }
+      from = k;
     }
-    for (let o = 0; o < g * g; o++) {
-      if (best[o] > 6 || this.heights[o] < 0.2) continue;
-      const w = 1 - smoothstep(1.6, 6, best[o]);
-      this.heights[o] += (target[o] - this.heights[o]) * w;
+    for (let k = 0; k <= last; k++) prof[k] = pin[k] ?? prof[k];
+    for (let pass = 0; pass < 2; pass++) {
+      for (let k = 1; k <= last; k++) {
+        const at = pin[k];
+        prof[k] = at ?? clamp(prof[k], prof[k - 1] - rise(k - 1), prof[k - 1] + rise(k - 1));
+      }
+      for (let k = last - 1; k >= 0; k--) {
+        const at = pin[k];
+        prof[k] = at ?? clamp(prof[k], prof[k + 1] - rise(k), prof[k + 1] + rise(k));
+      }
     }
+
+    /* Flat across its whole width, however coarse the island's height samples. */
+    const flat = ROAD_HALF + 0.75 + this.cell * 0.35;
+    const reach = flat + 7;
+    const best = new Map<number, { d: number; y: number }>();
+    for (let k = 0; k < last; k++) {
+      const a = line[k];
+      const b = line[k + 1];
+      const j0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - reach + this.half) / this.cell));
+      const j1 = Math.min(g - 1, Math.ceil((Math.max(a.x, b.x) + reach + this.half) / this.cell));
+      const i0 = Math.max(0, Math.floor((Math.min(a.z, b.z) - reach + this.half) / this.cell));
+      const i1 = Math.min(g - 1, Math.ceil((Math.max(a.z, b.z) + reach + this.half) / this.cell));
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz || 1;
+      for (let i = i0; i <= i1; i++) {
+        const pz = -this.half + i * this.cell;
+        for (let j = j0; j <= j1; j++) {
+          const px = -this.half + j * this.cell;
+          const t = clamp(((px - a.x) * dx + (pz - a.z) * dz) / len2, 0, 1);
+          const d = Math.hypot(px - a.x - dx * t, pz - a.z - dz * t);
+          if (d > reach) continue;
+          const o = i * g + j;
+          const had = best.get(o);
+          if (!had || d < had.d) best.set(o, { d, y: prof[k] + (prof[k + 1] - prof[k]) * t });
+        }
+      }
+    }
+    for (const [o, { d, y }] of best) {
+      if (this.heights[o] < 0.2 || paved?.[o] === 1) continue;
+      const w = 1 - smoothstep(flat, reach, d);
+      this.heights[o] += (y - this.heights[o]) * w;
+    }
+    if (paved) for (const [o, { d }] of best) if (d <= flat) paved[o] = 1;
   }
 
   /* Set a place's models on the ground (or the water) and give the solid ones collision. */
   private seatPlace(pl: Place) {
+    if (pl.deck) {
+      /* One deck to walk and drive on, the planks drawn over it. */
+      const d = pl.deck;
+      this.solids.push({
+        x: d.x,
+        z: d.z,
+        r: Math.hypot(d.hx, d.hz),
+        bottom: DECK - 3,
+        top: DECK,
+        standable: true,
+        deck: true,
+        box: { hx: d.hx, hz: d.hz, c: Math.cos(d.rot), s: Math.sin(d.rot) },
+      });
+    }
     for (const m of pl.models) {
       const e = modelExtent(m.model, m.scale);
       if (m.float) {
-        /* Jetties stand on piles in the sea, their deck a step up from the beach. */
-        m.y = m.model.includes("boat") ? -0.28 : 0.95 - e.top;
+        /* The pier's planking stands on piles in the sea; boats ride at their waterline beside it. */
+        m.y = m.model.includes("boat") ? -0.28 : DECK - e.top;
       } else if (m.model === "ships/ship-wreck") {
         m.y = this.heightAt(m.x, m.z) - 1.4;
       } else {
@@ -843,7 +1199,7 @@ export class Terrain implements Ground {
         f.rocks + 6,
         { minH: 0.4, spacing: 2.6, minNy: 0.55 },
         (x, y, z, k) => {
-          if (this.pathAt(x, z) < 3) return;
+          if (this.pathAt(x, z) < ROAD_HALF + 2) return;
           const big = rng() < 0.1 + 0.25 * k;
           const scale = big ? range(rng, 2.2, 3.6) : range(rng, 0.7, 1.8);
           this.addRock(id++, rng, x, y, z, BOULDERS[Math.floor(rng() * BOULDERS.length)], scale);
@@ -852,7 +1208,7 @@ export class Terrain implements Ground {
       /* Stacked stone columns stand on the high benches of the rugged islands. */
       const columns = kind === "ridge" || kind === "fells" ? 26 : kind === "pinewood" ? 10 : 4;
       scatter(columns, { minH: 8, spacing: 22, minNy: 0.86 }, (x, y, z) => {
-        if (this.pathAt(x, z) < 5) return;
+        if (this.pathAt(x, z) < ROAD_HALF + 4) return;
         const model = COLUMNS[Math.floor(rng() * COLUMNS.length)];
         this.addRock(id++, rng, x, y, z, model, range(rng, 1.1, 1.8));
       });
@@ -880,7 +1236,7 @@ export class Terrain implements Ground {
         const cx = Math.cos(a) * d;
         const cz = Math.sin(a) * d;
         if (flora.forest(cx, cz) < 0.45) continue;
-        if (!growable(cx, cz, this.heightAt(cx, cz), 8)) continue;
+        if (!growable(cx, cz, this.heightAt(cx, cz), ROAD_HALF + 7)) continue;
         gi++;
         const sp = pick();
         const def = SPECIES_TREES[sp];
@@ -894,7 +1250,7 @@ export class Terrain implements Ground {
           const x = cx + Math.cos(b) * u * edge;
           const z = cz + Math.sin(b) * u * edge;
           const y = this.heightAt(x, z);
-          if (!growable(x, z, y, 3.5 + def.spacing * 0.3)) continue;
+          if (!growable(x, z, y, ROAD_HALF + 2.3 + def.spacing * 0.3)) continue;
           if (!free(x, z, 1.2) || !clear(x, z, def.spacing * 0.5)) continue;
           /* Big in the heart of the grove, young at its rim. */
           const age = 1 - u * u * 0.6 + range(rng, -0.12, 0.12);
@@ -903,7 +1259,7 @@ export class Terrain implements Ground {
       }
       /* Landmark trees: a few big ones alone in the open, the kind you steer by. */
       scatter(kind === "harbor" ? 10 : 7, { minH: 3, spacing: 40, minNy: 0.88 }, (x, y, z) => {
-        if (flora.forest(x, z) > 0.3 || this.pathAt(x, z) < 6) return;
+        if (flora.forest(x, z) > 0.3 || this.pathAt(x, z) < ROAD_HALF + 5) return;
         this.addTree(id++, rng, x, y, z, wood.lone, range(rng, 1.25, 1.5), grid, cellOf);
       });
       /* Strays: the odd tree between groves, so the open ground isn't bald. */
@@ -912,7 +1268,7 @@ export class Terrain implements Ground {
         f.sparse * 1.4,
         { minH: 2.4, spacing: 6, minNy: 0.86 },
         (x, y, z) => {
-          if (this.pathAt(x, z) < 4) return;
+          if (this.pathAt(x, z) < ROAD_HALF + 3) return;
           this.addTree(id++, rng, x, y, z, pick(), range(rng, 0.55, 0.9), grid, cellOf);
         },
       );
@@ -925,7 +1281,8 @@ export class Terrain implements Ground {
           const bx = Math.cos(a) * (d - range(rng, 4, 14));
           const bz = Math.sin(a) * (d - range(rng, 4, 14));
           const by = this.heightAt(bx, bz);
-          if (by < 0.9 || by > 3.2 || !free(bx, bz, 3) || this.pathAt(bx, bz) < 4) continue;
+          if (by < 0.9 || by > 3.2 || !free(bx, bz, 3) || this.pathAt(bx, bz) < ROAD_HALF + 3)
+            continue;
           c++;
           const n = 2 + Math.floor(rng() * 2);
           for (let k = 0; k < n; k++) {
@@ -1135,4 +1492,17 @@ export class Terrain implements Ground {
     }
     return { ground, onSolid };
   }
+}
+
+/* Does a road arriving along `into` have to turn right back to leave along `out`? */
+function hairpin(into: PathPoint[], out: PathPoint[]) {
+  const a = into[Math.max(0, into.length - 7)];
+  const b = into[into.length - 1];
+  const c = out[Math.min(out.length - 1, 6)];
+  const ux = b.x - a.x;
+  const uz = b.z - a.z;
+  const vx = c.x - b.x;
+  const vz = c.z - b.z;
+  const cos = (ux * vx + uz * vz) / (Math.hypot(ux, uz) * Math.hypot(vx, vz) || 1);
+  return cos < -0.35;
 }

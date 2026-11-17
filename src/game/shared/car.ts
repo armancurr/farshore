@@ -135,9 +135,10 @@ function nearby(terrain: Ground, spec: CarSpec, x: number, z: number, rot: numbe
   return [...solids];
 }
 
-/* Low stones and kerbs a tyre can climb. Never vehicles, tree trunks or walls. */
+/* Low stones and kerbs a tyre can climb, and a pier's deck. Never vehicles, tree trunks or walls. */
 function rideable(s: Solid, terrain: Ground) {
   if (!s.standable) return false;
+  if (s.deck) return true;
   const base = terrain.heightAt(s.x, s.z);
   const rise = s.top - base;
   return (
