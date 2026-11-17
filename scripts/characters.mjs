@@ -162,8 +162,8 @@ export async function buildLiveries(dir) {
 
 /* KayKit clips the players use, by the file they come from. */
 const CLIPS = {
-  General: ["Idle_A", "Idle_B", "Hit_A", "Hit_B", "Death_A", "Death_B", "Interact"],
-  MovementBasic: ["Walking_A", "Running_A", "Jump_Start", "Jump_Idle", "Jump_Land"],
+  General: ["Idle_A", "Hit_A", "Hit_B", "Death_A"],
+  MovementBasic: ["Walking_A", "Running_A", "Jump_Start", "Jump_Idle"],
   MovementAdvanced: ["Walking_Backwards", "Running_Strafe_Left", "Running_Strafe_Right"],
   CombatMelee: [
     "Melee_1H_Attack_Chop",
@@ -180,12 +180,12 @@ const CLIPS = {
     "Melee_Dualwield_Attack_Slice",
     "Melee_Dualwield_Attack_Stab",
     "Melee_Unarmed_Attack_Punch_A",
-    "Melee_Unarmed_Idle",
   ],
-  Simulation: ["Sit_Chair_Idle", "Sit_Floor_Idle", "Waving", "Cheering"],
+  /* A chair's sit, for seats that aren't a bike's. */
+  Simulation: ["Sit_Chair_Idle"],
 };
 
-/* Quaternius clips moved onto the KayKit rig: KayKit has no swim or drive. */
+/* Quaternius clips moved onto the KayKit rig: KayKit has no swim or drive (or a relaxed sit). */
 const UAL_CLIPS = {
   Swim_Fwd_Loop: "Swim_Forward",
   Swim_Idle_Loop: "Swim_Idle",
