@@ -648,12 +648,23 @@ export class Terrain implements Ground {
       variant: 0,
       model,
     });
+    /*
+     * Collision for what shows above the ground, not the whole model: a
+     * boulder sunk past its middle shows only a low cap, narrower than the
+     * stone (taken as an ellipsoid). Wholly buried, there's nothing to hit.
+     */
+    const exposed = height - sink;
+    if (exposed <= 0.02) return;
+    const middle = (e.top + e.bottom) / 2;
+    const reach = (e.top - e.bottom) / 2;
+    const cut = reach > 0 ? Math.max(0, (sink - middle) / reach) : 0;
+    const r = Math.max(e.hx, e.hz) * 0.85 * Math.sqrt(Math.max(0, 1 - cut * cut));
     this.solids.push({
       x,
       z,
-      r: Math.max(e.hx, e.hz) * 0.85,
+      r: Math.max(0.2, r),
       bottom: y - sink,
-      top: y - sink + height * 0.9,
+      top: y + exposed * 0.9,
       standable: true,
       surface: "rounded",
     });

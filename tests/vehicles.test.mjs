@@ -24,6 +24,9 @@ import {
 } from "../src/game/shared/vehicles.ts";
 import { sailPolar, windAt } from "../src/game/shared/wind.ts";
 import { Room } from "../src/game/server/room.ts";
+import { WORLD } from "../src/game/shared/islands.ts";
+import { MODEL_BOUNDS } from "../src/game/shared/models.gen.ts";
+import { Terrain } from "../src/game/shared/terrain.ts";
 
 /* ---------- a flat world to drive on ---------- */
 
@@ -245,6 +248,55 @@ test("off a cliff a car falls, lands on its wheels and drives on, never past 37 
   assert(Math.abs(b.y - 2) < 0.25 && lowest > 1.8, "on the lower ground, not through it");
   assert(b.speed > 8);
   assert(tilt <= 0.65 + 1e-9);
+});
+
+test("over a drop, rocks far below don't stop a car in mid-air; what's up there with it still does", () => {
+  const cliff = (solids) => ground((_x, z) => (z < -10 ? 2 : 14), solids);
+  /* A boulder too big to ride, on the low ground under where it flies. */
+  for (const z of [-11, -13, -16]) {
+    const boulder = { x: 0, z, r: 1, bottom: 1, top: 3.5, standable: true, surface: "rounded" };
+    const b = car(14);
+    b.speed = 14;
+    let bumped = false;
+    for (let i = 0; i < 240; i++)
+      bumped = stepCar(b, throttle, 1 / 60, cliff([boulder]), SEDAN) || bumped;
+    assert(!bumped, `a boulder 10 m below (at z ${z}) is no obstacle`);
+    assert(b.z < -40 && b.speed > 8, "it flies on over it, lands and drives on");
+  }
+  /* A pillar that stands as high as the car flies: that it hits. */
+  const pillar = { x: 0, z: -16, r: 1, bottom: 1, top: 30, standable: false };
+  const b = car(14);
+  b.speed = 14;
+  drive(b, throttle, 4, cliff([pillar]));
+  assert(b.z > -16, "stopped short of the pillar");
+});
+
+test("a boulder collides as the stone that shows above the ground, not the whole buried model", () => {
+  const terrain = new Terrain(WORLD[1]);
+  let rocks = 0;
+  let buried = 0;
+  for (const p of terrain.props) {
+    if (p.kind !== "rock") continue;
+    rocks++;
+    const b = MODEL_BOUNDS[p.model];
+    const ground = terrain.heightAt(p.x, p.z);
+    const shows = p.y + b.max[1] * p.scale - ground;
+    const solid = terrain.solids.find((s) => s.x === p.x && s.z === p.z && s.surface === "rounded");
+    if (shows <= 0.02) {
+      buried++;
+      assert.equal(solid, undefined, "nothing to hit where nothing shows");
+      continue;
+    }
+    assert(solid, "a rock that shows can be hit");
+    const rise = solid.top - ground;
+    assert(
+      rise > shows * 0.8 && rise <= shows + 1e-6,
+      `collision ${rise} for a rock showing ${shows}`,
+    );
+    const across = (Math.max(b.max[0] - b.min[0], b.max[2] - b.min[2]) / 2) * p.scale;
+    assert(solid.r <= across * 0.85 + 1e-6);
+  }
+  assert(rocks > 50 && buried < rocks);
 });
 
 test("a car drives down (and across) a slope too steep to climb, the right way up", () => {
