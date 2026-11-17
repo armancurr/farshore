@@ -743,7 +743,9 @@ export class VehicleView {
       );
       w.rotation.y = p.rot;
       const mat = w.material as THREE.MeshBasicMaterial;
-      const want = p.speed > 0.4 ? Math.min(0.85, pace * 1.1) : 0;
+      /* Oars barely mark the water; a hull on the plane throws a white V. */
+      const churn = def.class === "row" ? 0.35 : def.class === "sail" ? 0.6 : 1;
+      const want = p.speed > 0.4 ? Math.min(0.85, pace * 1.1) * churn : 0;
       mat.opacity += (want - mat.opacity) * Math.min(1, dt * 3);
       w.scale.z = 0.4 + pace * 0.8;
     }

@@ -204,14 +204,15 @@ export function riderPose(
   return { ...toWorldFrame(v, s.x, s.y - RIDER_HIP, s.z), yaw: v.rot };
 }
 
-/* A seated rider's eyes. */
+/* A seated rider's eyes. In the saddle you lean forward over the neck, and can see the ears. */
 export function eyeOf(
   kind: VehicleKind,
   v: Pick<VehicleState, "x" | "y" | "z" | "rot" | "pitch" | "roll">,
   seat: number,
 ) {
   const s = seatOf(kind, seat);
-  return toWorldFrame(v, s.x, s.y + SEATED_EYE, s.z);
+  const saddle = VEHICLES[kind].class === "mount";
+  return toWorldFrame(v, s.x, s.y + SEATED_EYE - (saddle ? 0.1 : 0), s.z - (saddle ? 0.3 : 0));
 }
 
 /*
