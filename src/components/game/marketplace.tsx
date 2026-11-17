@@ -1,12 +1,18 @@
 import { CheckIcon } from "@phosphor-icons/react";
 import { cn } from "cn";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import type { Game } from "../../game/client/game";
 import type { Showcase } from "../../game/client/scene/showcase";
 import { SKINS, type SkinId, skinDef } from "../../game/shared/skins";
-import { VEHICLE_KINDS, VEHICLES, type VehicleKind } from "../../game/shared/vehicles";
+import {
+  controlsOf,
+  VEHICLE_KINDS,
+  VEHICLE_SECTIONS,
+  VEHICLES,
+  type VehicleKind,
+} from "../../game/shared/vehicles";
 import {
   type Grip,
   gripOf,
@@ -69,7 +75,9 @@ export function Marketplace(props: {
       void mod.weaponPortraitsOf(WEAPON_KINDS).then((p) => {
         if (!disposed) setWeaponPortraits(p);
       });
-      setVehiclePortraits(mod.vehiclePortraitsOf(VEHICLE_KINDS));
+      void mod.vehiclePortraitsOf(VEHICLE_KINDS).then((p) => {
+        if (!disposed) setVehiclePortraits(p);
+      });
     });
     return () => {
       disposed = true;
@@ -181,11 +189,7 @@ export function Marketplace(props: {
             <div className="flex min-w-0 flex-col gap-2">
               <h3 className="truncate font-sans text-3xl leading-none font-extrabold">{name}</h3>
               {tab === "weapons" && <WeaponStats def={weapon} grip={gripOf(eyed)} />}
-              {tab === "vehicles" && (
-                <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
-                  {vehicle.hint}
-                </p>
-              )}
+              {tab === "vehicles" && <VehicleStats kind={ride} />}
               <Price price={price} />
             </div>
             {tab === "vehicles" ? (
@@ -249,19 +253,26 @@ export function Marketplace(props: {
                     />
                   </li>
                 ))
-              : VEHICLE_KINDS.map((k) => (
-                  <li key={k}>
-                    <Tile
-                      name={VEHICLES[k].name}
-                      caption
-                      portrait={vehiclePortraits?.get(k) ?? null}
-                      picked={ride === k}
-                      chosen={false}
-                      chosenLabel=""
-                      onPick={() => setRide(k)}
-                      onChoose={() => spawn(k)}
-                    />
-                  </li>
+              : VEHICLE_SECTIONS.map((section) => (
+                  <Fragment key={section}>
+                    <li className="col-span-3 pt-3 pb-0.5 font-sans text-[11px] font-bold tracking-wide text-white/60 uppercase first:pt-0">
+                      {section}
+                    </li>
+                    {VEHICLE_KINDS.filter((k) => VEHICLES[k].section === section).map((k) => (
+                      <li key={k}>
+                        <Tile
+                          name={VEHICLES[k].name}
+                          caption
+                          portrait={vehiclePortraits?.get(k) || null}
+                          picked={ride === k}
+                          chosen={false}
+                          chosenLabel=""
+                          onPick={() => setRide(k)}
+                          onChoose={() => spawn(k)}
+                        />
+                      </li>
+                    ))}
+                  </Fragment>
                 ))}
         </ul>
       </div>
@@ -316,6 +327,28 @@ function WeaponStats(props: { def: WeaponDef; grip: Grip }) {
           {special.charAt(0).toUpperCase() + special.slice(1)}
         </p>
       )}
+    </div>
+  );
+}
+
+/* What a vehicle is like: its pace, who it carries, and how you drive it. */
+function VehicleStats(props: { kind: VehicleKind }) {
+  const d = VEHICLES[props.kind];
+  const top = d.hull?.speed ?? d.car?.speed ?? d.mount?.gallop ?? 0;
+  const afloat = !!d.hull;
+  const pace = afloat ? `${Math.round(top * 1.944)} knots` : `${Math.round(top * 3.6)} km/h`;
+  const seats = d.seats.length;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">{d.blurb}</p>
+      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
+        <Stat label={d.class === "sail" ? "Best pace" : "Top speed"} value={pace} />
+        <Stat label="Seats" value={seats === 1 ? "1" : `${seats}`} />
+        <Stat label="Length" value={`${d.length.toFixed(1)} m`} />
+      </dl>
+      <p className="max-w-[22rem] font-sans text-[12px] leading-snug text-white/60">
+        {controlsOf(props.kind)}
+      </p>
     </div>
   );
 }

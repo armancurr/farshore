@@ -4,7 +4,6 @@ import { KIT_IDS, type KitId } from "../../shared/items";
 import { localBlocks, type Prefab } from "../../shared/prefabs";
 import type { Block } from "../../shared/structures";
 import { compose } from "./batch";
-import { buildDesertBike } from "./bikes";
 import { InstancedModel, type Part } from "./instanced";
 import { edges, flatten } from "./materials";
 
@@ -119,19 +118,6 @@ function decor(kind: KitId): (Part & { tone: Tone })[] {
         tone: "glow",
       });
       break;
-    case "rowboat":
-      /* Only ever seen as a ghost: the real boats are drawn by the boat view. */
-      out.push({
-        geo: new THREE.BoxGeometry(1.3, 0.5, 2.6),
-        matrix: compose(0, 0.05, 0.35),
-        tone: "mid",
-      });
-      out.push({
-        geo: new THREE.ConeGeometry(0.65, 1.2, 4, 1),
-        matrix: compose(0, 0.05, -1.55, Math.PI / 4, 1, 1, 0.7, -Math.PI / 2),
-        tone: "mid",
-      });
-      break;
     default:
       break;
   }
@@ -198,16 +184,6 @@ class Ghost {
   }
 
   private build(kind: KitId) {
-    if (kind === "desertbike") {
-      const bike = buildDesertBike();
-      bike.traverse((o) => {
-        if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).material = this.fill;
-        else if ((o as THREE.LineSegments).isLineSegments)
-          (o as THREE.LineSegments).material = this.line;
-        o.renderOrder = 4;
-      });
-      return bike;
-    }
     const fills: THREE.BufferGeometry[] = [];
     const lines: THREE.BufferGeometry[] = [];
     for (const parts of partsOf(kind).values()) {
@@ -323,7 +299,6 @@ export class PrefabView {
     this.dirty = false;
     /* Rebuild the instance lists only when something was built or taken down. */
     for (const kind of KIT_IDS) {
-      if (kind === "rowboat" || kind === "desertbike") continue;
       let n = 0;
       for (const p of this.prefabs.values()) {
         if (p.kind !== kind) continue;

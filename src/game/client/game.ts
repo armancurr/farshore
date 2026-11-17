@@ -7,8 +7,17 @@ import {
   STAMINA_MAX,
   TICK_HZ,
 } from "../shared/constants";
-import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
-import { BIKE_SEAT, BIKE_SPEED, bikeSolid } from "../shared/bike";
+import {
+  distanceTo,
+  type DriveIntent,
+  eyeOf,
+  riderPose,
+  stepVehicle,
+  unpackVehicle,
+  type VehicleSnap,
+  type VehicleState,
+  vehicleSolids,
+} from "../shared/drive";
 import { FEATURES } from "../shared/features";
 import { clamp, lerp, wrapAngle } from "../shared/math";
 import {
@@ -26,6 +35,7 @@ import {
   type HurtCause,
   type InteractKind,
   type PlayerSnap,
+  RIDE_FIELDS,
   type RosterEntry,
   type ServerMsg,
   type Spawn,
@@ -42,7 +52,15 @@ import {
 } from "../shared/prefabs";
 import { SHOP, SHOP_REACH } from "../shared/shop";
 import { canWear, type SkinId, skinDef } from "../shared/skins";
-import type { VehicleKind } from "../shared/vehicles";
+import {
+  afloat,
+  BOARD_REACH as RIDE_REACH,
+  controlsOf,
+  VEHICLES,
+  type VehicleKind,
+  vehicleFromIndex,
+} from "../shared/vehicles";
+import { windAt } from "../shared/wind";
 import { Archipelago } from "../shared/archipelago";
 import type { IslandInfo } from "../shared/islands";
 import { type Role, SPECIES } from "../shared/species";
@@ -82,8 +100,6 @@ import {
 } from "./net";
 import { Avatar } from "./scene/avatars";
 import { preloadCharacters } from "./scene/characters";
-import { BoatView } from "./scene/boats";
-import { BikeView } from "./scene/bikes";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
 import { createLand, OpenSea } from "./scene/land";
@@ -93,6 +109,7 @@ import { WorldProps } from "./scene/props";
 import { Clouds } from "./scene/clouds";
 import { NO_CAST, SunShadows } from "./scene/shadows";
 import { Sky } from "./scene/sky";
+import { stateFrom, VehicleView } from "./scene/vehicles";
 import { ViewModel } from "./scene/weapons";
 
 /* The title screen, or the game: online, on the grand map. */
@@ -321,13 +338,21 @@ export class Game {
   private focus: Focus | null = null;
   private herd = new HerdView();
   private built = new PrefabView();
-  private boats = new BoatView();
-  private bikes = new BikeView();
-  private bike: number | null = null;
-  private bikeYaw = 0;
-  /* The rowboat you're in, rowed here and reported to the room. */
-  private boat: (BoatState & { id: number }) | null = null;
+  private vehicles = new VehicleView();
+  /*
+   * The vehicle you're in and your seat. At the helm (seat 0) you steer it:
+   * `state` is where your own driving has it, reported to the room.
+   */
+  private ride: {
+    id: number;
+    seat: number;
+    kind: VehicleKind;
+    state: VehicleState | null;
+    /* Its heading last frame, so the view turns with it. */
+    yaw: number;
+  } | null = null;
   private strokeAt = 0;
+  private bumpAt = 0;
   private chestId: number | null = null;
   /* Build mode: which kit, how it's turned, and what's under the crosshair. */
   private build: {
@@ -431,8 +456,7 @@ export class Game {
     this.scene.fog = new THREE.FogExp2(PALETTE.horizon, shared.uFog.value);
     this.scene.add(this.herd.group);
     this.scene.add(this.built.group);
-    this.scene.add(this.boats.group);
-    this.scene.add(this.bikes.group);
+    this.scene.add(this.vehicles.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -571,14 +595,12 @@ export class Game {
     this.focus = null;
     this.herd.clear();
     this.built.reset([]);
-    this.boats.clear();
-    this.bikes.clear();
-    this.bike = null;
+    this.vehicles.clear();
+    this.ride = null;
     this.audio.motor(null);
     this.creative = false;
     this.flying = false;
     this.safeFall = false;
-    this.boat = null;
     this.build = null;
     this.chestId = null;
     this.animalStates.clear();
@@ -705,8 +727,7 @@ export class Game {
     this.viewmodel.dispose();
     this.herd.dispose();
     this.built.dispose();
-    this.boats.dispose();
-    this.bikes.dispose();
+    this.vehicles.dispose();
     this.dropWorld();
     this.sky.dispose();
     this.clouds.dispose();
@@ -841,9 +862,8 @@ export class Game {
         navigator.vibrate?.(80);
         break;
       case "died":
-        this.bike = null;
+        this.leaveRide();
         this.endBuild();
-        this.boat = null;
         this.down = msg.cause;
         this.dazeUntil = 0;
         if (msg.by) this.pushFeed(`${msg.by} knocked you out`);
@@ -859,9 +879,8 @@ export class Game {
         this.dazeUntil = 0;
         break;
       case "warp":
-        this.bike = null;
+        this.leaveRide();
         this.endBuild();
-        this.boat = null;
         this.chargeStart = null;
         this.place(msg);
         this.dazeUntil = 0;
@@ -896,13 +915,16 @@ export class Game {
         break;
       }
       case "aboard":
-        this.onAboard(msg.boat);
+        this.onAboard(msg);
         break;
+      case "vfix": {
+        /* The room has our vehicle somewhere else: drive on from there. */
+        const v = unpackVehicle(msg.snap);
+        if (this.ride?.state && this.ride.id === v.id) Object.assign(this.ride.state, v.state);
+        break;
+      }
       case "unprefab":
-        this.bikes.remove(msg.id);
-        if (this.bike === msg.id) this.bike = null;
         this.built.remove(msg.id);
-        this.boats.remove(msg.id);
         this.world?.ground.removeSolids(msg.id);
         if (this.chestId === msg.id && this.panel === "chest") this.closePanel();
         break;
@@ -933,109 +955,219 @@ export class Game {
     }
   }
 
-  /* Into a boat (facing the bow), or out of it onto whatever's nearest. */
-  private onAboard(id: number | null) {
+  /*
+   * Into a seat (the helm steers: you drive from where the room last had it),
+   * or out of one, onto wherever the room says you step off.
+   */
+  private onAboard(msg: Extract<ServerMsg, { t: "aboard" }>) {
     const b = this.body;
-    const world = this.world;
-    if (!b || !world) return;
-    if (id !== null) {
-      const p = this.built.get(id);
-      if (!p) return;
+    if (!b) return;
+    if (msg.id !== null) {
+      const kind = this.vehicles.kindOf(msg.id);
+      if (!kind) return;
       this.endBuild();
       this.flying = false;
-      if (p.kind === "desertbike") {
-        this.boat = null;
-        this.bike = id;
-        this.bikeYaw = p.rot;
-        this.acc = 0;
-        this.input.yaw = p.rot;
-        return;
+      const pose = this.vehicles.latest(msg.id) ?? this.vehicles.look(msg.id);
+      const same = this.ride?.id === msg.id;
+      if (this.ride && !same) this.vehicles.steer(this.ride.id, null);
+      const state = msg.seat === 0 && pose ? stateFrom(pose) : null;
+      this.ride = { id: msg.id, seat: msg.seat, kind, state, yaw: pose?.rot ?? b.yaw };
+      this.vehicles.steer(msg.id, state);
+      /* Facing the way it faces. */
+      if (!same && pose) {
+        this.input.yaw = pose.rot;
+        this.input.pitch = -0.05;
       }
-      this.boat = { id, x: p.x, z: p.z, rot: p.rot, speed: 0, turn: 0 };
-      this.input.yaw = p.rot;
-      this.audio.splash(0.4);
+      this.acc = 0;
+      if (afloat(kind)) this.audio.splash(0.3);
       return;
     }
-    if (this.bike !== null) {
-      this.bike = null;
-      this.acc = 0;
-      return; // The server supplies a checked dismount position.
+    this.leaveRide();
+    if (msg.at) {
+      b.x = msg.at.x;
+      b.y = msg.at.y;
+      b.z = msg.at.z;
+      b.vx = b.vy = b.vz = 0;
+      this.smoothEye = b.y + EYE_HEIGHT;
+      if (msg.at.y < SEA_LEVEL) this.audio.splash(0.9);
     }
-    const boat = this.boat;
-    this.boat = null;
-    if (!boat) return;
-    /* Step out onto land or a dock beside the boat if there is any, otherwise into the sea. */
-    const c = Math.cos(boat.rot);
-    const s = Math.sin(boat.rot);
-    let best: { x: number; y: number; z: number } | null = null;
-    for (const [lx, lz] of [
-      [1.4, 0],
-      [-1.4, 0],
-      [0, 2.6],
-      [0, -2.7],
-      [1.6, 1.4],
-      [-1.6, 1.4],
-      [1.6, -1.4],
-      [-1.6, -1.4],
-    ]) {
-      const x = boat.x + lx * c + lz * s;
-      const z = boat.z - lx * s + lz * c;
-      const g = world.ground.groundAt(x, z, SEA_LEVEL + 1.6).ground;
-      if (g > SEA_LEVEL + 0.15 && (!best || g < best.y)) best = { x, y: g, z };
-    }
-    const out = best ?? { x: boat.x + 1.3 * c, y: SEA_LEVEL - 1, z: boat.z - 1.3 * s };
-    b.x = out.x;
-    b.y = out.y;
-    b.z = out.z;
-    b.vx = b.vy = b.vz = 0;
-    this.smoothEye = b.y + EYE_HEIGHT;
-    this.audio.splash(best ? 0.3 : 0.9);
   }
 
-  /* Row: the oars drive the boat, and you sit in it. */
-  private row(dt: number, b: Body, active: boolean) {
-    const boat = this.boat!;
-    const world = this.world!;
-    const intent = active
-      ? { forward: this.input.forward, right: this.input.right }
-      : { forward: 0, right: 0 };
-    this.acc += dt;
-    while (this.acc >= STEP) {
-      this.acc -= STEP;
-      if (stepBoat(boat, intent, STEP, world.ground)) this.audio.land(4);
+  private leaveRide() {
+    if (this.ride) this.vehicles.steer(this.ride.id, null);
+    this.ride = null;
+    this.acc = 0;
+  }
+
+  /*
+   * In a seat. At the helm you drive it with the same steps the room uses,
+   * and report where it got to; anywhere else you ride along. Either way you
+   * sit where your seat is, and your view turns as the vehicle does.
+   */
+  private driveRide(dt: number, b: Body, active: boolean, tapped: boolean) {
+    const ride = this.ride as NonNullable<typeof this.ride>;
+    const world = this.world as World;
+    const state = ride.state;
+    if (state) {
+      const intent: DriveIntent = active
+        ? {
+            forward: this.input.forward,
+            right: this.input.right,
+            brake: this.input.jumpHeld,
+            jump: tapped,
+            boost: this.input.sprint,
+          }
+        : { forward: 0, right: 0, brake: true, jump: false, boost: false };
+      const ground = world.ground;
+      const time = this.worldTime();
+      /* Only our own hull is out of the way. */
+      ground.removeSolids(ride.id);
+      this.acc += dt;
+      let hit = false;
+      while (this.acc >= STEP) {
+        this.acc -= STEP;
+        if (stepVehicle(ride.kind, state, intent, STEP, ground, time)) hit = true;
+      }
+      ground.addSolids(ride.id, vehicleSolids(ride.kind, state));
+      this.vehicles.steer(ride.id, state);
+      const now = performance.now() / 1000;
+      if (hit && Math.abs(state.speed) > 1.5 && now - this.bumpAt > 0.6) {
+        this.bumpAt = now;
+        this.audio.land(4 + Math.min(10, Math.abs(state.speed) * 0.5));
+      }
+      /* The splash of each stroke. */
+      const cls = VEHICLES[ride.kind].class;
+      if (
+        cls === "row" &&
+        Math.abs(state.speed) > 0.8 &&
+        intent.forward &&
+        now - this.strokeAt > 1.3
+      ) {
+        this.strokeAt = now;
+        this.audio.splash(0.22);
+      }
+    } else this.acc = 0;
+    const pose = state ?? this.vehicles.look(ride.id);
+    if (pose) {
+      this.input.yaw += wrapAngle(pose.rot - ride.yaw);
+      ride.yaw = pose.rot;
+      const at = riderPose(ride.kind, pose, ride.seat);
+      Object.assign(b, {
+        x: at.x,
+        y: at.y,
+        z: at.z,
+        vx: -Math.sin(pose.rot) * pose.speed,
+        vy: 0,
+        vz: -Math.cos(pose.rot) * pose.speed,
+        grounded: true,
+      });
     }
-    const seat = seatOf(boat);
-    b.vx = (seat.x - b.x) / Math.max(dt, 1e-3);
-    b.vz = (seat.z - b.z) / Math.max(dt, 1e-3);
-    b.x = seat.x;
-    b.y = seat.y;
-    b.z = seat.z;
-    b.vy = 0;
-    b.grounded = true;
     b.sprinting = false;
     b.stamina = Math.min(STAMINA_MAX, b.stamina + 10 * dt);
-    this.bobAmp = 0;
-    const now = performance.now() / 1000;
-    if (Math.abs(boat.speed) > 0.8 && intent.forward && now - this.strokeAt > 1.3) {
-      this.strokeAt = now;
-      this.audio.splash(0.22);
+  }
+
+  /*
+   * Seated, the camera is at your eyes over the seat, tilted with the
+   * vehicle (its pitch, roll and the swell under it) under wherever you look.
+   */
+  private rideCamera(dt: number) {
+    const ride = this.ride as NonNullable<typeof this.ride>;
+    const look = this.vehicles.look(ride.id) ?? ride.state;
+    if (!look) return;
+    const eye = eyeOf(ride.kind, look, ride.seat);
+    this.smoothEye = eye.y;
+    this.camera.position.set(eye.x, eye.y, eye.z);
+    this.kick += (0 - this.kick) * Math.min(1, dt * 7);
+    this.dip = 0;
+    TILT.setFromEuler(TILT_E.set(look.pitch, look.rot, look.roll, "YXZ")).multiply(
+      HEADING.setFromAxisAngle(UP, look.rot).invert(),
+    );
+    this.camera.quaternion
+      .copy(TILT)
+      .multiply(
+        HEADING.setFromEuler(
+          TILT_E.set(this.input.pitch - this.kick * 0.06, this.input.yaw, 0, "YXZ"),
+        ),
+      );
+    const def = VEHICLES[ride.kind];
+    const top = def.hull?.speed ?? def.car?.speed ?? def.mount?.gallop ?? 10;
+    const rush = Math.min(1, Math.abs(look.speed) / top) * (def.class === "car" ? 0.45 : 0.25);
+    const targetFov = BASE_FOV + rush * 22;
+    this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
+    this.setFov(this.fov);
+  }
+
+  /* An engine you can hear: yours, when you're in something with one. */
+  private engineSound() {
+    const ride = this.ride;
+    const def = ride ? VEHICLES[ride.kind] : null;
+    if (!ride || !def || this.down || (def.class !== "motor" && def.class !== "car")) {
+      this.audio.motor(null);
+      return;
     }
-    this.boats.set(boat.id, boat.x, boat.z, boat.rot, boat.speed, true);
+    const pose = ride.state ?? this.vehicles.look(ride.id);
+    const top = def.hull?.speed ?? def.car?.speed ?? 20;
+    this.audio.motor(Math.abs(pose?.speed ?? 0) / top);
+  }
+
+  /* What E does in a seat. */
+  private rideFocus(ride: NonNullable<typeof this.ride>): Focus {
+    const seats = this.vehicles.seatsOf(ride.id);
+    if (ride.seat !== 0 && !seats[0])
+      return { kind: "vehicle", id: ride.id, label: "E · Take the helm" };
+    const def = VEHICLES[ride.kind];
+    return {
+      kind: "vehicle",
+      id: ride.id,
+      label: def.class === "mount" ? "E · Dismount" : "E · Get off",
+    };
+  }
+
+  /* The line under the crosshair while you ride: pace, the wind, and how to drive. */
+  private rideHint(ride: NonNullable<typeof this.ride>) {
+    const def = VEHICLES[ride.kind];
+    const pose = ride.state ?? this.vehicles.look(ride.id);
+    if (!ride.state) return `Riding along in the ${def.name.toLowerCase()} · E get off`;
+    const speed = Math.abs(pose?.speed ?? 0);
+    const pace = afloat(ride.kind)
+      ? `${(speed * 1.944).toFixed(0)} knots`
+      : `${Math.round(speed * 3.6)} km/h`;
+    if (def.class === "sail" && pose) {
+      const wind = windAt(this.worldTime());
+      const off = Math.abs(wrapAngle(pose.rot - wind.angle));
+      const point =
+        off < 0.5
+          ? "running before the wind"
+          : off < 1.3
+            ? "wind on the quarter"
+            : off < 2
+              ? "wind on the beam"
+              : off < 2.5
+                ? "close-hauled"
+                : "head to wind";
+      return `${pace} · sail ${Math.round(pose.aux * 100)}% · ${point} · ${controlsOf(ride.kind)} · E get off`;
+    }
+    return `${pace} · ${controlsOf(ride.kind)} · E get off`;
+  }
+
+  /* A snapshot's vehicles: drawn, and solid to walk and drive into. */
+  private setVehicles(snaps: readonly VehicleSnap[], time: number) {
+    const ground = this.world?.ground;
+    const ids = new Set(snaps.map((s) => s[0]));
+    for (const v of this.vehicles.list()) if (!ids.has(v.id)) ground?.removeSolids(v.id);
+    this.vehicles.setAll(snaps, time);
+    for (const snap of snaps) {
+      const v = unpackVehicle(snap);
+      const kind = vehicleFromIndex(v.index);
+      /* Ours is where our own driving has it. */
+      if (!kind || (this.ride?.state && this.ride.id === v.id)) continue;
+      ground?.addSolids(v.id, vehicleSolids(kind, v.state));
+    }
+    if (this.ride && !this.vehicles.kindOf(this.ride.id)) this.leaveRide();
   }
 
   /* Draw it, and make it solid for our own footsteps too. */
   private addPrefab(p: Prefab) {
-    if (p.kind === "desertbike") {
-      this.built.set(p);
-      this.bikes.set([p.id, p.x, p.y, p.z, p.rot, 0, 0, 0, 0], true);
-      this.world?.ground.addSolids(p.id, [bikeSolid(p)]);
-      return;
-    }
-    if (p.kind === "rowboat") {
-      this.built.set(p);
-      if (this.boat?.id !== p.id) this.boats.set(p.id, p.x, p.z, p.rot, 0, true);
-      return;
-    }
     this.built.set(p);
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
@@ -1077,12 +1209,11 @@ export class Game {
     for (const island of info.islands) this.addIsland(island);
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
-    this.bikes.clear();
-    this.boats.clear();
     this.board = info.board;
     for (const p of this.built.list()) world.ground.removeSolids(p.id);
     this.built.reset([]);
     for (const p of info.prefabs) this.addPrefab(p);
+    this.setVehicles(info.vehicles, info.time);
     if (info.you) this.place(info.you);
     else this.body = null;
     this.setRoster(info.roster);
@@ -1134,22 +1265,7 @@ export class Game {
     }
 
     this.herd.set(msg.a);
-    for (const snap of msg.bikes ?? []) {
-      const [id, x, y, z, rot] = snap;
-      const p = this.built.get(id);
-      if (p) Object.assign(p, { x, y, z, rot });
-      this.bikes.set(snap);
-      this.world?.ground.addSolids(id, [bikeSolid({ x, y, z, rot })]);
-    }
-    for (const [id, x, z, rot, speed] of msg.b) {
-      const p = this.built.get(id);
-      if (p) {
-        p.x = x;
-        p.z = z;
-        p.rot = rot;
-      }
-      if (this.boat?.id !== id) this.boats.set(id, x, z, rot, speed);
-    }
+    this.setVehicles(msg.v, msg.time);
     /* Anything squaring up to you nearby snorts or growls before it comes. */
     for (const [id, kind, x, , z, , state] of msg.a) {
       const was = this.animalStates.get(id);
@@ -1238,14 +1354,22 @@ export class Game {
     const t = now / 1000;
     shared.uTime.value = t;
 
-    this.bikes.update(dt, this.world?.ground);
     this.update(dt);
     if (this.devCamera) {
       const v = this.devCamera;
       this.camera.position.set(v.x, v.y, v.z);
       this.camera.rotation.set(v.pitch, v.yaw, 0, "YXZ");
     }
-    this.audio.motor(this.bike === null ? null : (this.bikes.pose(this.bike)?.speed ?? 0));
+    this.vehicles.update(
+      dt,
+      this.worldTime() - this.renderDelay(),
+      this.worldTime(),
+      this.camera.position,
+      this.world?.ground,
+    );
+    this.vehicles.inside(this.ride && !this.devCamera ? this.ride.id : null);
+    if (this.ride && this.body && !this.down) this.rideCamera(dt);
+    this.engineSound();
 
     if (this.world) {
       for (const o of this.world.islands.values()) {
@@ -1266,7 +1390,7 @@ export class Game {
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
-    const holding = this.bike !== null ? null : held ? TOOLS[held.kind].weapon : null;
+    const holding = this.ride ? null : held ? TOOLS[held.kind].weapon : null;
     this.viewmodel.set(holding);
     const def = weaponDef(holding);
     this.viewmodel.update(dt, {
@@ -1287,7 +1411,6 @@ export class Game {
     if (this.devAvatars.length) this.updateDevAvatars(dt);
     this.herd.update(dt, this.camera.position);
     this.built.update(t);
-    this.boats.update(t, dt);
     this.sky.follow(this.camera);
     this.clouds.update(this.worldTime(), this.camera.position);
     this.camera.updateMatrixWorld();
@@ -1328,14 +1451,15 @@ export class Game {
       const b = this.body;
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
-      this.blocking = guardOf(this.weapon) !== null && active && this.input.altHeld && !this.build;
+      this.blocking =
+        guardOf(this.weapon) !== null && active && this.input.altHeld && !this.build && !this.ride;
       const charging = this.chargeStart !== null;
-      if (active && this.input.take("creative") && this.bike === null) this.toggleCreative(b);
-      if (active && this.input.take("fly") && this.creative && !this.boat && this.bike === null)
+      if (active && this.input.take("creative") && !this.ride) this.toggleCreative(b);
+      if (active && this.input.take("fly") && this.creative && !this.ride)
         this.setFlying(b, !this.flying);
       const tapped = active && this.input.take("jump");
       /* In creative, a double tap of Space takes off or comes down, as in the usual sandbox games. */
-      if (tapped && this.creative && !this.boat && this.bike === null) {
+      if (tapped && this.creative && !this.ride) {
         const now = performance.now() / 1000;
         if (now - this.lastJumpTap < 0.3) {
           this.setFlying(b, !this.flying);
@@ -1363,26 +1487,10 @@ export class Game {
           }
         : { forward: 0, right: 0, jump: false, sprint: false };
 
-      if (this.bike !== null) {
-        const pose = this.bikes.pose(this.bike);
-        if (pose) {
-          this.input.yaw += wrapAngle(pose.rot - this.bikeYaw);
-          this.bikeYaw = pose.rot;
-          Object.assign(b, {
-            x: pose.x,
-            y: pose.y + BIKE_SEAT,
-            z: pose.z,
-            vx: -Math.sin(pose.rot) * pose.speed,
-            vy: 0,
-            vz: -Math.cos(pose.rot) * pose.speed,
-            grounded: true,
-          });
-        }
-        this.acc = 0;
-      } else if (this.boat) this.row(dt, b, active);
+      if (this.ride) this.driveRide(dt, b, active && !this.panel, tapped);
       else this.acc += dt;
       const stepWorld = { terrain: world.ground };
-      while (!this.boat && this.bike === null && this.acc >= STEP) {
+      while (!this.ride && this.acc >= STEP) {
         this.acc -= STEP;
         if (this.flying) {
           if (stepFly(b, fly, STEP, stepWorld).landed) {
@@ -1411,12 +1519,12 @@ export class Game {
       }
       const speed = Math.hypot(b.vx, b.vz);
       this.bobAmp = lerp(this.bobAmp, b.grounded ? Math.min(1, speed / 9) : 0, Math.min(1, dt * 8));
-      if (this.bike !== null) this.bobAmp = 0;
+      if (this.ride) this.bobAmp = 0;
 
       /* Attack: instant swings on press; the warhammer and greatsword charge until release. */
       const now = performance.now() / 1000;
       if (this.build) this.buildInput(b);
-      else if (this.input.take("attack") && !this.blocking) {
+      else if (this.input.take("attack") && !this.blocking && !this.ride) {
         if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
         } else this.tryAttack(b, 0);
@@ -1467,15 +1575,7 @@ export class Game {
             (b.y < SEA_LEVEL ? FLAG.wet : 0) |
             (this.flying ? FLAG.fly : 0) |
             (this.creative || this.safeFall ? FLAG.creative : 0),
-          boat: this.boat ? { rot: this.boat.rot, speed: this.boat.speed } : undefined,
-          drive:
-            this.bike !== null
-              ? {
-                  forward: active && !this.panel ? this.input.forward : 0,
-                  right: active && !this.panel ? this.input.right : 0,
-                  brake: !active || !!this.panel || this.input.jumpHeld,
-                }
-              : undefined,
+          ride: this.ride?.state ? reportOf(this.ride.state) : undefined,
         });
       }
 
@@ -1499,7 +1599,7 @@ export class Game {
     this.creative = !this.creative;
     if (this.creative) {
       this.safeFall = false;
-      if (!this.boat) this.setFlying(b, true);
+      if (!this.ride) this.setFlying(b, true);
       this.pushFeed("Creative mode");
     } else {
       this.flying = false;
@@ -1569,8 +1669,7 @@ export class Game {
         best = f();
       }
     };
-    if (this.bike !== null) return { kind: "prefab", id: this.bike, label: "E · Get off the bike" };
-    if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
+    if (this.ride) return this.rideFocus(this.ride);
     const bd = world.ground.primary?.board;
     if (FEATURES.board && bd)
       consider(bd.x, bd.y, bd.z, 3.6, () => ({ kind: "board", id: 0, label: "E · Guild Board" }));
@@ -1581,20 +1680,20 @@ export class Game {
         id: 0,
         label: "E · The keeper's stall",
       }));
+    /* A vehicle: measured from its side, so a galleon is as easy to board as a rowboat. */
+    for (const v of this.vehicles.list()) {
+      const reach = distanceTo(v.kind, v.look, b.x, b.z);
+      if (reach > RIDE_REACH) continue;
+      if (!afloat(v.kind) && Math.abs(v.look.y - b.y) > 2.5) continue;
+      if (!v.seats.some((m) => !m)) continue;
+      const score = reach * 0.8;
+      if (score < bestScore) {
+        bestScore = score;
+        best = { kind: "vehicle", id: v.id, label: boardLabel(v.kind) };
+      }
+    }
     for (const p of this.built.list()) {
-      if (p.kind === "desertbike")
-        consider(p.x, p.y, p.z, 3.4, () => ({
-          kind: "prefab",
-          id: p.id,
-          label: "E · Ride desert bike",
-        }));
-      else if (p.kind === "rowboat")
-        consider(p.x, b.y, p.z, BOAT_REACH, () => ({
-          kind: "prefab",
-          id: p.id,
-          label: "E · Get in the rowboat",
-        }));
-      else if (p.kind === "chest")
+      if (p.kind === "chest")
         consider(p.x, p.y, p.z, 2.4, () => ({
           kind: "chest",
           id: p.id,
@@ -1617,16 +1716,12 @@ export class Game {
   }
 
   private toggleBuild() {
-    if (this.bike !== null) {
-      this.say("Get off the bike before building", 2);
-      return;
-    }
     if (this.build) {
       this.endBuild();
       return;
     }
-    if (this.boat) {
-      this.say("Not from a boat", 2);
+    if (this.ride) {
+      this.say("Get off before building", 2);
       return;
     }
     if (!this.ownedKits().length) {
@@ -1949,11 +2044,9 @@ export class Game {
   }
 
   private firstPerson(dt: number, b: Body) {
-    /* Sitting in a boat, lower, and rocking with it. */
-    const t = performance.now() / 1000;
-    const eye = this.boat
-      ? b.y + EYE_HEIGHT - 0.55 + Math.sin(t * 1.3 + this.boat.id) * 0.04
-      : b.y + EYE_HEIGHT - (this.bike !== null ? 0.5 : 0);
+    /* Riding, the seat has the camera (rideCamera, once the vehicle has moved). */
+    if (this.ride) return;
+    const eye = b.y + EYE_HEIGHT;
     if (eye > this.smoothEye && eye - this.smoothEye < 5 && !this.flying) {
       this.smoothEye += (eye - this.smoothEye) * Math.min(1, dt * 16);
     } else this.smoothEye = eye;
@@ -1973,11 +2066,7 @@ export class Game {
     this.camera.translateX(bobX);
 
     /* The view widens as you pick up speed in the air. */
-    const rush = this.flying
-      ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST)
-      : this.bike !== null
-        ? Math.min(1, Math.hypot(b.vx, b.vz) / BIKE_SPEED) * 0.4
-        : 0;
+    const rush = this.flying ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST) : 0;
     const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + rush * 22 + Math.abs(this.kick) * 4;
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
     this.setFov(this.fov);
@@ -2030,10 +2119,14 @@ export class Game {
     this.camera.updateProjectionMatrix();
   }
 
+  /* Remote players and vehicles are drawn this far behind the room, to have two snapshots to ease between. */
+  private renderDelay() {
+    return this.mode === "online" ? 0.12 : 0.07;
+  }
+
   private updateRemotes(dt: number) {
-    const delay = this.mode === "online" ? 0.12 : 0.07;
-    const t = this.worldTime() - delay;
-    for (const r of this.remotes.values()) {
+    const t = this.worldTime() - this.renderDelay();
+    for (const [id, r] of this.remotes) {
       const buf = r.buf;
       if (!buf.length) {
         r.avatar.group.visible = false;
@@ -2054,6 +2147,24 @@ export class Game {
       if (dyaw > Math.PI) dyaw -= Math.PI * 2;
       if (dyaw < -Math.PI) dyaw += Math.PI * 2;
       r.avatar.group.visible = true;
+      /*
+       * Aboard something: in their seat on the vehicle as we draw it, so they
+       * ride with it rather than a snapshot behind or ahead.
+       */
+      const seat = this.vehicles.riderPose(id);
+      if (seat) {
+        r.avatar.setPose(
+          seat.x,
+          seat.y,
+          seat.z,
+          seat.yaw,
+          lerp(a.pitch, b.pitch, k),
+          b.flags | FLAG.riding,
+          dt,
+          this.camera.position,
+        );
+        continue;
+      }
       r.avatar.setPose(
         lerp(a.x, b.x, k),
         lerp(a.y, b.y, k),
@@ -2163,13 +2274,11 @@ export class Game {
       panel: this.panel,
       hint: this.flying
         ? "Space up · Shift down · double-tap W to rush · double-tap Space to drop"
-        : this.bike !== null
-          ? `${Math.round(Math.abs(this.bikes.pose(this.bike)?.speed ?? 0) * 3.6)} km/h · W accelerate · S brake/reverse · A/D steer · Space brake · E get off`
-          : this.boat
-            ? "W/S row · A/D turn · E get out"
-            : held
-              ? def.hint
-              : null,
+        : this.ride
+          ? this.rideHint(this.ride)
+          : held
+            ? def.hint
+            : null,
       banner: this.banner && now - this.banner.at < 4 ? this.banner : null,
       economy: FEATURES.board,
       guild: this.guildView(now),
@@ -2188,4 +2297,24 @@ export class Game {
       target,
     });
   }
+}
+
+/* The camera's tilt with a vehicle under it, kept between frames. */
+const TILT = new THREE.Quaternion();
+const TILT_E = new THREE.Euler();
+const HEADING = new THREE.Quaternion();
+const UP = new THREE.Vector3(0, 1, 0);
+
+/* What the helmsman tells the room, in RIDE_FIELDS order. */
+function reportOf(v: VehicleState) {
+  return RIDE_FIELDS.map((k) => Math.round(v[k] * 1000) / 1000);
+}
+
+/* "E · Climb aboard the galleon", "E · Mount the donkey". */
+function boardLabel(kind: VehicleKind) {
+  const def = VEHICLES[kind];
+  const name = def.name.toLowerCase();
+  if (def.class === "mount") return `E · Mount the ${name}`;
+  if (def.section === "Ships") return `E · Climb aboard the ${name}`;
+  return `E · Get in the ${name}`;
 }

@@ -3,7 +3,6 @@ import {
   ArrowUpRightIcon,
   AxeIcon,
   BedIcon,
-  BoatIcon,
   CampfireIcon,
   HammerIcon,
   HandFistIcon,
@@ -50,8 +49,6 @@ const KIT_ICONS: Record<KitId, Icon> = {
   hut: HouseIcon,
   cabin: HouseLineIcon,
   dock: AnchorIcon,
-  rowboat: BoatIcon,
-  desertbike: LightningIcon,
 };
 
 /* The little number in a slot's corner; it darkens on the bright selected slot. */

@@ -11,6 +11,7 @@ import {
 } from "./items";
 import { parseMission, parsePayouts } from "./missions";
 import { isSkinId, type SkinId } from "./skins";
+import { migrateKind, type VehicleKind } from "./vehicles";
 
 /*
  * What an online host stores: everyone who's been on the grand map, and what
@@ -25,10 +26,19 @@ export type SavedPlayer = {
   yaw: number;
   health: number;
   inv: Inventory;
-  /* The rowboat you were sitting in. */
-  boat: number | null;
+  /* The vehicle you had out, and whether you were at its helm. */
+  vehicle: SavedVehicle | null;
   /* Saved on a map that has since changed: wake on the Harbor, with everything you had. */
   relocate?: boolean;
+};
+
+export type SavedVehicle = {
+  kind: VehicleKind;
+  x: number;
+  y: number;
+  z: number;
+  rot: number;
+  aboard: boolean;
 };
 
 type Obj = Record<string, unknown>;
@@ -93,6 +103,38 @@ function inventory(v: unknown): Inventory | null {
   };
 }
 
+/*
+ * The vehicle someone left with. Older saves kept a rowboat's id (`boat`) for
+ * someone sitting in one: that's a rowboat where they sat. A desert bike, or
+ * anything else that's gone, is simply dropped.
+ */
+function vehicle(v: Obj): SavedVehicle | null {
+  const lim = BOUNDARY + 10;
+  const at = v.vehicle;
+  if (isObj(at)) {
+    const kind = migrateKind(at.kind);
+    if (
+      !kind ||
+      !num(at.x, -lim, lim) ||
+      !num(at.y, -60, 200) ||
+      !num(at.z, -lim, lim) ||
+      !num(at.rot, -100, 100)
+    )
+      return null;
+    return { kind, x: at.x, y: at.y, z: at.z, rot: at.rot, aboard: at.aboard === true };
+  }
+  if (id(v.boat))
+    return {
+      kind: "rowboat",
+      x: v.x as number,
+      y: 0,
+      z: v.z as number,
+      rot: v.yaw as number,
+      aboard: true,
+    };
+  return null;
+}
+
 function player(v: unknown, relocate: boolean): SavedPlayer | null {
   if (!isObj(v)) return null;
   const lim = BOUNDARY + 10;
@@ -108,7 +150,7 @@ function player(v: unknown, relocate: boolean): SavedPlayer | null {
     yaw: v.yaw,
     health: Math.max(1, v.health),
     inv,
-    boat: relocate ? null : id(v.boat) ? v.boat : null,
+    vehicle: relocate ? null : vehicle(v),
     relocate: relocate || v.relocate === true,
   };
 }

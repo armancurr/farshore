@@ -1,9 +1,7 @@
 import * as THREE from "three";
 import type { SkinId } from "../../shared/skins";
-import type { VehicleKind } from "../../shared/vehicles";
+import { afloat, VEHICLES, type VehicleKind } from "../../shared/vehicles";
 import { gripOf, type WeaponKind } from "../../shared/weapons";
-import { buildRowboat } from "./boats";
-import { buildDesertBike } from "./bikes";
 import {
   buildCharacter,
   type Character,
@@ -12,6 +10,8 @@ import {
   playerClips,
 } from "./characters";
 import { edges, flatten, inkMaterial, lineMaterial, PALETTE } from "./materials";
+import { measure } from "./models";
+import { buildVehicle, disposeBuilt } from "./vehicles";
 import { buildWeapon, WEAPON_SPAN, weaponsReady } from "./weapons";
 
 /*
@@ -112,36 +112,63 @@ function weaponLights() {
   return g;
 }
 
-/* A vehicle on display: shrunk to sit on the plinth, a little above it as if afloat. */
-function displayVehicle(kind: VehicleKind) {
-  const root = new THREE.Group();
-  switch (kind) {
-    case "desertbike": {
-      const bike = buildDesertBike();
-      bike.scale.setScalar(0.78);
-      root.add(bike);
-      break;
-    }
-    case "rowboat": {
-      const boat = buildRowboat();
-      /* Oar tip to oar tip it's nearly six metres; the plinth is two across. */
-      boat.scale.setScalar(0.42);
-      boat.position.y = 0.32;
-      root.add(boat);
-      break;
-    }
+/*
+ * A vehicle on display, as a model on a turntable: scaled so a rowboat and a
+ * galleon both fill the view, keel or wheels on the plinth, sails set and
+ * wheels square. Its lights come with it: the pack models are lit, not inked.
+ */
+const DISPLAY = 3;
+async function displayVehicle(kind: VehicleKind) {
+  const built = await buildVehicle(kind);
+  const def = VEHICLES[kind];
+  const model = built.root;
+  /* Sails full, as if under way. */
+  for (const sq of built.squares) sq.node.scale.z = 1.3;
+  for (const sail of built.sails) sail.node.scale.x = 1.2;
+  /* A horse standing square, a moment into its idle. */
+  if (built.mixer && built.clips.idle) {
+    built.mixer.clipAction(built.clips.idle).play();
+    built.mixer.update(0.8);
   }
-  return root;
+  const box = measure(model);
+  const size = box.getSize(new THREE.Vector3());
+  const k = DISPLAY / Math.max(size.x, size.z, size.y * 1.15);
+  const holder = new THREE.Group();
+  holder.add(model);
+  model.scale.setScalar(k);
+  model.position.y = -box.min.y * k + (afloat(kind) ? 0.04 : 0);
+  /* Centred on its footprint, not its origin (a towboat's is off to one end). */
+  model.position.x = -((box.min.x + box.max.x) / 2) * k;
+  model.position.z = -((box.min.z + box.max.z) / 2) * k;
+  holder.add(...displayLights());
+  holder.userData.height = size.y * k;
+  holder.userData.built = built;
+  holder.userData.length = def.length;
+  return holder;
+}
+
+function displayLights() {
+  const sun = new THREE.DirectionalLight(0xffffff, 2.3);
+  sun.position.set(-3, 6, -4);
+  const sky = new THREE.HemisphereLight(0xd9d3ff, PALETTE.land, 1.4);
+  return [sun, sky];
 }
 
 /* Look down on a vehicle from three-quarters up, `dist` metres off. */
-function frameVehicle(camera: THREE.PerspectiveCamera, dist: number) {
-  camera.position.set(0, dist * 0.42, -dist);
-  camera.lookAt(0, 0.45, 0);
+function frameVehicle(camera: THREE.PerspectiveCamera, dist: number, height = 1) {
+  const mid = Math.min(1.4, height * 0.4);
+  camera.position.set(0, mid + dist * 0.38, -dist);
+  camera.lookAt(0, mid, 0);
+}
+
+/* A vehicle's model shares its pack's geometry and materials: just let go of it. */
+function disposeVehicle(root: THREE.Object3D) {
+  disposeBuilt(root.userData.built);
+  root.removeFromParent();
 }
 
 /*
- * A vehicle's geometry is its own; its materials are shared and stay. A
+ * A weapon's geometry is its own; its materials are shared and stay. A
  * weapon's model is shared with every copy of it (userData.shared), so it stays too.
  */
 function disposeWeapon(root: THREE.Object3D) {
@@ -161,6 +188,9 @@ export class Showcase {
   private weapon: THREE.Group | null = null;
   private lights = weaponLights();
   private yaw = 0.55;
+  /* Counts what's been asked to show, so a slow-loading vehicle doesn't land on top of the next. */
+  private shown = 0;
+  private disposed = false;
   private spinning = true;
   private walking = true;
   private walk = 1;
@@ -206,20 +236,30 @@ export class Showcase {
 
   showVehicle(kind: VehicleKind) {
     this.clear();
-    this.weapon = displayVehicle(kind);
-    this.scene.add(this.weapon);
-    frameVehicle(this.camera, 6);
+    const shown = ++this.shown;
+    void displayVehicle(kind).then((root) => {
+      /* Something else was picked while it loaded. */
+      if (shown !== this.shown || this.disposed) {
+        disposeVehicle(root);
+        return;
+      }
+      this.weapon = root;
+      this.scene.add(root);
+      frameVehicle(this.camera, 7.2, root.userData.height);
+    });
   }
 
   private clear() {
     this.showing++;
+    this.shown++;
     if (this.figure) {
       disposeFigure(this.figure);
       this.figure = null;
     }
     if (this.weapon) {
       this.scene.remove(this.weapon, this.lights);
-      disposeWeapon(this.weapon);
+      if (this.weapon.userData.built) disposeVehicle(this.weapon);
+      else disposeWeapon(this.weapon);
       this.weapon = null;
     }
   }
@@ -268,6 +308,7 @@ export class Showcase {
   };
 
   dispose() {
+    this.disposed = true;
     cancelAnimationFrame(this.raf);
     this.resize.disconnect();
     this.clear();
@@ -412,15 +453,16 @@ export async function weaponPortraitsOf(
   return new Map(kinds.map((k) => [k, weaponPortraits.get(k) as string]));
 }
 
-/* And the vehicles, seen from three-quarters up. */
+/* And the vehicles, seen from three-quarters up. They load their models first. */
 const vehiclePortraits = new Map<VehicleKind, string>();
 
-export function vehiclePortraitsOf(
+export async function vehiclePortraitsOf(
   kinds: readonly VehicleKind[],
   width = 224,
-): Map<VehicleKind, string> {
+): Promise<Map<VehicleKind, string>> {
   const missing = kinds.filter((k) => !vehiclePortraits.has(k));
   if (missing.length) {
+    const shown = await Promise.all(missing.map((k) => displayVehicle(k).catch(() => null)));
     const canvas = document.createElement("canvas");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(1);
@@ -428,18 +470,19 @@ export function vehiclePortraitsOf(
     renderer.setClearColor(0x000000, 0);
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
-    frameVehicle(camera, 7.5);
-    for (const kind of missing) {
-      const root = displayVehicle(kind);
+    missing.forEach((kind, i) => {
+      const root = shown[i];
+      if (!root) return;
       root.rotation.y = 0.7;
+      frameVehicle(camera, 7.8, root.userData.height);
       scene.add(root);
       renderer.render(scene, camera);
       vehiclePortraits.set(kind, canvas.toDataURL("image/png"));
       scene.remove(root);
-      disposeWeapon(root);
-    }
+      disposeVehicle(root);
+    });
     renderer.dispose();
     renderer.forceContextLoss();
   }
-  return new Map(kinds.map((k) => [k, vehiclePortraits.get(k) as string]));
+  return new Map(kinds.map((k) => [k, vehiclePortraits.get(k) ?? ""]));
 }

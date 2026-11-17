@@ -107,10 +107,13 @@ export class TideAudio {
     this.motorFilter = null;
   }
 
-  /** A quiet synthesized engine, through the existing mute/underwater chain. */
-  motor(speed: number | null) {
+  /*
+   * A quiet synthesized engine, through the mute and underwater chain.
+   * `revs` is how hard it's working, 0 (idling) to 1 (flat out); null stops it.
+   */
+  motor(revs: number | null) {
     const ctx = this.ctx;
-    if (!ctx || (speed === null && !this.motorOscillator)) return;
+    if (!ctx || (revs === null && !this.motorOscillator)) return;
     if (!this.motorOscillator) {
       this.motorOscillator = ctx.createOscillator();
       this.motorOscillator.type = "sawtooth";
@@ -122,11 +125,11 @@ export class TideAudio {
       this.motorOscillator.connect(this.motorFilter).connect(this.motorGain).connect(this.muffle);
       this.motorOscillator.start();
     }
-    const revs = Math.min(1, Math.abs(speed ?? 0) / 20);
-    this.motorOscillator.frequency.setTargetAtTime(38 + revs * 100, ctx.currentTime, 0.12);
-    this.motorFilter!.frequency.setTargetAtTime(180 + revs * 420, ctx.currentTime, 0.12);
+    const r = Math.min(1, Math.abs(revs ?? 0));
+    this.motorOscillator.frequency.setTargetAtTime(38 + r * 100, ctx.currentTime, 0.12);
+    this.motorFilter!.frequency.setTargetAtTime(180 + r * 420, ctx.currentTime, 0.12);
     this.motorGain!.gain.setTargetAtTime(
-      speed === null ? 0 : 0.025 + revs * 0.035,
+      revs === null ? 0 : 0.025 + r * 0.035,
       ctx.currentTime,
       0.08,
     );
