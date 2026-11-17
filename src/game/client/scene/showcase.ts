@@ -4,8 +4,14 @@ import type { VehicleKind } from "../../shared/vehicles";
 import { gripOf, type WeaponKind } from "../../shared/weapons";
 import { buildRowboat } from "./boats";
 import { buildDesertBike } from "./bikes";
+import {
+  buildCharacter,
+  type Character,
+  type ClipHalves,
+  disposeCharacter,
+  playerClips,
+} from "./characters";
 import { edges, flatten, inkMaterial, lineMaterial, PALETTE } from "./materials";
-import { buildRig, disposeRig, type Rig } from "./skins";
 import { buildWeapon, WEAPON_SPAN, weaponsReady } from "./weapons";
 
 /*
@@ -13,8 +19,39 @@ import { buildWeapon, WEAPON_SPAN, weaponsReady } from "./weapons";
  * walking on the spot, or one weapon or vehicle over it. Drag to turn any.
  */
 
-/* Steps per second when a showcase skin walks on the spot. */
-const WALK = 7.5;
+/* How tall a character stands in the frame, hat and all. */
+const FIGURE_HEIGHT = 2.3;
+
+/* Characters are lit like the island: a warm sun, the violet sky above, the land below. */
+function light(scene: THREE.Scene) {
+  const sun = new THREE.DirectionalLight(0xffffff, 2.1);
+  sun.position.set(-3, 6, -5);
+  scene.add(sun, new THREE.HemisphereLight(0xd9d3ff, 0x6b5a8e, 1.4));
+}
+
+/* A character on display: its own mixer, idling and walking on the spot as `walk` (0..1) says. */
+type Figure = {
+  char: Character;
+  mixer: THREE.AnimationMixer;
+  walk: THREE.AnimationAction[];
+  idle: THREE.AnimationAction[];
+};
+
+function figure(char: Character, clips: Map<string, ClipHalves>): Figure {
+  const mixer = new THREE.AnimationMixer(char.model);
+  const play = (name: string) => {
+    const halves = clips.get(name);
+    if (!halves) return [];
+    return [halves.lower, halves.upper].map((c) => mixer.clipAction(c).play());
+  };
+  return { char, mixer, walk: play("Walking_A"), idle: play("Idle_A") };
+}
+
+function disposeFigure(f: Figure) {
+  f.mixer.stopAllAction();
+  f.mixer.uncacheRoot(f.char.model);
+  disposeCharacter(f.char);
+}
 
 function plinth() {
   const g = new THREE.Group();
@@ -117,7 +154,9 @@ export class Showcase {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
-  private rig: Rig | null = null;
+  private figure: Figure | null = null;
+  /* Bumped on every change, so a character that loads after you've moved on is dropped. */
+  private showing = 0;
   /* A weapon or a vehicle: something that stands still and turns. */
   private weapon: THREE.Group | null = null;
   private lights = weaponLights();
@@ -136,6 +175,7 @@ export class Showcase {
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     this.renderer.setClearColor(0x000000, 0);
     this.scene.add(plinth());
+    light(this.scene);
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
     this.fit();
@@ -144,9 +184,17 @@ export class Showcase {
 
   show(skin: SkinId) {
     this.clear();
-    this.rig = buildRig(skin);
-    this.scene.add(this.rig.root);
-    frame(this.camera, this.rig.top);
+    const ticket = this.showing;
+    frame(this.camera, FIGURE_HEIGHT);
+    void Promise.all([buildCharacter(skin), playerClips()]).then(([char, clips]) => {
+      const f = figure(char, clips);
+      if (ticket !== this.showing) {
+        disposeFigure(f);
+        return;
+      }
+      this.figure = f;
+      this.scene.add(char.root);
+    });
   }
 
   showWeapon(kind: WeaponKind) {
@@ -164,10 +212,10 @@ export class Showcase {
   }
 
   private clear() {
-    if (this.rig) {
-      this.scene.remove(this.rig.root);
-      disposeRig(this.rig);
-      this.rig = null;
+    this.showing++;
+    if (this.figure) {
+      disposeFigure(this.figure);
+      this.figure = null;
     }
     if (this.weapon) {
       this.scene.remove(this.weapon, this.lights);
@@ -209,9 +257,12 @@ export class Showcase {
     if (this.weapon) {
       this.weapon.rotation.y = this.yaw;
       this.weapon.position.y = Math.sin(this.clock * 1.6) * 0.04;
-    } else if (this.rig) {
-      this.rig.root.rotation.y = this.yaw;
-      this.rig.update(this.clock, this.clock * WALK * this.rig.cadence, this.walk, false);
+    } else if (this.figure) {
+      const f = this.figure;
+      f.char.root.rotation.y = this.yaw;
+      for (const a of f.walk) a.weight = this.walk;
+      for (const a of f.idle) a.weight = 1 - this.walk;
+      f.mixer.update(dt);
     } else return;
     this.renderer.render(this.scene, this.camera);
   };
@@ -227,39 +278,63 @@ export class Showcase {
 
 /*
  * Still portraits of each skin for the marketplace grid, drawn once with a
- * borrowed renderer and kept as image URLs.
+ * borrowed renderer and kept as image URLs. The characters load first, and
+ * every texture has to be in before anything is drawn.
  */
 const portraits = new Map<SkinId, string>();
 
 /* Portraits are 4:5, the shape of a marketplace tile. */
-export function portraitsOf(skins: readonly SkinId[], width = 224): Map<SkinId, string> {
+export async function portraitsOf(
+  skins: readonly SkinId[],
+  width = 224,
+): Promise<Map<SkinId, string>> {
   const missing = skins.filter((s) => !portraits.has(s));
   if (missing.length) {
+    const [chars, clips] = await Promise.all([
+      Promise.all(missing.map((s) => buildCharacter(s))),
+      playerClips(),
+    ]);
+    await texturesLoaded(chars.map((c) => c.root));
     const canvas = document.createElement("canvas");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(1);
     renderer.setSize(width, Math.round(width * 1.25), false);
     renderer.setClearColor(0x000000, 0);
     const scene = new THREE.Scene();
+    light(scene);
     const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
-    for (const skin of missing) {
-      const rig = buildRig(skin);
-      /* Straight on, facing the camera. */
-      rig.root.rotation.y = 0;
-      /* A moment into the idle, so lanterns and flames are lit. */
-      rig.update(1.3, 0, 0, false);
-      scene.add(rig.root);
-      /* Plenty of room around it, so the tile reads as a card, not a crop. */
-      frame(camera, rig.top, 0.75);
+    /* Plenty of room around it, so the tile reads as a card, not a crop. */
+    frame(camera, FIGURE_HEIGHT - 0.25, 0.5);
+    missing.forEach((skin, i) => {
+      const f = figure(chars[i], clips);
+      /* Straight on, a moment into the idle, turned a touch so the face has some shape. */
+      for (const a of f.walk) a.weight = 0;
+      f.mixer.update(0.4);
+      f.char.root.rotation.y = 0.35;
+      scene.add(f.char.root);
       renderer.render(scene, camera);
       portraits.set(skin, canvas.toDataURL("image/png"));
-      scene.remove(rig.root);
-      disposeRig(rig);
-    }
+      disposeFigure(f);
+    });
     renderer.dispose();
     renderer.forceContextLoss();
   }
   return new Map(skins.map((s) => [s, portraits.get(s) as string]));
+}
+
+/* Wait (a few seconds at most) for every texture under these roots to have its image. */
+async function texturesLoaded(roots: THREE.Object3D[]) {
+  for (let tries = 0; tries < 100; tries++) {
+    let waiting = false;
+    for (const root of roots)
+      root.traverse((o) => {
+        const map = ((o as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined)?.map;
+        const img = map?.image as HTMLImageElement | undefined;
+        if (map && (!img || img.complete === false)) waiting = true;
+      });
+    if (!waiting) return;
+    await new Promise((done) => setTimeout(done, 50));
+  }
 }
 
 /*

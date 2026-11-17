@@ -3,6 +3,8 @@ Models in this folder come from these packs, all released under CC0 1.0 (public 
   forest, characters, anims, weapons, gear, tools
     KayKit by Kay Lousberg (kaylousberg.itch.io): Forest Nature Pack, Adventurers,
     Skeletons, Character Animations, Fantasy Weapons Bits, RPG Tools Bits.
+  anims/player.glb (swim, drive, sit)
+    Universal Animation Library by Quaternius (quaternius.com), moved onto the KayKit rig.
   boats, ships, cars, camp, coast, town
     Kenney (kenney.nl): Watercraft Kit, Pirate Kit, Car Kit, Survival Kit, Fantasy Town Kit.
   animals
