@@ -134,6 +134,16 @@ export class BoatView {
     }
   }
 
+  /* The same stroke that drives the visible oars, for the seated rower. */
+  stroke(id: number) {
+    const b = this.boats.get(id);
+    if (!b) return 0;
+    const drive = b.phase < 0.42;
+    const p = drive ? b.phase / 0.42 : (b.phase - 0.42) / 0.58;
+    const eased = p * p * (3 - 2 * p);
+    return (drive ? -1 + 2 * eased : 1 - 2 * eased) * b.rowing * Math.sign(b.speed || 1);
+  }
+
   clear() {
     for (const id of [...this.boats.keys()]) this.remove(id);
   }

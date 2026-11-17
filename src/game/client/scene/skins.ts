@@ -10,7 +10,7 @@ import { edges, flatten, inkMaterial, lineMaterial } from "./materials";
  */
 
 export type Rig = {
-  ride?(): void;
+  ride?(kind: "bike" | "boat", stroke: number): void;
   root: THREE.Group;
   head: THREE.Object3D;
   /* Where a held weapon goes. */
@@ -282,9 +282,9 @@ function wanderer(v: number): Rig {
     hold: 0.6,
     top: 2.45,
     cadence: 1,
-    ride() {
-      legs[0].rotation.x = legs[1].rotation.x = 0.65;
-      arms[0].sh.rotation.x = arms[1].sh.rotation.x = 1.05;
+    ride(kind, stroke) {
+      legs[0].rotation.x = legs[1].rotation.x = kind === "bike" ? 0.85 : 1.15;
+      arms[0].sh.rotation.x = arms[1].sh.rotation.x = kind === "bike" ? 1.05 : 0.75 + stroke * 0.5;
     },
     update(t, p, w, holding) {
       const s = Math.sin(p);
@@ -420,9 +420,10 @@ function lantern(v: number): Rig {
     hold: 0,
     top: 2.55,
     cadence: 1,
-    ride() {
-      hands[0].position.set(-0.4, 1, -0.55);
-      hands[1].position.set(0.4, 1, -0.55);
+    ride(kind, stroke) {
+      const z = kind === "bike" ? -0.55 : -0.38 + stroke * 0.3;
+      hands[0].position.set(-0.4, 1, z);
+      hands[1].position.set(0.4, 1, z);
     },
     update(t, p, w, holding) {
       const s = Math.sin(p);
@@ -543,9 +544,9 @@ function diver(v: number): Rig {
     hold: 0.5,
     top: 2.55,
     cadence: 0.8,
-    ride() {
-      legs[0].rotation.x = legs[1].rotation.x = 0.65;
-      arms[0].sh.rotation.x = arms[1].sh.rotation.x = 1.05;
+    ride(kind, stroke) {
+      legs[0].rotation.x = legs[1].rotation.x = kind === "bike" ? 0.85 : 1.15;
+      arms[0].sh.rotation.x = arms[1].sh.rotation.x = kind === "bike" ? 1.05 : 0.75 + stroke * 0.5;
     },
     update(t, p, w, holding) {
       const s = Math.sin(p);
@@ -673,9 +674,9 @@ function corsair(v: number): Rig {
     hold: 0.6,
     top: 2.55,
     cadence: 1.07,
-    ride() {
-      legs[0].rotation.x = legs[1].rotation.x = 0.65;
-      arms[0].sh.rotation.x = arms[1].sh.rotation.x = 1.05;
+    ride(kind, stroke) {
+      legs[0].rotation.x = legs[1].rotation.x = kind === "bike" ? 0.85 : 1.15;
+      arms[0].sh.rotation.x = arms[1].sh.rotation.x = kind === "bike" ? 1.05 : 0.75 + stroke * 0.5;
     },
     update(t, p, w, holding) {
       const s = Math.sin(p);
@@ -818,9 +819,10 @@ function buoy(v: number): Rig {
     hold: 0,
     top: v === 1 ? 2.45 : 2.3,
     cadence: 1.13,
-    ride() {
-      hands[0].position.set(-0.4, 1, -0.55);
-      hands[1].position.set(0.4, 1, -0.55);
+    ride(kind, stroke) {
+      const z = kind === "bike" ? -0.55 : -0.38 + stroke * 0.3;
+      hands[0].position.set(-0.4, 1, z);
+      hands[1].position.set(0.4, 1, z);
     },
     update(t, p, w, holding) {
       const s = Math.sin(p);

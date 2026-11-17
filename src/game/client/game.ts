@@ -259,6 +259,9 @@ export class Game {
   private sky = new Sky();
   private audio = new TideAudio();
   private viewmodel = new ViewModel();
+  private tmpAim = new THREE.Vector3();
+  private thirdPerson = false;
+  private localAvatar: Avatar | null = null;
   private world: World | null = null;
   private conn: Connection | null = null;
   private mode: Mode = "attract";
@@ -453,6 +456,11 @@ export class Game {
   }
 
   private reset() {
+    if (this.localAvatar) {
+      this.scene.remove(this.localAvatar.group);
+      this.localAvatar.dispose();
+      this.localAvatar = null;
+    }
     for (const r of this.remotes.values()) {
       this.scene.remove(r.avatar.group);
       r.avatar.dispose();
@@ -1053,6 +1061,10 @@ export class Game {
 
   /* The held rod's tip, placed in the world where it shows on screen. */
   private rodTipWorld(out: THREE.Vector3) {
+    if (this.thirdPerson && this.body) {
+      out.set(this.body.x, this.body.y + EYE_HEIGHT, this.body.z);
+      return true;
+    }
     if (!this.viewmodel.rodTip(out)) {
       out.copy(this.camera.position);
       return false;
@@ -1090,7 +1102,7 @@ export class Game {
     const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
     const flat = Math.hypot(dir.x, dir.z) || 1;
     let reach = rod.cast;
-    if (dir.y < -0.02) reach = Math.min(rod.cast, ((this.camera.position.y - 0) / -dir.y) * flat);
+    if (dir.y < -0.02) reach = Math.min(rod.cast, ((b.y + EYE_HEIGHT) / -dir.y) * flat);
     reach = Math.max(3, reach);
     const x = b.x + (dir.x / flat) * reach;
     const z = b.z + (dir.z / flat) * reach;
@@ -1256,6 +1268,7 @@ export class Game {
     this.lastSwingAt = now;
     this.conn?.send({ t: "attack", charge });
     this.viewmodel.swing(heavy);
+    this.localAvatar?.strike();
     this.audio.swing(kind, heavy);
     this.kick = kind ? -0.3 : -0.6;
   }
@@ -1310,12 +1323,13 @@ export class Game {
       kick: this.kick,
       rod: this.rodPose(),
     });
+    this.boats.update(t, dt);
+    this.updateLocalAvatar(dt);
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
     this.lines.update(t, this.tipOf);
     this.herd.update(dt);
     this.built.update(t);
-    this.boats.update(t, dt);
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
@@ -1332,7 +1346,7 @@ export class Game {
       this.renderer,
       this.scene,
       this.camera,
-      this.viewmodel.visible ? this.viewmodel : undefined,
+      this.viewmodel.visible && !this.thirdPerson ? this.viewmodel : undefined,
     );
 
     this.hudAcc += dt;
@@ -1351,6 +1365,10 @@ export class Game {
       this.fallen(dt, this.body);
     } else if (world && this.body) {
       const b = this.body;
+      if (active && this.input.take("view")) {
+        this.thirdPerson = !this.thirdPerson;
+        this.say(this.thirdPerson ? "Third-person view" : "First-person view", 2);
+      }
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
       this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
@@ -1512,6 +1530,7 @@ export class Game {
       const strain = this.health / 30;
       if (strain < 1) this.audio.heartbeat(lerp(0.45, 1.1, strain));
       this.firstPerson(dt, b);
+      if (this.thirdPerson) this.positionThirdPerson(b);
     } else {
       this.dropInputs();
       this.orbitCamera(dt);
@@ -1718,7 +1737,7 @@ export class Game {
     const world = this.world!;
     const def = PREFABS[kind];
     const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    const p = this.tmpV.copy(this.camera.position);
+    const p = this.tmpV.set(b.x, b.y + EYE_HEIGHT, b.z);
     let hit: { x: number; y: number; z: number } | null = null;
     for (let d = 0; d < BUILD_REACH + 2; d += 0.25) {
       p.addScaledVector(dir, d === 0 ? 0 : 0.25);
@@ -1821,6 +1840,7 @@ export class Game {
   wear(skin: SkinId) {
     if (!canWear(skin)) return;
     keepSkin(skin);
+    this.localAvatar?.setSkin(skin);
     if (this.conn?.kind === "online") this.conn.send({ t: "skin", skin });
   }
 
@@ -1964,6 +1984,65 @@ export class Game {
     this.setFov(this.fov);
   }
 
+  private positionThirdPerson(b: Body) {
+    const origin = this.tmpAim.set(b.x, this.smoothEye, b.z);
+    const back = this.tmpF.set(0, 0, 1).applyQuaternion(this.camera.quaternion);
+    let distance = 4.5;
+    // Keep the camera in front of terrain rather than burying it in a hillside.
+    if (this.world) {
+      for (let d = 0.25; d <= distance; d += 0.25) {
+        const x = origin.x + back.x * d;
+        const y = origin.y + back.y * d;
+        const z = origin.z + back.z * d;
+        if (y < this.world.ground.heightAt(x, z) + 0.2) {
+          distance = Math.max(0.25, d - 0.25);
+          break;
+        }
+      }
+    }
+    this.camera.position.copy(origin).addScaledVector(back, distance);
+  }
+
+  private updateLocalAvatar(dt: number) {
+    const b = this.body;
+    if (!this.thirdPerson || !b || this.down) {
+      if (this.localAvatar) this.localAvatar.group.visible = false;
+      return;
+    }
+    if (!this.localAvatar) {
+      this.localAvatar = new Avatar(this.myId, this.myName, readSkin(), false);
+      this.scene.add(this.localAvatar.group);
+    }
+    const avatar = this.localAvatar;
+    avatar.group.visible =
+      this.camera.position.distanceToSquared(this.tmpAim.set(b.x, b.y + EYE_HEIGHT, b.z)) > 1;
+    avatar.setGear(this.weapon, 0);
+    const bike = this.bike === null ? undefined : this.bikes.pose(this.bike);
+    const vehicle = bike
+      ? { kind: "bike" as const, pitch: bike.pitch, roll: bike.roll }
+      : this.boat
+        ? {
+            kind: "boat" as const,
+            stroke: this.boats.stroke(this.boat.id),
+            bob: Math.sin((performance.now() / 1000) * 1.3 + this.boat.id) * 0.04,
+          }
+        : undefined;
+    avatar.setPose(
+      b.x,
+      b.y,
+      b.z,
+      bike?.rot ?? this.boat?.rot ?? b.yaw,
+      this.input.pitch,
+      (b.grounded ? FLAG.grounded : 0) |
+        (this.bike !== null || this.boat ? FLAG.riding : 0) |
+        (this.blocking ? FLAG.block : 0) |
+        (this.chargeStart !== null ? FLAG.charge : 0),
+      dt,
+      this.camera.position,
+      vehicle,
+    );
+  }
+
   private rodPose(): RodPose {
     if (this.bite) return "bite";
     return this.myLine ? "out" : "idle";
@@ -2083,7 +2162,11 @@ export class Game {
         if (!r.avatar.group.visible) continue;
         const to = this.tmpV.copy(r.avatar.group.position);
         to.y += 1.2;
-        to.sub(this.camera.position);
+        to.sub(
+          this.thirdPerson && this.body
+            ? this.tmpAim.set(this.body.x, this.body.y + EYE_HEIGHT, this.body.z)
+            : this.camera.position,
+        );
         const d = to.length();
         if (d > 8) continue;
         const dot = to.normalize().dot(fwd);
@@ -2095,7 +2178,11 @@ export class Game {
       for (const a of this.herd.list().values()) {
         if (a.state === ANIMAL_STATE.dead) continue;
         const to = this.tmpV.set(a.x, a.y + (a.kind === "deer" ? 1.1 : 0.6), a.z);
-        to.sub(this.camera.position);
+        to.sub(
+          this.thirdPerson && this.body
+            ? this.tmpAim.set(this.body.x, this.body.y + EYE_HEIGHT, this.body.z)
+            : this.camera.position,
+        );
         const d = to.length();
         if (d > 12) continue;
         const dot = to.normalize().dot(fwd);
