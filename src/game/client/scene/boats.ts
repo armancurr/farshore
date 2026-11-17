@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { ROW_SPEED } from "../../shared/boat";
 import { SEA_LEVEL } from "../../shared/constants";
 import { wrapAngle } from "../../shared/math";
 import { Batch, compose } from "./batch";
@@ -51,6 +52,29 @@ function oar() {
   return b;
 }
 
+let showMaterials: [THREE.Material, THREE.Material] | null = null;
+
+/*
+ * One rowboat on its own, oars at rest, for the marketplace to show. Its
+ * geometry is its own to dispose of; the materials are shared and stay.
+ */
+export function buildRowboat(): THREE.Group {
+  showMaterials ??= [inkMaterial(0.11), lineMaterial(0.85)];
+  const [fill, line] = showMaterials;
+  const h = new Batch();
+  hull(h);
+  const group = new THREE.Group();
+  group.add(h.build(fill, line));
+  for (const side of [1, -1]) {
+    const o = oar().build(fill, line);
+    o.scale.x = side;
+    o.position.set(0.66 * side, 0.42, 0.25);
+    o.rotation.set(0, 0, -0.25 * side);
+    group.add(o);
+  }
+  return group;
+}
+
 type Shown = {
   group: THREE.Group;
   oars: [THREE.Group, THREE.Group];
@@ -62,6 +86,7 @@ type Shown = {
   trot: number;
   speed: number;
   phase: number;
+  rowing: number;
 };
 
 /* Rowboats on the sea, a handful at most, each with oars that pull as it moves. */
@@ -95,7 +120,7 @@ export class BoatView {
         group.add(o);
       });
       this.group.add(group);
-      b = { group, oars, x, z, rot, tx: x, tz: z, trot: rot, speed, phase: 0 };
+      b = { group, oars, x, z, rot, tx: x, tz: z, trot: rot, speed, phase: 0, rowing: 0 };
       this.boats.set(id, b);
     }
     b.tx = x;
@@ -134,11 +159,20 @@ export class BoatView {
         Math.cos(time * 1.1 + id) * 0.035,
         "YXZ",
       );
-      /* Oars: a sweep and a dip per stroke while under way, resting otherwise. */
-      const rowing = Math.min(1, Math.abs(b.speed) / 2);
-      b.phase += dt * (1.2 + Math.abs(b.speed) * 0.5) * (rowing > 0.05 ? 1 : 0);
-      const sweep = Math.sin(b.phase * Math.PI) * 0.55 * rowing * Math.sign(b.speed || 1);
-      const dip = (Math.cos(b.phase * Math.PI) * 0.5 + 0.5) * 0.3 * rowing;
+      /* A measured pull through the water, then a slower raised recovery. */
+      const targetRowing = Math.min(1, Math.abs(b.speed) / 1.5);
+      b.rowing += (targetRowing - b.rowing) * (1 - Math.exp(-dt * 2));
+      if (b.rowing > 0.01)
+        b.phase = (b.phase + dt * (0.32 + Math.min(1, Math.abs(b.speed) / ROW_SPEED) * 0.1)) % 1;
+      const drive = b.phase < 0.42;
+      const progress = drive ? b.phase / 0.42 : (b.phase - 0.42) / 0.58;
+      const eased = progress * progress * (3 - 2 * progress);
+      const stroke = drive ? -1 + 2 * eased : 1 - 2 * eased;
+      const sweep = stroke * 0.42 * b.rowing * Math.sign(b.speed || 1);
+      const dip =
+        (drive ? Math.sin(progress * Math.PI) : -0.16 * Math.sin(progress * Math.PI)) *
+        0.18 *
+        b.rowing;
       b.oars[0].rotation.set(0, sweep, -0.25 - dip);
       b.oars[1].rotation.set(0, -sweep, 0.25 + dip);
     }

@@ -10,7 +10,7 @@ import { type Ground, overSolid } from "./terrain";
 
 export type BoatState = { x: number; z: number; rot: number; speed: number; turn: number };
 
-export const ROW_SPEED = 4.6;
+export const ROW_SPEED = 5.4;
 const BACK_SPEED = 1.8;
 const ROW_ACCEL = 2.2;
 const DRAG = 0.6;
