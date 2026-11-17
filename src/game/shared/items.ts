@@ -7,25 +7,8 @@ import { WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
  * counted; tools (weapons) are individual, and the hotbar slots point at them.
  */
 
-export type KitId =
-  | "campfire"
-  | "chest"
-  | "bed"
-  | "hut"
-  | "cabin"
-  | "dock"
-  | "rowboat"
-  | "desertbike";
-export const KIT_IDS: readonly KitId[] = [
-  "campfire",
-  "chest",
-  "bed",
-  "hut",
-  "cabin",
-  "dock",
-  "rowboat",
-  "desertbike",
-];
+export type KitId = "campfire" | "chest" | "bed" | "hut" | "cabin" | "dock";
+export const KIT_IDS: readonly KitId[] = ["campfire", "chest", "bed", "hut", "cabin", "dock"];
 
 /* A carcass is filed under the species it came from. */
 export type ItemId = SpeciesId | KitId;
@@ -51,12 +34,6 @@ const CARCASSES = Object.fromEntries(
 
 export const ITEMS: Record<ItemId, ItemDef> = {
   ...CARCASSES,
-  desertbike: {
-    name: "Desert bike",
-    plural: "desert bikes",
-    kind: "kit",
-    note: "A fast trail machine. Spawn from Marketplace → Vehicles on clear dry ground.",
-  },
   campfire: {
     name: "Campfire",
     plural: "campfires",
@@ -77,12 +54,6 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     plural: "docks",
     kind: "kit",
     note: "Walk out over the water, and tie up a boat.",
-  },
-  rowboat: {
-    name: "Rowboat",
-    plural: "rowboats",
-    kind: "kit",
-    note: "Row out to the hunting islands.",
   },
 };
 

@@ -14,7 +14,6 @@ import {
   SEA_LEVEL,
   TICK_HZ,
 } from "../shared/constants";
-import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
 import { FEATURES } from "../shared/features";
 import { clamp, mulberry32, type Rng } from "../shared/math";
 import {
@@ -38,21 +37,24 @@ import {
   progress,
 } from "../shared/missions";
 import {
-  BIKE_SEAT,
-  bikeExit,
-  bikeGround,
-  bikeSolid,
-  createBike,
-  stepBike,
-  type BikeIntent,
-  type BikeState,
-} from "../shared/bike";
+  atRest,
+  createVehicle,
+  distanceTo,
+  exitSpot,
+  IDLE,
+  packVehicle,
+  placeAt,
+  riderPose,
+  settle,
+  stepVehicle,
+  type VehicleSnap,
+  type VehicleState,
+  vehicleSolids,
+} from "../shared/drive";
 import { type Body, createBody } from "../shared/physics";
 import {
   type ClientMsg,
   FLAG,
-  type BoatSnap,
-  type BikeSnap,
   type HurtCause,
   type PlayerSnap,
   round2,
@@ -86,6 +88,7 @@ import { HARBOR_ID, WORLD } from "../shared/islands";
 import {
   type SavedPlayer,
   type SavedProfile,
+  type SavedVehicle,
   WORLD_SAVE_VERSION,
   type WorldSave,
 } from "../shared/save";
@@ -100,7 +103,13 @@ import {
   SPECIES,
   type SpeciesId,
 } from "../shared/species";
-import { VEHICLES, type VehicleKind } from "../shared/vehicles";
+import {
+  afloat,
+  BOARD_REACH as RIDE_REACH,
+  VEHICLES,
+  type VehicleKind,
+  vehicleIndex,
+} from "../shared/vehicles";
 import { blockSolid, overSolid, type Terrain } from "../shared/terrain";
 import {
   BLEED_TIME,
@@ -151,8 +160,8 @@ type Member = {
   attackReadyAt: number;
   shoveFlagUntil: number;
   inv: Inventory;
-  /* The rowboat you're in. */
-  boat: number | null;
+  /* The vehicle you're in, and which seat (0 steers). */
+  ride: { id: number; seat: number } | null;
   /* The vehicle you last spawned from the marketplace. */
   vehicle: number | null;
   /* Something in the inventory changed; send it at the end of the step. */
@@ -166,6 +175,18 @@ type Member = {
   charging: boolean;
   /* A sickle's cut: damage still to come, a second at a time, and whose it is. */
   bleed: { left: number; per: number; nextAt: number; by: number } | null;
+};
+
+/* Something to ride, out in the world. */
+type Ride = {
+  id: number;
+  kind: VehicleKind;
+  state: VehicleState;
+  /* Who's in each seat, by member id. */
+  seats: (number | null)[];
+  /* When the helmsman last reported where it is, and how many reports in a row didn't add up. */
+  reportAt: number;
+  strikes: number;
 };
 
 /* A swing in flight: it lands after the weapon's wind-up. */
@@ -205,8 +226,12 @@ const PROBES = [
   [0, -0.4],
 ] as const;
 
-/* How far from you a vehicle from the marketplace may be launched, in metres. */
+/* How far from you a vehicle from the marketplace may be put down, in metres (more for big ships). */
 const LAUNCH_RANGE = 32;
+/* A helmsman who stops reporting for this long has let go of the wheel. */
+const REPORT_TIMEOUT = 0.6;
+/* Vehicles out at once: one each, and a few more with passengers still aboard. */
+const MAX_RIDES = 24;
 /* How far round each player the animals are sent: a little past what fog lets you see. */
 const ANIMAL_VIEW = 320;
 
@@ -245,11 +270,8 @@ export class Room {
   /* The board changed in a way everyone should see. */
   private boardDirty = false;
   private prefabs = new Map<number, Prefab>();
-  private boatSpeed = new Map<number, number>();
-  private bikes = new Map<number, BikeState>();
-  private bikeInputs = new Map<number, { input: BikeIntent; at: number }>();
-  /* Prefabs that came from the marketplace rather than out of someone's pack. */
-  private spawned = new Set<number>();
+  /* Vehicles from the marketplace. Their ids share the prefabs' count, as their solids do. */
+  private rides = new Map<number, Ride>();
   private prefabId = 1;
   private missionId = 1;
   private prey: Prey[] = [];
@@ -338,7 +360,7 @@ export class Room {
       yaw: round2(at.yaw),
       health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
       inv: structuredClone(m.inv),
-      boat: down ? null : m.boat,
+      vehicle: down ? null : this.savedVehicle(m),
     };
   }
 
@@ -358,12 +380,8 @@ export class Room {
       m.body = createBody(h.x, h.y, h.z, h.yaw);
       return;
     }
-    const boat = saved.boat === null ? null : this.prefabs.get(saved.boat);
-    if (boat?.kind === "rowboat") {
-      m.boat = boat.id;
-      m.body = createBody(saved.x, SEA_LEVEL + 0.3, saved.z, saved.yaw);
-      return;
-    }
+    /* Your vehicle comes back where you left it, if there's still room for it, with you in it. */
+    if (saved.vehicle && this.restoreVehicle(m, saved.vehicle)) return;
     /* Never inside something that was built over the spot, or underground. */
     const { ground } = this.world.groundAt(saved.x, saved.z, saved.y + 0.3);
     const inside = this.world
@@ -463,7 +481,7 @@ export class Room {
       attackReadyAt: 0,
       shoveFlagUntil: 0,
       inv: emptyInventory(),
-      boat: null,
+      ride: null,
       vehicle: null,
       invDirty: true,
       stagger: 0,
@@ -491,7 +509,7 @@ export class Room {
       token: profile?.token ?? null,
     });
     peer.send({ t: "world", ...this.worldInfo(member) });
-    if (member.boat !== null) peer.send({ t: "aboard", boat: member.boat });
+    if (member.ride) peer.send({ t: "aboard", id: member.ride.id, seat: member.ride.seat });
     if (!spectator) {
       this.broadcastRoster();
       if (this.opts.online) this.feed(`${member.name} washed ashore`);
@@ -506,11 +524,9 @@ export class Room {
     /* Online, the map keeps your place: you come back where you left off. */
     if (m.profile && m.placed) {
       m.profile.saved = this.playerState(m);
-      /* A rowboat may have been taken apart by the time you're back. */
-      m.profile.saved.boat = null;
       this.opts.onChange?.();
     }
-    m.boat = null;
+    this.unseat(m);
     this.despawn(m);
     this.members.delete(id);
     if (!m.spectator) {
@@ -556,9 +572,7 @@ export class Room {
   }
 
   private keptState(m: Member): SavedPlayer {
-    const state = this.playerState(m);
-    state.boat = null;
-    return state;
+    return this.playerState(m);
   }
 
   /* The grand map and everyone who's been on it, ready to store. */
@@ -581,17 +595,15 @@ export class Room {
   private apply(m: Member, msg: ClientMsg) {
     switch (msg.t) {
       case "move": {
-        // A rider sends controls, never an authoritative vehicle transform.
-        if (m.boat !== null && this.bikes.has(m.boat)) {
-          this.bikeInputs.set(m.boat, {
-            input: msg.drive ?? { forward: 0, right: 0, brake: true },
-            at: this.now(),
-          });
+        /* A rider's body goes where their seat does; the helmsman reports where they've steered. */
+        if (m.ride) {
+          if (m.ride.seat === 0 && msg.ride) this.report(m, msg.ride);
           m.pitch = msg.pitch;
+          m.flags = (m.flags & ~FLAG.creative) | (msg.flags & FLAG.creative);
+          m.airVy = 0;
           return;
         }
         this.landing(m, msg.vy, msg.flags);
-        if (m.boat !== null) this.row(m, msg.x, msg.z, msg.boat);
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
@@ -657,7 +669,8 @@ export class Room {
         this.equip(m, msg.tool, msg.slot);
         return;
       case "interact":
-        this.usePrefab(m, msg.id);
+        if (msg.kind === "vehicle") this.climbAboard(m, msg.id);
+        else this.usePrefab(m, msg.id);
         return;
       default:
         return;
@@ -777,13 +790,6 @@ export class Room {
 
   private build(p: Prefab) {
     this.prefabs.set(p.id, p);
-    if (p.kind === "desertbike") {
-      const bike = createBike(p.x, p.y, p.z, p.rot);
-      const ground = bikeGround(this.world, p.x, p.z, p.rot);
-      if (ground) Object.assign(bike, ground);
-      this.bikes.set(p.id, bike);
-      this.world.addSolids(p.id, [bikeSolid(bike)]);
-    }
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
       .map(blockSolid);
@@ -816,15 +822,10 @@ export class Room {
   /* Take something you built back into your pack, with whatever was in it. */
   private pickupPrefab(m: Member, id: number) {
     const p = this.prefabs.get(id);
-    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
+    if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14) return;
     this.prefabs.delete(id);
-    this.bikes.delete(id);
-    this.bikeInputs.delete(id);
     this.world.removeSolids(id);
-    /* A vehicle from the marketplace just goes: there's always another to spawn. */
-    if (this.spawned.delete(id)) {
-      for (const o of this.members.values()) if (o.vehicle === id) o.vehicle = null;
-    } else this.addItem(m, p.kind, 1);
+    this.addItem(m, p.kind, 1);
     for (const [item, n] of Object.entries(p.store ?? {}) as [ItemId, number][])
       this.addItem(m, item, n);
     for (const o of this.members.values()) {
@@ -839,71 +840,85 @@ export class Room {
   private usePrefab(m: Member, id: number) {
     const p = this.prefabs.get(id);
     if (!p) return;
-    if (p.kind === "desertbike") {
-      this.bikeInteract(m, p);
-      return;
-    }
-    if (p.kind === "rowboat") {
-      this.boatInteract(m, p);
-      return;
-    }
     if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > 4) return;
     if (p.kind === "bed") this.sleep(m, p);
   }
 
   /* ---------- vehicles ---------- */
 
-  /* A vehicle from the marketplace, afloat near you. The one you spawned before goes. */
+  /* A vehicle from the marketplace, near you. The one you spawned before goes. */
   private spawnVehicle(m: Member, kind: VehicleKind) {
-    if (m.boat !== null) {
-      m.peer.send({ t: "feed", text: "Get off your vehicle before spawning another" });
+    if (m.ride) {
+      m.peer.send({ t: "feed", text: "Get off before spawning another" });
       return;
     }
+    if (this.rides.size >= MAX_RIDES) {
+      m.peer.send({ t: "feed", text: "The sea can't hold any more" });
+      return;
+    }
+    /* Your last one makes way for the new one, unless someone has gone off in it. */
+    const old = m.vehicle === null ? null : this.rides.get(m.vehicle);
+    const going = old && old.seats.every((s) => s === null) ? old : null;
+    if (going) this.world.removeSolids(going.id);
     const at = this.launchSpot(m, kind);
+    if (going) this.world.addSolids(going.id, vehicleSolids(going.kind, going.state));
+    const def = VEHICLES[kind];
     if (!at) {
       m.peer.send({
         t: "feed",
-        text:
-          kind === "desertbike"
-            ? "Find clear, dry, fairly level ground for the bike"
+        text: !afloat(kind)
+          ? "Find clear, dry, fairly level ground for it"
+          : def.section === "Ships"
+            ? "Head down to deeper water to launch it"
             : "Head down to the water to launch it",
       });
       return;
     }
     this.despawn(m);
-    if (this.prefabs.size >= MAX_PREFABS) {
-      m.peer.send({ t: "feed", text: "The island can't hold any more" });
-      return;
-    }
-    const p: Prefab = {
-      id: this.prefabId++,
-      kind,
-      x: round2(at.x),
-      y: round2(at.y),
-      z: round2(at.z),
-      rot: round2(at.rot),
-    };
-    this.build(p);
-    this.spawned.add(p.id);
-    m.vehicle = p.id;
-    this.broadcast({ t: "prefab", prefab: p });
+    const r = this.addRide(kind, at.x, at.y, at.z, at.rot);
+    m.vehicle = r.id;
     m.peer.send({
       t: "feed",
-      text:
-        kind === "desertbike"
-          ? "Your desert bike is ready · approach and press E to ride"
-          : `Your ${VEHICLES[kind].name.toLowerCase()} is in the water`,
+      text: afloat(kind)
+        ? `Your ${def.name.toLowerCase()} is in the water · E to climb aboard`
+        : def.class === "mount"
+          ? `Your ${def.name.toLowerCase()} is saddled · E to mount`
+          : `Your ${def.name.toLowerCase()} is ready · E to get in`,
     });
   }
 
+  private addRide(kind: VehicleKind, x: number, y: number, z: number, rot: number): Ride {
+    const state = createVehicle(x, y, z, rot);
+    settle(kind, state, this.world);
+    const r: Ride = {
+      id: this.prefabId++,
+      kind,
+      state,
+      seats: VEHICLES[kind].seats.map(() => null),
+      reportAt: 0,
+      strikes: 0,
+    };
+    this.rides.set(r.id, r);
+    this.world.addSolids(r.id, vehicleSolids(kind, state));
+    return r;
+  }
+
+  private removeRide(id: number) {
+    if (!this.rides.delete(id)) return;
+    this.world.removeSolids(id);
+    for (const o of this.members.values()) if (o.vehicle === id) o.vehicle = null;
+  }
+
   /*
-   * Open water near you, deep enough to float in and clear of other boats,
-   * bow pointing away from you. Straight ahead wins: the whole range in
-   * front is searched before turning aside, and the sides before behind,
-   * so a puddle at your heels never beats the sea you're looking at.
+   * Room for it near you: open water deep enough for the hull, or clear dry
+   * ground. Bow pointing away from you, and straight ahead wins: the whole
+   * range in front is searched before turning aside, and the sides before
+   * behind, so a puddle at your heels never beats the sea you're looking at.
    */
   private launchSpot(m: Member, kind: VehicleKind) {
+    const def = VEHICLES[kind];
     const { x: px, z: pz, yaw } = m.body;
+    const range = Math.max(LAUNCH_RANGE, def.length * 2.2);
     /* Bearings off straight ahead, in widening fans: ahead, then the sides, then behind. */
     const fans = [
       [0, 1, -1],
@@ -911,45 +926,19 @@ export class Room {
       [4, -4, 5, -5, 6, -6, 7, -7, 8],
     ];
     for (const fan of fans)
-      for (let r = 3; r <= LAUNCH_RANGE; r += 1.5) {
+      for (let r = Math.max(3, def.beam / 2 + 1.5); r <= range; r += 1.5) {
         for (const k of fan) {
           const a = yaw + k * (Math.PI / 8);
           const x = px - Math.sin(a) * r;
           const z = pz - Math.cos(a) * r;
           if (Math.abs(x) > BOUNDARY - 4 || Math.abs(z) > BOUNDARY - 4) continue;
-          let crowded = false;
-          for (const p of this.prefabs.values()) {
-            /* Your own last one makes way, unless someone has rowed off in it. */
-            const going = p.id === m.vehicle && !this.aboard(p.id);
-            if (
-              (p.kind === "rowboat" || p.kind === "desertbike") &&
-              !going &&
-              Math.hypot(p.x - x, p.z - z) < 4.5
-            )
-              crowded = true;
-          }
-          if (crowded) continue;
-          /* A bike wants clear, dry ground rather than water. */
-          if (kind === "desertbike") {
-            const ground = bikeGround(this.world, x, z, a);
-            if (ground) return { x, y: ground.y, z, rot: a };
-            continue;
-          }
-          /*
-           * Placement measures reach from the body, and keeps the hull off it.
-           * The reach here is ours to judge, so a spot beyond it is measured
-           * from a stand-in just within reach, on the line back to you. It
-           * never stands on the spot itself: that always reads as "on top of
-           * you", which is why boats used to refuse to launch near the water,
-           * or turned up wherever happened to pass.
-           */
-          const near = BUILD_REACH - 1;
-          const stand =
-            r <= near
-              ? m.body
-              : { ...m.body, x: x + Math.sin(a) * near, z: z + Math.cos(a) * near };
-          const v = checkPlacement(this.world, kind, x, z, a, stand);
-          if (v.ok) return { x, y: v.y, z, rot: a };
+          /* Never on top of you. */
+          if (distanceTo(kind, { x, z, rot: a }, px, pz) < 0.9) continue;
+          const y = placeAt(kind, this.world, x, z, a);
+          if (y === null) continue;
+          /* Land vehicles where you can walk to them, not on a ledge far below. */
+          if (!afloat(kind) && Math.abs(y - m.body.y) > 4) continue;
+          return { x, y, z, rot: a };
         }
       }
     return null;
@@ -959,126 +948,209 @@ export class Room {
   private despawn(m: Member) {
     const id = m.vehicle;
     m.vehicle = null;
-    if (id === null || !this.prefabs.has(id) || this.aboard(id)) return;
-    this.prefabs.delete(id);
-    this.spawned.delete(id);
-    this.boatSpeed.delete(id);
-    this.bikes.delete(id);
-    this.bikeInputs.delete(id);
-    this.world.removeSolids(id);
-    this.broadcast({ t: "unprefab", id });
-  }
-
-  /* ---------- boats ---------- */
-
-  private bikeInteract(m: Member, p: Prefab) {
-    const bike = this.bikes.get(p.id);
-    if (!bike) return;
-    if (m.boat === p.id) {
-      if (Math.hypot(bike.speed, bike.slipX ?? 0, bike.slipZ ?? 0) > 1.5) {
-        m.peer.send({ t: "feed", text: "Brake before getting off the bike" });
-        return;
-      }
-      const exit = bikeExit(bike, this.world);
-      if (!exit) {
-        m.peer.send({ t: "feed", text: "Move to a clear spot before getting off" });
-        return;
-      }
-      bike.speed = 0;
-      bike.slipX = bike.slipZ = 0;
-      this.bikeInputs.delete(p.id);
-      m.boat = null;
-      m.body = createBody(exit.x, exit.y, exit.z, exit.yaw);
-      m.peer.send({ t: "aboard", boat: null });
-      m.peer.send({ t: "respawn", ...exit });
-      return;
-    }
-    if (
-      m.boat !== null ||
-      this.aboard(p.id) ||
-      Math.hypot(p.x - m.body.x, p.z - m.body.z) > 3.6 ||
-      Math.abs(p.y - m.body.y) > 2
-    )
-      return;
-    this.bikeInputs.delete(p.id);
-    m.boat = p.id;
-    m.airVy = 0;
-    m.body = createBody(bike.x, bike.y + BIKE_SEAT, bike.z, bike.rot);
-    m.peer.send({ t: "aboard", boat: p.id });
-  }
-
-  private tickBikes(now: number, dt: number) {
-    for (const [id, bike] of this.bikes) {
-      const rider = this.aboard(id);
-      const controls = this.bikeInputs.get(id);
-      if (
-        !rider &&
-        Math.hypot(bike.speed, bike.slipX ?? 0, bike.slipZ ?? 0, bike.verticalSpeed ?? 0) < 0.01
-      )
-        continue;
-      const input =
-        rider && rider.respawnAt === null && controls && now - controls.at < 0.3
-          ? controls.input
-          : { forward: 0, right: 0, brake: true };
-      this.world.removeSolids(id); // Ignore only this bike's own hull.
-      stepBike(bike, input, dt, this.world);
-      this.world.addSolids(id, [bikeSolid(bike)]);
-      const p = this.prefabs.get(id);
-      if (p) {
-        p.x = bike.x;
-        p.y = bike.y;
-        p.z = bike.z;
-        p.rot = bike.rot;
-      }
-      if (rider) {
-        Object.assign(rider.body, {
-          x: bike.x,
-          y: bike.y + BIKE_SEAT,
-          z: bike.z,
-          yaw: bike.rot,
-          vx: -Math.sin(bike.rot) * bike.speed + (bike.slipX ?? 0),
-          vy: 0,
-          vz: -Math.cos(bike.rot) * bike.speed + (bike.slipZ ?? 0),
-          grounded: true,
-        });
-        rider.flags = FLAG.grounded | FLAG.riding | (rider.flags & FLAG.creative);
-      }
-    }
-  }
-
-  private aboard(id: number) {
-    for (const o of this.members.values()) if (o.boat === id) return o;
-    return null;
-  }
-
-  private boatInteract(m: Member, p: Prefab) {
-    if (m.boat === p.id) {
-      m.boat = null;
-      m.peer.send({ t: "aboard", boat: null });
-      return;
-    }
-    if (m.boat !== null || this.aboard(p.id)) return;
-    if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > BOAT_REACH + 1) return;
-    m.boat = p.id;
-    m.peer.send({ t: "aboard", boat: p.id });
+    const r = id === null ? null : this.rides.get(id);
+    if (!r || r.seats.some((s) => s !== null)) return;
+    this.removeRide(r.id);
   }
 
   /*
-   * The rower says where they are; the boat goes with them, as long as that's
-   * a plausible step over water.
+   * E by a vehicle: climb into its first free seat (the helm, if nobody has
+   * it). In one: a passenger takes an empty helm; anyone else gets off.
    */
-  private row(m: Member, x: number, z: number, b: { rot: number; speed: number } | undefined) {
-    const p = m.boat === null ? null : this.prefabs.get(m.boat);
-    if (!p || !b) return;
-    /* They sit aft of the middle. */
-    const cx = x - SEAT.lz * Math.sin(b.rot);
-    const cz = z - SEAT.lz * Math.cos(b.rot);
-    const step = Math.hypot(cx - p.x, cz - p.z);
-    if (step > 6 || this.world.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
-    p.x = round2(cx);
-    p.z = round2(cz);
-    p.rot = round2(b.rot);
-    this.boatSpeed.set(p.id, b.speed);
+  private climbAboard(m: Member, id: number) {
+    const r = this.rides.get(id);
+    if (!r) return;
+    if (m.ride) {
+      if (m.ride.id !== id) return;
+      if (m.ride.seat !== 0 && r.seats[0] === null) {
+        r.seats[m.ride.seat] = null;
+        r.seats[0] = m.id;
+        m.ride = { id, seat: 0 };
+        r.reportAt = this.now();
+        r.strikes = 0;
+        this.seatRider(m, r);
+        m.peer.send({ t: "aboard", id, seat: 0 });
+        return;
+      }
+      this.getOff(m, r);
+      return;
+    }
+    const s = r.state;
+    if (distanceTo(r.kind, s, m.body.x, m.body.z) > RIDE_REACH + 0.6) return;
+    /* From the water or a dock you can climb any hull; on land it has to be within a step. */
+    if (!afloat(r.kind) && Math.abs(m.body.y - s.y) > 2.5) return;
+    const seat = r.seats.findIndex((o) => o === null);
+    if (seat < 0) {
+      m.peer.send({ t: "feed", text: "There's no room aboard" });
+      return;
+    }
+    r.seats[seat] = m.id;
+    m.ride = { id, seat };
+    if (seat === 0) {
+      r.reportAt = this.now();
+      r.strikes = 0;
+    }
+    m.airVy = 0;
+    this.seatRider(m, r);
+    m.peer.send({ t: "aboard", id, seat });
+  }
+
+  private getOff(m: Member, r: Ride) {
+    const seat = m.ride?.seat ?? 0;
+    const def = VEHICLES[r.kind];
+    if (!afloat(r.kind) && Math.abs(r.state.speed) > (def.mount ? 6 : 4)) {
+      m.peer.send({ t: "feed", text: "Slow down before getting off" });
+      return;
+    }
+    const at = exitSpot(r.kind, r.state, this.world, seat);
+    if (!at) {
+      m.peer.send({ t: "feed", text: "Move to a clear spot before getting off" });
+      return;
+    }
+    this.unseat(m);
+    m.body = createBody(at.x, at.y, at.z, at.yaw);
+    m.airVy = 0;
+    m.peer.send({ t: "aboard", id: null, seat: 0, at });
+  }
+
+  /* Out of whatever seat you're in. A vehicle nobody owns or sits in is gone. */
+  private unseat(m: Member) {
+    const ride = m.ride;
+    m.ride = null;
+    m.flags &= ~FLAG.riding;
+    if (!ride) return;
+    const r = this.rides.get(ride.id);
+    if (!r) return;
+    r.seats[ride.seat] = null;
+    /* Nobody at the helm: the engine idles and the sails come in. */
+    if (ride.seat === 0 && r.state.aux > 0 && VEHICLES[r.kind].class !== "mount") r.state.aux = 0;
+    const owned = [...this.members.values()].some((o) => o.vehicle === r.id);
+    if (!owned && r.seats.every((s) => s === null)) this.removeRide(r.id);
+  }
+
+  /*
+   * The helmsman says where they've steered it. The room takes it as long as
+   * it's a plausible step on the right ground; reports that keep not adding
+   * up get the helmsman put back where the room has it.
+   */
+  private report(m: Member, f: number[]) {
+    const r = m.ride ? this.rides.get(m.ride.id) : null;
+    if (!r) return;
+    const now = this.now();
+    const [x, y, z, rot, speed, steer, turn, pitch, roll, vy, aux] = f;
+    const def = VEHICLES[r.kind];
+    const top = def.hull?.speed ?? def.car?.speed ?? def.mount?.gallop ?? 20;
+    const elapsed = Math.min(1, Math.max(0, now - r.reportAt));
+    const step = Math.hypot(x - r.state.x, z - r.state.z);
+    r.reportAt = now;
+    const ok =
+      step <= top * 1.5 * elapsed + 3 &&
+      Math.abs(speed) <= top * 1.3 + 1 &&
+      Math.abs(vy) < 30 &&
+      this.plausible(r.kind, x, y, z);
+    if (!ok) {
+      if (++r.strikes >= 3) {
+        r.strikes = 0;
+        m.peer.send({
+          t: "vfix",
+          snap: packVehicle(r.id, vehicleIndex(r.kind), r.state, r.seats),
+        });
+      }
+      return;
+    }
+    r.strikes = 0;
+    Object.assign(r.state, { x, y, z, rot, speed, steer, turn, pitch, roll, vy, aux });
+    r.state.supportY = y;
+    r.state.slipX = r.state.slipZ = 0;
+    this.world.addSolids(r.id, vehicleSolids(r.kind, r.state));
+  }
+
+  /* Afloat on the sea, or on (or just over) the ground. */
+  private plausible(kind: VehicleKind, x: number, y: number, z: number) {
+    if (Math.abs(x) > BOUNDARY || Math.abs(z) > BOUNDARY) return false;
+    const h = this.world.heightAt(x, z);
+    if (afloat(kind)) return h < SEA_LEVEL - 0.1 && Math.abs(y - SEA_LEVEL) < 0.6;
+    if (h < SEA_LEVEL - 1.5) return false;
+    const g = this.world.groundAt(x, z, y + 1).ground;
+    return y > g - 1 && y < g + 4;
+  }
+
+  /* Vehicles nobody is steering coast to a stop; everyone aboard goes where their seat does. */
+  private tickRides(now: number, dt: number) {
+    for (const r of this.rides.values()) {
+      const helm = r.seats[0] === null ? null : this.members.get(r.seats[0]);
+      const driven = !!helm && helm.respawnAt === null && now - r.reportAt < REPORT_TIMEOUT;
+      if (!driven && !atRest(r.state)) {
+        /* Only this vehicle's own hull is out of its way. */
+        this.world.removeSolids(r.id);
+        stepVehicle(r.kind, r.state, IDLE, dt, this.world, this.time);
+        this.world.addSolids(r.id, vehicleSolids(r.kind, r.state));
+      }
+      for (let i = 0; i < r.seats.length; i++) {
+        const id = r.seats[i];
+        const o = id === null ? null : this.members.get(id);
+        if (o) this.seatRider(o, r);
+        else r.seats[i] = null;
+      }
+    }
+  }
+
+  /* A rider's body is wherever their seat is, sitting. */
+  private seatRider(m: Member, r: Ride) {
+    const seat = m.ride?.seat ?? 0;
+    const at = riderPose(r.kind, r.state, seat);
+    const s = r.state;
+    Object.assign(m.body, {
+      x: at.x,
+      y: at.y,
+      z: at.z,
+      yaw: at.yaw,
+      vx: -Math.sin(s.rot) * s.speed,
+      vy: 0,
+      vz: -Math.cos(s.rot) * s.speed,
+      grounded: true,
+    });
+    m.flags = FLAG.grounded | FLAG.riding | (m.flags & FLAG.creative);
+  }
+
+  /* The vehicle to keep for someone: the one they're steering, or else the one they spawned. */
+  private savedVehicle(m: Member): SavedVehicle | null {
+    const helm = m.ride?.seat === 0 ? this.rides.get(m.ride.id) : null;
+    const r = helm ?? (m.vehicle === null ? null : this.rides.get(m.vehicle));
+    if (!r) return null;
+    const s = r.state;
+    return {
+      kind: r.kind,
+      x: round2(s.x),
+      y: round2(s.y),
+      z: round2(s.z),
+      rot: round2(s.rot),
+      aboard: r === helm,
+    };
+  }
+
+  /*
+   * Back from a break: your vehicle where you left it, if there's still room
+   * for it, and you at its helm if that's where you were. True if you're seated.
+   */
+  private restoreVehicle(m: Member, saved: SavedVehicle) {
+    const y = placeAt(saved.kind, this.world, saved.x, saved.z, saved.rot);
+    if (y === null || this.rides.size >= MAX_RIDES) return false;
+    const r = this.addRide(saved.kind, saved.x, y, saved.z, saved.rot);
+    m.vehicle = r.id;
+    if (!saved.aboard) return false;
+    r.seats[0] = m.id;
+    m.ride = { id: r.id, seat: 0 };
+    r.reportAt = this.now();
+    this.seatRider(m, r);
+    return true;
+  }
+
+  private vehicleSnaps(): VehicleSnap[] {
+    const v: VehicleSnap[] = [];
+    for (const r of this.rides.values())
+      v.push(packVehicle(r.id, vehicleIndex(r.kind), r.state, r.seats));
+    return v;
   }
 
   /* A bed is where you wake from now on. */
@@ -1420,7 +1492,7 @@ export class Room {
   }
 
   private simulate(now: number, dt: number) {
-    this.tickBikes(now, dt);
+    this.tickRides(now, dt);
     this.resolveHits(now);
     this.herd?.tick(now, dt, this.preyList());
 
@@ -1472,7 +1544,7 @@ export class Room {
       running: (m.flags & FLAG.sprint) !== 0,
       blocking: m.blocking && this.weaponOf(m) === "shield",
       /* Animals leave alone anyone in a boat, down, or in creative. */
-      away: m.respawnAt !== null || m.boat !== null || (m.flags & FLAG.creative) !== 0,
+      away: m.respawnAt !== null || m.ride !== null || (m.flags & FLAG.creative) !== 0,
     };
   }
 
@@ -1522,9 +1594,9 @@ export class Room {
     m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
     if (m.health > 0) return;
     m.respawnAt = this.now() + RESPAWN_DELAY;
-    if (m.boat !== null) {
-      m.boat = null;
-      m.peer.send({ t: "aboard", boat: null });
+    if (m.ride) {
+      this.unseat(m);
+      m.peer.send({ t: "aboard", id: null, seat: 0 });
     }
     m.blocking = false;
     m.charging = false;
@@ -1826,6 +1898,7 @@ export class Room {
       roster: this.roster(),
       board: this.board,
       prefabs: [...this.prefabs.values()],
+      vehicles: this.vehicleSnaps(),
       you: this.present(m) ? { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw } : null,
     };
   }
@@ -1868,28 +1941,7 @@ export class Room {
       ]);
     }
     const time = round2(this.time);
-    const b: BoatSnap[] = [];
-    const bikes: BikeSnap[] = [...this.bikes].map(([id, bike]) => [
-      id,
-      round2(bike.x),
-      round2(bike.y),
-      round2(bike.z),
-      round2(bike.rot),
-      round2(bike.speed),
-      round2(bike.steer),
-      round2(bike.pitch),
-      round2(bike.roll),
-    ]);
-    for (const p of this.prefabs.values()) {
-      if (p.kind === "rowboat")
-        b.push([
-          p.id,
-          p.x,
-          p.z,
-          p.rot,
-          round2(this.aboard(p.id) ? (this.boatSpeed.get(p.id) ?? 0) : 0),
-        ]);
-    }
+    const v = this.vehicleSnaps();
     for (const m of this.members.values()) {
       /* Only the animals near you: there are a lot of them out there. */
       const near = this.present(m);
@@ -1901,8 +1953,7 @@ export class Room {
         time,
         p,
         a,
-        b,
-        bikes,
+        v,
         me: !this.present(m)
           ? null
           : {
