@@ -63,15 +63,14 @@ const WINDUP: Record<string, number> = {
 };
 
 /*
- * How the swimmer and the rider sit against where the room puts them. A
- * swimmer's feet hang FLOAT_DEPTH under the surface; the swim lies flat, so
- * it's lifted to put the back at the waterline (the treading clip sinks
- * its own hips to match). A rider is placed BIKE_SEAT over the bike
- * (shared/bike.ts) and the drive pose lowers the hips onto about that, so
- * it only settles a touch further into the seat.
+ * How the swimmer sits against where the room puts them. A swimmer's feet
+ * hang FLOAT_DEPTH under the surface; the swim lies flat, so it's lifted to
+ * put the back at the waterline (the treading clip sinks its own hips to
+ * match). A rider is placed by riderPose (shared/drive.ts), already RIDER_HIP
+ * under the seat, which is where the seated pose wants its origin.
  */
 const SWIM_LIFT = 1.15;
-const RIDE_DROP = -0.05;
+const RIDE_DROP = 0;
 
 /*
  * Turn a weapon (grip at its origin, blade up +y, in metres) into a hand

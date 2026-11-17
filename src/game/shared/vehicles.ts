@@ -62,8 +62,12 @@ export type VehicleDef = {
   mount?: MountSpec;
 };
 
-/* How far below the seat a rider's feet would be if they stood: the avatar sits by that much. */
-export const RIDER_HIP = 0.45;
+/*
+ * How far below the seat the rider's origin goes: the characters' seated
+ * pose (Driving) carries the hips about this high over it, so this puts the
+ * seat of their trousers on the seat.
+ */
+export const RIDER_HIP = 0.17;
 /* A seated rider's eyes, above the seat. */
 export const SEATED_EYE = 0.78;
 /* How close you need to be to the side of a vehicle to climb aboard. */
