@@ -8,8 +8,8 @@ export const FEATURES = {
   /* Everything else built: windmill, chapel, mast, henge, villages, towers, aqueduct, wrecks, jetties. */
   landmarks: false,
   /* Natural and leftover props. */
-  trees: false,
-  rocks: false,
+  trees: true,
+  rocks: true,
   ruins: false,
   cairns: false,
   buoys: false,

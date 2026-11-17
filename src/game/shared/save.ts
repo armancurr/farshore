@@ -32,6 +32,19 @@ export type SavedPlayer = {
   boat: number | null;
 };
 
+export type SaveData = {
+  v: typeof SAVE_VERSION;
+  seed: number;
+  time: number;
+  prefabs: Prefab[];
+  collected?: number[];
+  felledTrees?: number[];
+  board: Bounty[];
+  player: SavedPlayer | null;
+  /* Next ids to hand out, so new things never collide with saved ones. */
+  ids: { tool: number; prefab: number; bounty: number };
+};
+
 type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
@@ -88,10 +101,25 @@ function inventory(v: unknown): Inventory | null {
     seen.add(h);
     return h;
   });
+  const seenItems = new Set<ItemId>();
+  const itemHotbar = Array.from({ length: HOTBAR }, (_, i) => {
+    const value = Array.isArray(v.itemHotbar) ? v.itemHotbar[i] : null;
+    if (i === 0 || hotbar[i] !== null || !isItemId(value) || !its[value] || seenItems.has(value))
+      return null;
+    seenItems.add(value);
+    return value;
+  });
+  if (!Array.isArray(v.itemHotbar)) {
+    for (const item of Object.keys(its) as ItemId[]) {
+      const free = itemHotbar.findIndex((entry, i) => i > 0 && !entry && hotbar[i] === null);
+      if (free < 0) break;
+      itemHotbar[free] = item;
+    }
+  }
   const b = v.bounty === null || v.bounty === undefined ? null : bounty(v.bounty);
   if (v.bounty && !b) return null;
   const bed = id(v.bed) ? v.bed : null;
-  return { coins: v.coins, items: its, tools, hotbar, slot: v.slot, bounty: b, bed };
+  return { coins: v.coins, items: its, tools, hotbar, itemHotbar, slot: v.slot, bounty: b, bed };
 }
 
 function player(v: unknown): SavedPlayer | null {
@@ -179,6 +207,18 @@ export function parseWorldSave(raw: unknown): WorldSave | null {
   }
   const tools = players.flatMap((p) => p.saved?.inv.tools.map((t) => t.id + 1) ?? []);
   return {
+    v: SAVE_VERSION,
+    seed: raw.seed,
+    time: raw.time,
+    prefabs,
+    collected: Array.isArray(raw.collected)
+      ? raw.collected.filter((value): value is number => id(value)).slice(0, 2700)
+      : [],
+    felledTrees: Array.isArray(raw.felledTrees)
+      ? raw.felledTrees.filter((value): value is number => id(value)).slice(0, 1000)
+      : [],
+    board,
+    player: pl,
     v: WORLD_SAVE_VERSION,
     islands,
     players,

@@ -37,9 +37,9 @@ const CONTROL_GROUPS: [string, string[]][][] = [
   ],
   [
     ["Use what you hold", ["Click", "F"]],
-    ["Grab, talk, open", ["E"]],
+    ["Grab, talk, open", ["Q"]],
     ["Pick a tool", ["1–9", "Wheel"]],
-    ["Open your pack", ["Tab", "I"]],
+    ["Open your pack", ["E", "Tab", "I"]],
   ],
   [
     ["Build", ["B"]],

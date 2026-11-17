@@ -34,6 +34,7 @@ import {
   struck,
 } from "../shared/fishing";
 import { clamp, mulberry32, type Rng } from "../shared/math";
+import { groundResources, type Resource } from "../shared/resources";
 import { randomName } from "../shared/names";
 import { type Body, createBody } from "../shared/physics";
 import {
@@ -209,6 +210,11 @@ const LAUNCH_RANGE = 32;
 export class Room {
   private members = new Map<number, Member>();
   private nextId = 1;
+  private readonly terrain: Terrain;
+  private resources = new Map<number, Resource>();
+  private collected = new Set<number>();
+  private felledTrees = new Set<number>();
+  private treeHits = new Map<number, number>();
   private readonly world: Archipelago;
   private readonly seed: number;
   private profiles = new Map<string, Profile>();
@@ -238,6 +244,12 @@ export class Room {
   constructor(private readonly opts: RoomOptions) {
     this.now = opts.now ?? (() => Date.now() / 1000);
     this.rng = mulberry32((Math.random() * 2 ** 32) >>> 0);
+    const save = opts.save ?? null;
+    this.seed = save?.seed ?? opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
+    this.terrain = new Terrain(this.seed);
+    for (const resource of groundResources(this.terrain)) this.resources.set(resource.id, resource);
+    const t = this.terrain;
+    if (FEATURES.animals)
     this.seed = opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
     this.world = new Archipelago();
     if (opts.settle) {
@@ -274,6 +286,52 @@ export class Room {
 
   /* ---------- saving ---------- */
 
+  private restore(save: SaveData) {
+    for (const id of save.collected ?? []) if (this.resources.has(id)) this.collected.add(id);
+    for (const id of save.felledTrees ?? []) {
+      if (this.terrain.props.some((p) => p.id === id && p.kind === "tree")) {
+        this.felledTrees.add(id);
+        this.terrain.removeTree(id);
+      }
+    }
+    this.time = save.time;
+    this.toolId = save.ids.tool;
+    this.prefabId = save.ids.prefab;
+    this.bountyId = save.ids.bounty;
+    for (const p of save.prefabs) this.build(structuredClone(p));
+    this.board = save.board.map((b) => structuredClone(b));
+    for (const b of this.board) this.posted.set(b.id, this.time);
+    this.returning = save.player ? structuredClone(save.player) : null;
+  }
+
+  /* The island as it stands, with the first player's things, ready to store. */
+  exportSave(): SaveData {
+    const m = [...this.members.values()].find((o) => !o.spectator);
+    let player: SavedPlayer | null = this.returning;
+    if (m) {
+      /* Saved while down: you come back on your feet, where you'd have woken. */
+      const down = m.respawnAt !== null;
+      const at = down ? this.spawnPoint(m) : { ...m.body, yaw: m.body.yaw };
+      player = {
+        x: round2(at.x),
+        y: round2(at.y),
+        z: round2(at.z),
+        yaw: round2(at.yaw),
+        health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
+        inv: structuredClone(m.inv),
+        boat: down ? null : m.boat,
+      };
+    }
+    return {
+      v: SAVE_VERSION,
+      seed: this.seed,
+      time: round2(this.time),
+      prefabs: [...this.prefabs.values()].map((p) => structuredClone(p)),
+      collected: [...this.collected],
+      felledTrees: [...this.felledTrees],
+      board: this.board.map((b) => structuredClone(b)),
+      player,
+      ids: { tool: this.toolId, prefab: this.prefabId, bounty: this.bountyId },
   /* Where someone is and what they carry, ready to store. */
   private playerState(m: Member): SavedPlayer {
     /* Saved while down: you come back on your feet, where you'd have woken. */
@@ -293,6 +351,12 @@ export class Room {
   /* Put the saved player back where they were, with everything they had. */
   private welcomeBack(m: Member, saved: SavedPlayer) {
     m.inv = saved.inv;
+    /* Weapons are off for now: anything you'd found or bought stays behind. */
+    if (!FEATURES.weapons) {
+      const keep = m.inv.tools.filter((t) => !TOOLS[t.kind].weapon || t.kind === "axe");
+      m.inv.hotbar = m.inv.hotbar.map((id) => (keep.some((t) => t.id === id) ? id : null));
+      m.inv.tools = keep;
+    }
     /* One weapon at a time, in its own slot: older saves may carry several, anywhere. */
     const weapons = m.inv.tools.filter((t) => TOOLS[t.kind].weapon);
     const kept = weapons[0] ? (TOOLS[weapons[0].kind].weapon as WeaponKind) : null;
@@ -583,6 +647,55 @@ export class Room {
 
   private apply(m: Member, msg: ClientMsg) {
     switch (msg.t) {
+      case "gather": {
+        const resource = this.resources.get(msg.id);
+        if (
+          !resource ||
+          this.collected.has(msg.id) ||
+          Math.hypot(resource.x - m.body.x, resource.z - m.body.z) > 3 ||
+          Math.abs(resource.y - m.body.y) > 2
+        )
+          return;
+        this.collected.add(msg.id);
+        if (resource.kind === "bush") {
+          this.addItem(m, "stick", 2);
+          this.addItem(m, "dry_fiber", 1);
+        } else this.addItem(m, "stone", 1);
+        this.broadcast({ t: "gathered", id: msg.id });
+        m.peer.send({
+          t: "feed",
+          text: resource.kind === "bush" ? "+2 sticks, +1 dry fiber" : "+1 stone",
+        });
+        this.saveSoon = true;
+        return;
+      }
+      case "craft_axe": {
+        if (
+          (m.inv.items.stick ?? 0) < 2 ||
+          (m.inv.items.stone ?? 0) < 2 ||
+          (m.inv.items.dry_fiber ?? 0) < 1
+        )
+          return;
+        if (!this.giveTool(m, "axe", 1)) {
+          m.peer.send({ t: "feed", text: "Your tool pack is full" });
+          return;
+        }
+        this.addItem(m, "stick", -2);
+        this.addItem(m, "stone", -2);
+        this.addItem(m, "dry_fiber", -1);
+        m.peer.send({ t: "feed", text: "Stone axe crafted" });
+        this.saveSoon = true;
+        return;
+      }
+      case "craft_boat": {
+        if ((m.inv.items.wood ?? 0) < 8 || (m.inv.items.dry_fiber ?? 0) < 4) return;
+        this.addItem(m, "wood", -8);
+        this.addItem(m, "dry_fiber", -4);
+        this.addItem(m, "rowboat");
+        m.peer.send({ t: "feed", text: "Rowboat crafted · press B to place it on water" });
+        this.saveSoon = true;
+        return;
+      }
       case "move": {
         this.landing(m, msg.vy, msg.flags);
         if (m.boat !== null) this.row(m, msg.x, msg.z, msg.boat);
@@ -657,6 +770,12 @@ export class Room {
       case "equip":
         this.equip(m, msg.tool, msg.slot);
         return;
+      case "equip_item":
+        this.equipItem(m, msg.item, msg.slot);
+        return;
+      case "drop":
+        this.drop(m, msg.tool);
+        return;
       case "interact":
         this.usePrefab(m, msg.id);
         return;
@@ -688,8 +807,9 @@ export class Room {
     const tool: Tool = { id: this.toolId++, kind, uses: uses ?? -1 };
     m.inv.tools.push(tool);
     const bar = m.inv.hotbar;
-    let slot = bar[prefer] == null ? prefer : -1;
-    for (let i = 1; i < HOTBAR && slot < 0; i++) if (bar[i] == null) slot = i;
+    let slot = bar[prefer] == null && m.inv.itemHotbar[prefer] == null ? prefer : -1;
+    for (let i = 1; i < HOTBAR && slot < 0; i++)
+      if (bar[i] == null && m.inv.itemHotbar[i] == null) slot = i;
     if (slot > 0) bar[slot] = tool.id;
     m.invDirty = true;
     return tool;
@@ -714,8 +834,11 @@ export class Room {
     } else {
       /* Swap with whatever's there (into our old slot, or back to the pack). */
       const there = inv.hotbar[slot];
+      const itemThere = inv.itemHotbar[slot];
       if (from > 0) inv.hotbar[from] = there;
+      if (from > 0) inv.itemHotbar[from] = itemThere;
       inv.hotbar[slot] = toolId;
+      inv.itemHotbar[slot] = null;
     }
     if (heldTool(inv)?.id !== held) this.reelIn(m);
     m.blocking = false;
@@ -723,6 +846,42 @@ export class Room {
     m.invDirty = true;
   }
 
+  private equipItem(m: Member, item: ItemId, slot: number) {
+    const inv = m.inv;
+    if (!inv.items[item] || slot === 0) return;
+    const from = inv.itemHotbar.indexOf(item);
+    if (slot < 0) {
+      if (from > 0) inv.itemHotbar[from] = null;
+    } else {
+      const tool = inv.hotbar[slot];
+      const other = inv.itemHotbar[slot];
+      if (from > 0) {
+        inv.hotbar[from] = tool;
+        inv.itemHotbar[from] = other;
+      }
+      inv.hotbar[slot] = null;
+      inv.itemHotbar[slot] = item;
+    }
+    this.reelIn(m);
+    m.invDirty = true;
+  }
+
+  /* Put a found weapon back on the ground. Bought gear and rods stay with you. */
+  private drop(m: Member, toolId: number) {
+    const tool = m.inv.tools.find((t) => t.id === toolId);
+    const weapon = tool && TOOLS[tool.kind].droppable ? TOOLS[tool.kind].weapon : null;
+    if (!tool || !weapon) return;
+    this.removeTool(m, tool.id);
+    const dropped: GroundWeapon = {
+      id: this.weaponId++,
+      kind: weapon,
+      x: round2(m.body.x - Math.sin(m.body.yaw) * 0.8),
+      y: round2(m.body.y),
+      z: round2(m.body.z - Math.cos(m.body.yaw) * 0.8),
+      uses: tool.uses,
+    };
+    this.weapons.push(dropped);
+    this.broadcast({ t: "wspawn", weapon: dropped });
   /*
    * Take up a weapon from the marketplace: it replaces whatever you carried,
    * goes in the weapon slot, and into your hand. Null puts it away for fists.
@@ -753,7 +912,15 @@ export class Room {
 
   addItem(m: Member, id: ItemId, n = 1) {
     m.inv.items[id] = Math.max(0, (m.inv.items[id] ?? 0) + n);
-    if (!m.inv.items[id]) delete m.inv.items[id];
+    if (!m.inv.items[id]) {
+      delete m.inv.items[id];
+      m.inv.itemHotbar = m.inv.itemHotbar.map((item) => (item === id ? null : item));
+    } else if (n > 0 && !m.inv.itemHotbar.includes(id)) {
+      const slot = m.inv.hotbar.findIndex(
+        (tool, index) => index > 0 && tool === null && m.inv.itemHotbar[index] === null,
+      );
+      if (slot > 0) m.inv.itemHotbar[slot] = id;
+    }
     m.invDirty = true;
   }
 
@@ -1126,6 +1293,7 @@ export class Room {
 
   private flush(m: Member) {
     if (!m.invDirty) return;
+    m.inv.itemHotbar = m.inv.itemHotbar.map((item) => (item && m.inv.items[item] ? item : null));
     m.invDirty = false;
     m.peer.send({ t: "inv", inv: structuredClone(m.inv) });
   }
@@ -1348,6 +1516,10 @@ export class Room {
     }
     m.lastSwingAt = now;
     this.broadcast({ t: "swing", by: m.id, kind, heavy });
+    if (kind === "axe") this.chopTree(m);
+    /* A pickaxe swung at a wall is a climb, not an attack. */
+    if (climb && kind === "pickaxe") return;
+    const fine = !!tool && !!TOOLS[tool.kind].fine;
     this.pending.push({
       at: now + def.windup,
       by: m.id,
@@ -1356,6 +1528,37 @@ export class Room {
       power: chargePower(def, charge),
       yaw: m.body.yaw,
     });
+  }
+
+  private chopTree(m: Member) {
+    const fx = -Math.sin(m.body.yaw);
+    const fz = -Math.cos(m.body.yaw);
+    const tree = this.terrain.props
+      .filter((p) => p.kind === "tree" && !this.felledTrees.has(p.id))
+      .map((p) => ({ p, dx: p.x - m.body.x, dz: p.z - m.body.z }))
+      .filter(({ p, dx, dz }) => {
+        const distance = Math.hypot(dx, dz);
+        return (
+          distance <= 2.8 &&
+          Math.abs(p.y - m.body.y) < 2.5 &&
+          (distance < 0.5 || (dx * fx + dz * fz) / distance > 0.65)
+        );
+      })
+      .sort((a, b) => Math.hypot(a.dx, a.dz) - Math.hypot(b.dx, b.dz))[0]?.p;
+    if (!tree) return;
+    const hits = (this.treeHits.get(tree.id) ?? 0) + 1;
+    if (hits < 3) {
+      this.treeHits.set(tree.id, hits);
+      m.peer.send({ t: "feed", text: `Tree chopped ${hits}/3` });
+      return;
+    }
+    this.treeHits.delete(tree.id);
+    this.felledTrees.add(tree.id);
+    this.terrain.removeTree(tree.id);
+    this.addItem(m, "wood", 4);
+    this.broadcast({ t: "tree_felled", id: tree.id });
+    m.peer.send({ t: "feed", text: "+4 wood" });
+    this.saveSoon = true;
   }
 
   private push(o: Member, ix: number, iz: number, speed: number, lift: number) {
@@ -1542,6 +1745,9 @@ export class Room {
       roster: this.roster(),
       board: this.board,
       prefabs: [...this.prefabs.values()],
+      collected: [...this.collected],
+      felledTrees: [...this.felledTrees],
+      you: m.spectator ? null : { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw },
       you: this.present(m) ? { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw } : null,
     };
   }

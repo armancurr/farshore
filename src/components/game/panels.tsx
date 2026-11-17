@@ -73,7 +73,7 @@ export function InventoryPanel(props: { hud: HudState; game: Game }) {
   /* Equip into the selected slot, or the first free one. */
   const target = (() => {
     if (inv.slot > 0) return inv.slot;
-    const free = inv.hotbar.findIndex((t, k) => k > 0 && !t);
+    const free = inv.hotbar.findIndex((t, k) => k > 0 && !t && !inv.itemHotbar[k]);
     return free > 0 ? free : 1;
   })();
   return (
@@ -83,7 +83,70 @@ export function InventoryPanel(props: { hud: HudState; game: Game }) {
       onClose={() => props.game.closePanel()}
     >
       <section>
+        <h3 className={heading}>Crafting</h3>
+        <div className="mt-2 flex items-center justify-between gap-4 border-b border-white/10 py-2">
+          <div>
+            <div className="text-[13px]">Stone axe</div>
+            <div className="text-[11px] text-white/50">2 sticks · 2 stones · 1 dry fiber</div>
+          </div>
+          <Button
+            variant="outline"
+            size="hud-xs"
+            onClick={() => props.game.craftAxe()}
+            disabled={(
+              [
+                ["stick", 2],
+                ["stone", 2],
+                ["dry_fiber", 1],
+              ] as const
+            ).some(([id, count]) => (inv.items.find((item) => item.id === id)?.count ?? 0) < count)}
+          >
+            Craft
+          </Button>
+        </div>
+        <div className="flex items-center justify-between gap-4 border-b border-white/10 py-2">
+          <div>
+            <div className="text-[13px]">Rowboat</div>
+            <div className="text-[11px] text-white/50">8 wood · 4 dry fiber</div>
+            <div className="text-[11px] text-white/40">
+              Craft, then press B to place it on water.
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="hud-xs"
+            onClick={() => props.game.craftBoat()}
+            disabled={(
+              [
+                ["wood", 8],
+                ["dry_fiber", 4],
+              ] as const
+            ).some(([id, count]) => (inv.items.find((item) => item.id === id)?.count ?? 0) < count)}
+          >
+            Craft
+          </Button>
+        </div>
+      </section>
+      <section>
         <h3 className={heading}>Hotbar</h3>
+        <div className="mt-2 grid grid-cols-5 gap-1 sm:grid-cols-9" aria-label="Hotbar slots">
+          {inv.hotbar.map((tool, slot) => {
+            const item = inv.itemHotbar[slot];
+            return (
+              <div
+                key={slot}
+                className="relative flex min-h-16 flex-col justify-between border border-white/25 bg-white/5 p-1.5"
+                title={slot === 0 ? "Fists" : (tool?.name ?? item?.name ?? "Empty")}
+              >
+                <span className="font-mono text-[10px] text-white/40">{slot + 1}</span>
+                <span className="break-words text-[10px] leading-tight">
+                  {slot === 0 ? "Fists" : (tool?.name ?? item?.name ?? "—")}
+                </span>
+                {item && <span className="text-right font-mono text-[10px]">×{item.count}</span>}
+              </div>
+            );
+          })}
+        </div>
         <ul className="mt-2">
           {inv.hotbar.map(
             (t, k) =>
@@ -98,6 +161,29 @@ export function InventoryPanel(props: { hud: HudState; game: Game }) {
                     To pack
                   </Button>
                 </ToolRow>
+              ),
+          )}
+          {inv.itemHotbar.map(
+            (item, k) =>
+              item && (
+                <li
+                  key={item.id}
+                  className="flex items-center justify-between gap-3 border-b border-white/10 py-2"
+                >
+                  <span className="text-[13px]">
+                    {item.name} ×{item.count}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[10px] text-white/40">{k + 1}</span>
+                    <Button
+                      variant="outline"
+                      size="hud-xs"
+                      onClick={() => props.game.equipItem(item.id, -1)}
+                    >
+                      To pack
+                    </Button>
+                  </div>
+                </li>
               ),
           )}
         </ul>
@@ -135,6 +221,15 @@ export function InventoryPanel(props: { hud: HudState; game: Game }) {
                 <span className="font-mono text-[11px] text-white/60 tabular-nums">
                   ×{item.count}
                 </span>
+                {!inv.itemHotbar.some((entry) => entry?.id === item.id) && (
+                  <Button
+                    variant="outline"
+                    size="hud-xs"
+                    onClick={() => props.game.equipItem(item.id, target)}
+                  >
+                    To slot {target + 1}
+                  </Button>
+                )}
               </li>
             ))}
           </ul>

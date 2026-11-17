@@ -6,6 +6,8 @@ import {
   BoatIcon,
   CampfireIcon,
   FishSimpleIcon,
+  LeafIcon,
+  MountainsIcon,
   HammerIcon,
   HandFistIcon,
   HeartIcon,
@@ -28,6 +30,12 @@ import type { HudState } from "../../game/client/game";
 import type { KitId, ToolKind } from "../../game/shared/items";
 
 const TOOL_ICONS: Record<ToolKind, Icon> = {
+  rod: ArrowUpRightIcon,
+  rod2: ArrowUpRightIcon,
+  sword: SwordIcon,
+  sword2: SwordIcon,
+  axe: AxeIcon,
+  axe2: AxeIcon,
   rod: FishSimpleIcon,
   rod2: FishSimpleIcon,
   daggers: KnifeIcon,
@@ -151,6 +159,15 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                 );
               })
             : hud.inv.hotbar.map((tool, i) => {
+                const item = hud.inv.itemHotbar[i];
+                const ItemIcon =
+                  item?.kind === "fish"
+                    ? FishSimpleIcon
+                    : item?.id === "stick"
+                      ? ArrowUpRightIcon
+                      : item?.id === "stone"
+                        ? MountainsIcon
+                        : LeafIcon;
                 const ToolIcon = i === 0 ? HandFistIcon : tool ? TOOL_ICONS[tool.kind] : null;
                 const selected = hud.inv.slot === i;
                 return (
@@ -158,6 +175,15 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                     key={i}
                     variant="slot"
                     size="slot"
+                    aria-label={
+                      i === 0
+                        ? "Fists"
+                        : (tool?.name ??
+                          (item
+                            ? `${item.name}, ${item.count} in inventory`
+                            : `Empty slot ${i + 1}`))
+                    }
+                    title={i === 0 ? "Fists" : (tool?.name ?? item?.name)}
                     className={cn(touch && "sm:size-[34px]")}
                     aria-label={i === 0 ? "Fists" : (tool?.name ?? `Empty slot ${i + 1}`)}
                     title={i === 0 ? "Fists" : tool?.name}
@@ -166,6 +192,42 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                     onClick={() => props.onSelect(i)}
                   >
                     <SlotKey n={i + 1} />
+                    {tool && (tool.kind === "rod" || tool.kind === "rod2") ? (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M4 21 16 4c1.5-2 3.5-2 4-1" />
+                        <path d="M20 3v11c0 3-4 3-4 0v-1" />
+                        <path d="m3 19 3 2M7 15l2 1.5" />
+                        <circle cx="8" cy="18" r="2" />
+                      </svg>
+                    ) : item ? (
+                      <ItemIcon size={18} weight="fill" />
+                    ) : (
+                      ToolIcon && <ToolIcon size={18} weight="fill" />
+                    )}
+                    {item && (
+                      <span className="absolute bottom-0.5 right-1 text-[10px] tabular-nums">
+                        {item.count}
+                      </span>
+                    )}
+                    {tool?.wear != null && (
+                      <Progress
+                        aria-label={`${tool.name} wear`}
+                        value={tool.wear * 100}
+                        className="absolute inset-x-1.5 bottom-1"
+                        trackClassName="h-[2px] rounded-full bg-current/15"
+                        indicatorClassName="rounded-full bg-current/60"
+                      />
+                    )}
                     {ToolIcon && <ToolIcon size={18} weight="fill" />}
                   </Button>
                 );

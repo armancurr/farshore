@@ -45,17 +45,26 @@ export const KIT_IDS: readonly KitId[] = [
 ];
 
 /* A carcass is filed under the animal it came from. */
-export type ItemId = FishId | AnimalKind | KitId;
+export type ItemId = FishId | AnimalKind | KitId | "stick" | "stone" | "dry_fiber" | "wood";
 
 type ItemDef = {
   name: string;
   plural: string;
-  kind: "fish" | "game" | "kit";
+  kind: "fish" | "game" | "kit" | "resource";
   rarity?: Rarity;
   note: string;
 };
 
 export const ITEMS: Record<ItemId, ItemDef> = {
+  wood: { name: "Wood", plural: "wood", kind: "resource", note: "Timber cut from a tree." },
+  stick: { name: "Stick", plural: "sticks", kind: "resource", note: "A dry branch for crafting." },
+  stone: { name: "Stone", plural: "stones", kind: "resource", note: "A small stone for crafting." },
+  dry_fiber: {
+    name: "Dry fiber",
+    plural: "dry fibers",
+    kind: "resource",
+    note: "Fibers for binding tools.",
+  },
   sprat: {
     name: "Sprat",
     plural: "sprats",
@@ -223,6 +232,8 @@ export type Inventory = {
   tools: Tool[];
   /* Tool ids per hotbar slot. Slot 0 is always your fists. */
   hotbar: (number | null)[];
+  /* Item stacks share the belt with tools; counts live in items. */
+  itemHotbar: (ItemId | null)[];
   slot: number;
   /* The bounty you've taken from the board. */
   bounty: Bounty | null;
@@ -236,6 +247,7 @@ export function emptyInventory(): Inventory {
     items: {},
     tools: [],
     hotbar: Array<number | null>(HOTBAR).fill(null),
+    itemHotbar: Array<ItemId | null>(HOTBAR).fill(null),
     slot: 0,
     bounty: null,
     bed: null,

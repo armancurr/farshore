@@ -1,6 +1,8 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { SEA_LEVEL } from "../../shared/constants";
 import { hash3, mulberry32, range } from "../../shared/math";
+import { groundResources, type Resource } from "../../shared/resources";
 import type { Prop, Terrain } from "../../shared/terrain";
 import { Batch, compose } from "./batch";
 import { inkMaterial, lineMaterial } from "./materials";
@@ -158,18 +160,28 @@ function buildBuoy(fill: THREE.Material, line: THREE.Material) {
 
 export class WorldProps {
   readonly group = new THREE.Group();
+  readonly resources: Resource[];
+  private resourceMeshes = new Map<number, { meshes: THREE.InstancedMesh[]; index: number }>();
+  private trees = new Map<number, THREE.Group>();
   private structures: Structures;
   private buoys: { group: THREE.Group; phase: number; lamp: THREE.Object3D }[] = [];
   private disposables: { dispose(): void }[] = [];
 
   constructor(terrain: Terrain) {
+    this.resources = groundResources(terrain);
     const statics = new Batch();
     for (const p of terrain.props) {
       if (p.kind === "rock") addRock(statics, p);
-      else if (p.kind === "tree") addTree(statics, p);
-      else if (p.kind === "column") addColumn(statics, p);
+      else if (p.kind === "tree") {
+        const tree = new Batch();
+        addTree(tree, p);
+        const model = tree.build(inkMaterial(0.055), lineMaterial(0.78));
+        this.trees.set(p.id, model);
+        this.group.add(model);
+      } else if (p.kind === "column") addColumn(statics, p);
     }
     this.group.add(statics.build(inkMaterial(0.055), lineMaterial(0.78)));
+    this.addGroundCover();
     const cairns = new Batch();
     for (const p of terrain.props) if (p.kind === "cairn") addCairn(cairns, p);
     this.group.add(cairns.build(inkMaterial(0.1), lineMaterial(0.9)));
@@ -188,6 +200,92 @@ export class WorldProps {
       this.buoys.push({ group, phase: p.variant * 1.7, lamp: group.getObjectByName("lamp")! });
     }
     this.disposables.push(buoyFill, buoyLine);
+  }
+
+  private addGroundCover() {
+    const branches: THREE.BufferGeometry[] = [];
+    const branch = (from: THREE.Vector3, to: THREE.Vector3, thickness: number) => {
+      const direction = to.clone().sub(from);
+      const geometry = new THREE.CylinderGeometry(
+        thickness * 0.45,
+        thickness,
+        direction.length(),
+        4,
+      );
+      geometry.translate(0, direction.length() / 2, 0);
+      geometry.applyQuaternion(
+        new THREE.Quaternion().setFromUnitVectors(UP, direction.normalize()),
+      );
+      geometry.translate(from.x, from.y, from.z);
+      branches.push(geometry);
+    };
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * Math.PI * 2;
+      const fork = new THREE.Vector3(Math.cos(a) * 0.17, 0.34 + (i % 3) * 0.04, Math.sin(a) * 0.17);
+      const tip = new THREE.Vector3(Math.cos(a) * 0.32, 0.65 + (i % 2) * 0.12, Math.sin(a) * 0.32);
+      branch(new THREE.Vector3(0, 0, 0), fork, 0.025);
+      branch(fork, tip, 0.014);
+      branch(
+        fork,
+        new THREE.Vector3(Math.cos(a + 0.6) * 0.35, 0.53, Math.sin(a + 0.6) * 0.35),
+        0.011,
+      );
+    }
+    const bushGeometry = mergeGeometries(branches);
+    for (const geometry of branches) geometry.dispose();
+    const stoneGeometry = new THREE.IcosahedronGeometry(1, 0);
+    const bushes = new THREE.InstancedMesh(bushGeometry, inkMaterial(0.18), 1800);
+    const bushLines = new THREE.InstancedMesh(
+      bushGeometry,
+      new THREE.MeshBasicMaterial({ color: 0xaaaaaa, wireframe: true }),
+      1800,
+    );
+    const stones = new THREE.InstancedMesh(stoneGeometry, inkMaterial(0.2), 900);
+    const stoneLines = new THREE.InstancedMesh(
+      stoneGeometry,
+      new THREE.MeshBasicMaterial({ color: 0xdddddd, wireframe: true }),
+      900,
+    );
+    let bushCount = 0;
+    let stoneCount = 0;
+    for (const resource of this.resources) {
+      const { x, y, z, rotation, size } = resource;
+      if (resource.kind === "bush") {
+        const matrix = compose(x, y - 0.05, z, rotation, size, size, size);
+        bushes.setMatrixAt(bushCount, matrix);
+        bushLines.setMatrixAt(bushCount, matrix);
+        this.resourceMeshes.set(resource.id, { meshes: [bushes, bushLines], index: bushCount++ });
+      } else {
+        const matrix = compose(x, y + size * 0.35, z, rotation, size, size * 0.55, size * 0.8);
+        stones.setMatrixAt(stoneCount, matrix);
+        stoneLines.setMatrixAt(stoneCount, matrix);
+        this.resourceMeshes.set(resource.id, { meshes: [stones, stoneLines], index: stoneCount++ });
+      }
+    }
+    bushes.count = bushLines.count = bushCount;
+    stones.count = stoneLines.count = stoneCount;
+    for (const mesh of [bushes, bushLines, stones, stoneLines]) mesh.computeBoundingSphere();
+    this.group.add(bushes, bushLines, stones, stoneLines);
+  }
+
+  removeResource(id: number) {
+    const entry = this.resourceMeshes.get(id);
+    if (!entry) return;
+    const matrix = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (const mesh of entry.meshes) {
+      mesh.setMatrixAt(entry.index, matrix);
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    this.resourceMeshes.delete(id);
+  }
+
+  hasResource(id: number) {
+    return this.resourceMeshes.has(id);
+  }
+
+  removeTree(id: number) {
+    const tree = this.trees.get(id);
+    if (tree) tree.visible = false;
   }
 
   update(time: number) {
