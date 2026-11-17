@@ -23,9 +23,9 @@ const buttonVariants = cva(
         secondary:
           "gap-2 rounded-lg border border-[#2a2a2a] bg-[#1c1c1c] font-sans font-extrabold text-white transition-[background-color,scale] duration-100 hover:bg-[#242424] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white active:scale-[0.98]",
         /* Quiet text, for the less likely choice. */
-        link: "font-sans text-xs font-bold text-[#8a8a8a] transition-colors hover:text-white focus-visible:text-white",
+        link: "font-sans text-xs font-bold text-white/80 transition-colors hover:text-white focus-visible:text-white",
         /* A belt slot. data-selected marks the one in hand: it turns bright. */
-        slot: "relative rounded-lg bg-[#1c1c1c] text-[#bdbdbd] transition-colors data-[selected=true]:bg-[#f2f2f2] data-[selected=true]:text-[#0a0a0a]",
+        slot: "relative rounded-lg bg-[#1c1c1c] text-white/90 transition-colors data-[selected=true]:bg-[#f2f2f2] data-[selected=true]:text-[#0a0a0a]",
         /* The round thumb buttons on phones. */
         touch:
           "rounded-full border border-white/40 bg-black/40 font-mono text-[10px] tracking-[0.15em] text-white uppercase active:bg-white active:text-black",

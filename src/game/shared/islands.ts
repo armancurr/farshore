@@ -1,21 +1,16 @@
-import {
-  GRAND_SIZE,
-  ISLAND_RADIUS,
-  MAX_HEIGHT,
-  MAX_ISLANDS,
-  SEA_FLOOR,
-  TILE_SIZE,
-} from "./constants";
+import { BASE_CELL, BASE_TILE, ISLAND_RADIUS, MAX_HEIGHT, SEA_FLOOR } from "./constants";
 import { createNoise2D, fbm, mulberry32, type Rng, range, smoothstep } from "./math";
 
 /*
- * Every player's land is one island on the grand map: a square tile of
- * TILE_SIZE metres, with the island somewhere inside it and open sea at its
- * edges. Islands differ only in their shape (the kind of contours) and a seed
- * (the variant); both are enough for every machine to build the same ground.
+ * The grand map is authored: the Harbor in the middle and the hunting islands
+ * round it, all listed in WORLD below. Each is a square tile of land and sea.
+ * A shape is drawn for a tile BASE_TILE metres a side and stretched to the
+ * island's own size, so every machine builds the same ground from the shape,
+ * the seed and the size alone.
  */
 
 export const SHAPE_IDS = [
+  "plain",
   "headland",
   "crescent",
   "twin",
@@ -32,35 +27,86 @@ export type ShapeId = (typeof SHAPE_IDS)[number];
 export const isShapeId = (v: unknown): v is ShapeId =>
   typeof v === "string" && (SHAPE_IDS as readonly string[]).includes(v);
 
-/* One player's island on the grand map: its centre, and what it looks like. */
+/* What lives on a hunting island and what grows there. */
+export type BiomeId = "meadow" | "pinewood" | "ridge" | "marsh" | "fells";
+
+/* One island on the grand map: where it is, how big, and what it looks like. */
 export type IslandInfo = {
   id: number;
   shape: ShapeId;
   seed: number;
+  /* The centre of its tile. */
   x: number;
   z: number;
-  /* Whoever settled it. */
+  /* The tile's side, and the spacing of its height samples, in metres. */
+  size: number;
+  cell: number;
+  /* Multiplies the shape's height: big islands stand a little taller so their slopes keep their character. */
+  lift: number;
   name: string;
   /* The common ground in the middle of the map; see HARBOR. */
   harbor?: boolean;
+  biome?: BiomeId;
 };
+
+/* Height samples a side for an island. */
+export const gridOf = (o: { size: number; cell: number }) => Math.round(o.size / o.cell) + 1;
 
 /*
  * The Harbor: common ground in the middle of the grand map. Everyone arrives
- * here, nobody owns it, and nobody can be hurt on it. A horseshoe of land
- * round a sheltered bay, with a lighthouse on the high ground and jetties
- * running out into the water.
+ * here, nobody owns it, and nobody can be hurt on it. One broad, gently
+ * rolling island with the lighthouse on a low rise at its very centre.
  */
 export const HARBOR_ID = 0;
 export const HARBOR: IslandInfo = {
   id: HARBOR_ID,
-  shape: "crescent",
+  shape: "plain",
   seed: 83,
   x: 0,
   z: 0,
+  size: 1000,
+  cell: BASE_CELL,
+  lift: 1,
   name: "the Harbor",
   harbor: true,
 };
+
+/* The hunting islands: a ring round the Harbor, a good row apart. */
+const WILD_SIZE = 1400;
+const WILD_CELL = 4.375;
+const RING = 1800;
+const wild = (
+  id: number,
+  name: string,
+  biome: BiomeId,
+  shape: ShapeId,
+  seed: number,
+  bearing: number,
+  lift: number,
+): IslandInfo => {
+  const a = (bearing * Math.PI) / 180;
+  return {
+    id,
+    shape,
+    seed,
+    x: Math.round(Math.sin(a) * RING),
+    z: Math.round(-Math.cos(a) * RING),
+    size: WILD_SIZE,
+    cell: WILD_CELL,
+    lift,
+    name,
+    biome,
+  };
+};
+
+export const WORLD: readonly IslandInfo[] = [
+  HARBOR,
+  wild(1, "Fernmeadow", "meadow", "flats", 1201, 0, 1.6),
+  wild(2, "Pinehollow", "pinewood", "headland", 2203, 72, 1.15),
+  wild(3, "Greymane Ridge", "ridge", "spine", 3307, 144, 1.2),
+  wild(4, "Bramble Marsh", "marsh", "twin", 4409, 216, 1.1),
+  wild(5, "Hornback Fells", "fells", "mesa", 5501, 288, 1.35),
+];
 
 type Hill = { x: number; z: number; r: number; h: number };
 
@@ -120,6 +166,23 @@ function wrapAngle(a: number) {
 }
 
 export const SHAPES: Record<ShapeId, ShapeDef> = {
+  plain: {
+    name: "Plain",
+    note: "One broad, whole island of gentle ground, rising a little to the middle.",
+    warp: 34,
+    height: 0.3,
+    base: 0.3,
+    roll: 0.22,
+    ridge: 0.03,
+    plan: (rng) => {
+      const hills: Hill[] = [{ x: 0, z: 0, r: 75, h: 1 }];
+      for (let k = 0; k < 9; k++)
+        hills.push(
+          hill(rng() * TAU, range(rng, 110, 230), range(rng, 26, 44), range(rng, 0.15, 0.35)),
+        );
+      return { hills, mask: (x, z) => Math.hypot(x, z) / 375 };
+    },
+  },
   headland: {
     name: "Headland",
     note: "One high massif ringed by lesser peaks. The original.",
@@ -424,18 +487,18 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
 
 /*
  * Heights for an island, n samples a side, laid over its whole tile (local
- * coordinates, centred on the island). The game uses GRID samples; the map
- * draws from far fewer.
+ * coordinates, centred on the island, in BASE_TILE units). The game uses the
+ * island's own grid; the map draws from far fewer.
  */
-export function islandHeights(shape: ShapeId, seed: number, n: number) {
+export function islandHeights(shape: ShapeId, seed: number, n: number, lift = 1) {
   const def = SHAPES[shape];
   const rng = mulberry32(seed >>> 0);
   const rolling = createNoise2D(rng);
   const warp = createNoise2D(rng);
   const ridges = createNoise2D(rng);
   const plan = def.plan(rng);
-  const half = TILE_SIZE / 2;
-  const cell = TILE_SIZE / (n - 1);
+  const half = BASE_TILE / 2;
+  const cell = BASE_TILE / (n - 1);
 
   const raw = new Float32Array(n * n);
   const masks = new Float32Array(n * n);
@@ -470,7 +533,7 @@ export function islandHeights(shape: ShapeId, seed: number, n: number) {
   }
 
   const out = new Float32Array(n * n);
-  const top = MAX_HEIGHT * def.height;
+  const top = MAX_HEIGHT * def.height * lift;
   for (let k = 0; k < raw.length; k++) {
     const t = raw[k] / maxRaw;
     const land = (plan.curve ? plan.curve(t) : t) * top - 1.4;
@@ -483,22 +546,10 @@ export function islandHeights(shape: ShapeId, seed: number, n: number) {
 
 /* ---------- the grand map ---------- */
 
-/* How far an island's centre may sit from the middle of the map. */
-export const PLACE_LIMIT = GRAND_SIZE / 2 - TILE_SIZE / 2;
-
 /* Do two islands' tiles overlap? Tiles may touch, but not share sea. */
-export function tilesOverlap(ax: number, az: number, bx: number, bz: number) {
-  return Math.abs(ax - bx) < TILE_SIZE - 0.01 && Math.abs(az - bz) < TILE_SIZE - 0.01;
+export function tilesOverlap(a: IslandInfo, b: IslandInfo) {
+  const reach = (a.size + b.size) / 2 - 0.01;
+  return Math.abs(a.x - b.x) < reach && Math.abs(a.z - b.z) < reach;
 }
 
-/* Why an island can't go at (x, z), or null if it can. */
-export function placementProblem(islands: readonly IslandInfo[], x: number, z: number) {
-  if (islands.filter((o) => !o.harbor).length >= MAX_ISLANDS) return "The map is full";
-  if (Math.abs(x) > PLACE_LIMIT + 0.01 || Math.abs(z) > PLACE_LIMIT + 0.01)
-    return "Too close to the edge of the map";
-  /* The Harbor always holds the middle, even before the room has said so. */
-  if (tilesOverlap(HARBOR.x, HARBOR.z, x, z)) return "Too close to the Harbor";
-  const hit = islands.find((o) => tilesOverlap(o.x, o.z, x, z));
-  if (hit) return hit.harbor ? "Too close to the Harbor" : `Too close to ${hit.name}'s island`;
-  return null;
-}
+export const islandById = (id: number) => WORLD.find((o) => o.id === id) ?? null;

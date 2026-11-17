@@ -327,29 +327,6 @@ export const WEAPON_SPAN: Record<WeaponKind, { from: number; to: number }> = {
   shield: { from: -0.48, to: 0.48 },
 };
 
-/* A fishing rod: cork grip, a reel, a long whippy blank, and a "tip" marker for the line. */
-export function buildRod(): THREE.Group {
-  const m = materials();
-  const steel = new Batch();
-  const dark = new Batch();
-  const group = new THREE.Group();
-  dark.add(rod(0.03, 0.42, 8), compose(0, -0.12, 0));
-  const blank = new THREE.CylinderGeometry(0.006, 0.018, 1.5, 6, 1);
-  blank.translate(0, 0.75, 0);
-  dark.add(blank, compose(0, 0.3, 0));
-  const reel = new THREE.CylinderGeometry(0.055, 0.055, 0.05, 12, 1);
-  steel.add(reel, compose(0.06, 0.05, 0, 0, 1, 1, 1, 0, Math.PI / 2), 30);
-  for (const y of [0.55, 0.95, 1.3, 1.6]) {
-    steel.add(new THREE.TorusGeometry(0.018, 0.004, 4, 8), compose(0.02, y, 0, Math.PI / 2), 60);
-  }
-  group.add(steel.build(m.steel, m.line), dark.build(m.dark, m.faint));
-  const tip = new THREE.Object3D();
-  tip.name = "tip";
-  tip.position.y = 1.8;
-  group.add(tip);
-  return group;
-}
-
 /* ---------- first person ---------- */
 
 const ease = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
@@ -359,10 +336,7 @@ const ease = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
  * it never clips into walls. It sits far above the sea (y = 1000) so the
  * shaders' below-the-waterline darkening never touches it.
  */
-export type HeldModel = WeaponKind | "rod";
-
-/* What a held rod is doing: resting, with a line out, or with something on it. */
-export type RodPose = "idle" | "out" | "bite";
+export type HeldModel = WeaponKind;
 
 export class ViewModel {
   readonly scene = new THREE.Scene();
@@ -371,7 +345,6 @@ export class ViewModel {
   private right = new THREE.Group();
   private left = new THREE.Group();
   private kind: HeldModel | null = null;
-  private tip: THREE.Object3D | null = null;
   private swingAt = -10;
   private heavy = false;
   private side = 1;
@@ -395,16 +368,7 @@ export class ViewModel {
     for (const g of [this.right, this.left]) {
       for (const c of [...g.children]) g.remove(c);
     }
-    this.tip = null;
     if (!kind) return;
-    if (kind === "rod") {
-      const model = buildRod();
-      model.scale.setScalar(0.55);
-      this.right.add(model);
-      this.tip = model.getObjectByName("tip") ?? null;
-      this.equipAt = performance.now() / 1000;
-      return;
-    }
     /* Held models are scaled down: they sit half a metre from your eye. */
     const scale: Record<WeaponKind, number> = {
       daggers: 0.85,
@@ -450,17 +414,12 @@ export class ViewModel {
       charge: number | null;
       blocking: boolean;
       kick: number;
-      rod?: RodPose;
     },
   ) {
     this.camera.aspect = o.aspect;
     this.camera.updateProjectionMatrix();
     const kind = this.kind;
     if (!kind) return;
-    if (kind === "rod") {
-      this.poseRod(o.rod ?? "idle", o.bob, o.bobAmp);
-      return;
-    }
     const now = performance.now() / 1000;
     const def = weaponDef(kind);
     const t = now - this.swingAt;
@@ -566,32 +525,6 @@ export class ViewModel {
         break;
     }
     R.rotation.x += o.kick * 0.1;
-  }
-
-  /* The rod rests angled out ahead; a cast flicks it over, a line out holds it up, a bite shakes it. */
-  private poseRod(pose: RodPose, bob: number, bobAmp: number) {
-    const now = performance.now() / 1000;
-    const t = now - this.swingAt;
-    const flick = t < 0.45 ? Math.sin((t / 0.45) * Math.PI) : 0;
-    const equip = 1 - ease((now - this.equipAt) / 0.35);
-    const sway = Math.sin(bob * 0.5) * 0.02 * bobAmp;
-    const R = this.right;
-    const up = pose === "idle" ? 0 : 0.2;
-    R.position.set(0.3 + sway, -0.36 - equip * 0.4, -0.45);
-    R.rotation.set(-1.2 + up + flick * 0.9, 0.1, -0.38);
-    if (pose === "bite") {
-      R.rotation.x += Math.sin(now * 37) * 0.04 - 0.12;
-      R.rotation.z += Math.sin(now * 23) * 0.05;
-    }
-  }
-
-  /* Where the rod tip is on screen (normalised device coordinates), if a rod is held. */
-  rodTip(out: THREE.Vector3) {
-    if (!this.tip) return false;
-    this.camera.updateMatrixWorld();
-    this.tip.getWorldPosition(out);
-    out.project(this.camera);
-    return true;
   }
 
   dispose() {

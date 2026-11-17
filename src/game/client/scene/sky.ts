@@ -1,11 +1,10 @@
 import * as THREE from "three";
-import { shared } from "./materials";
+import { PALETTE, shared } from "./materials";
 
 /*
- * The sky, following the camera. It's always day: one fixed grey, and a large
- * white sun high up, etched with warped contour rings that ripple out from its centre.
- * Below the horizon the dome is the fog tone, which the far sea fades into;
- * above, it steps straight down to a darker grey, so sea meets sky on a crisp line.
+ * The sky, following the camera. It's always day: a clear violet sky, a
+ * little paler down at the horizon where distance fades into haze, and a
+ * plain bright white sun high up with a soft glow round it.
  */
 export class Sky {
   readonly group = new THREE.Group();
@@ -14,7 +13,11 @@ export class Sky {
   constructor() {
     const domeGeo = new THREE.SphereGeometry(1400, 32, 16);
     const domeMat = new THREE.ShaderMaterial({
-      uniforms: { uSun: shared.uSun, uFogTone: shared.uFogTone, uTime: shared.uTime },
+      uniforms: {
+        uSun: shared.uSun,
+        uFogColor: shared.uFogColor,
+        uSky: { value: new THREE.Color(PALETTE.sky) },
+      },
       vertexShader: /* glsl */ `
         varying vec3 vDir;
         void main() {
@@ -24,51 +27,27 @@ export class Sky {
       `,
       fragmentShader: /* glsl */ `
         uniform vec3 uSun;
-        uniform float uFogTone;
-        uniform float uTime;
+        uniform vec3 uFogColor;
+        uniform vec3 uSky;
         varying vec3 vDir;
 
-        /* The sun's angular radius, in radians (about 7.5 degrees). */
-        const float SUN_R = 0.13;
-        const float RINGS = 7.0;
-
-        /* An anti-aliased iso-line of v, roughly px pixels wide. */
-        float isoLine(float v, float px) {
-          float w = fwidth(v);
-          float d = abs(fract(v - 0.5) - 0.5);
-          return 1.0 - smoothstep(w * (px - 0.5), w * (px + 0.5), d);
-        }
+        /* The sun's angular radius, in radians (about 5 degrees). */
+        const float SUN_R = 0.09;
 
         void main() {
           vec3 dir = normalize(vDir);
+          /* Haze at the horizon (and below it, where the far sea fades in), clear sky above. */
+          vec3 sky = mix(uFogColor, uSky, smoothstep(0.0, 0.28, dir.y));
 
-          float above = mix(uFogTone * 0.5, uFogTone * 0.3, smoothstep(0.0, 0.8, dir.y));
-          float sky = mix(uFogTone, above, smoothstep(-0.001, 0.002, dir.y));
-
-          /* Polar coordinates around the sun: angle from its centre, and bearing. */
-          vec3 t = normalize(cross(uSun, vec3(0.0, 1.0, 0.0)));
-          vec3 b = cross(t, uSun);
-          vec2 p = vec2(dot(dir, t), dot(dir, b));
-          float ang = atan(length(p), dot(dir, uSun));
-          float theta = atan(p.y, p.x);
-          float r = ang / SUN_R;
-
-          /* Contour rings, bent unevenly like the island's, born at the centre and rippling out. */
-          float warp = 0.05 * sin(theta * 3.0 + uTime * 0.15)
-                     + 0.03 * sin(theta * 5.0 - 1.7 + r * 3.0 - uTime * 0.1);
-          float rings = isoLine(r * (1.0 + warp) * RINGS - uTime * 0.45, mix(2.4, 1.3, r));
-          rings *= smoothstep(0.0, 0.12, r);
-
-          float disc = 1.0 - smoothstep(1.0 - fwidth(r) * 1.5, 1.0, r);
-          /* Past white, so it stays blown out through the vignette; the rings cut dark into it. */
-          float face = mix(1.6, 0.28, rings);
-
-          /* A tight white corona and a wide, faint haze. */
+          float ang = acos(clamp(dot(dir, uSun), -1.0, 1.0));
+          float disc = 1.0 - smoothstep(SUN_R - 0.004, SUN_R + 0.002, ang);
           float past = max(ang - SUN_R, 0.0);
-          float corona = 0.6 * exp(-past * 14.0) + 0.14 * exp(-past * 3.0);
+          float glow = 0.5 * exp(-past * 18.0) + 0.12 * exp(-past * 4.0);
 
-          float c = mix(sky + corona, face, disc);
-          gl_FragColor = vec4(vec3(c), 1.0);
+          vec3 c = sky + vec3(glow);
+          /* Past white, so it stays blown out through the vignette. */
+          c = mix(c, vec3(1.6), disc);
+          gl_FragColor = vec4(c, 1.0);
         }
       `,
       side: THREE.BackSide,

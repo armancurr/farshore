@@ -1,121 +1,71 @@
 import * as THREE from "three";
-import type { AnimalKind } from "../../shared/items";
-import { clamp, wrapAngle } from "../../shared/math";
-import { ANIMAL_STATE, type AnimalSnap } from "../../shared/protocol";
-import { compose } from "./batch";
-import { InstancedModel, type Part } from "./instanced";
+import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
+import { wrapAngle } from "../../shared/math";
+import { ANIMAL_FLAG, ANIMAL_STATE, type AnimalSnap } from "../../shared/protocol";
+import { ALPHA, type Role, SPECIES, SPECIES_IDS, type SpeciesId } from "../../shared/species";
+import { disposeModel, flatten, loadModel, measure } from "./models";
 
-const MAX = 32;
-const LEG = { fl: 1, fr: 2, bl: 3, br: 4 } as const;
-const HEAD = 5;
+/*
+ * The animals near you, as the room last reported them, drawn with their
+ * models from the asset packs: each one a skinned copy with its own
+ * animation mixer, easing toward where the room says it is and blending
+ * between grazing, walking, running, attacking and falling.
+ */
 
-const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
-/* A cylinder lying along z (the animal's length). */
-const barrel = (r0: number, r1: number, len: number, sides = 7) =>
-  new THREE.CylinderGeometry(r1, r0, len, sides, 1).rotateX(Math.PI / 2);
+type ClipName = "idle" | "graze" | "walk" | "run" | "attack" | "death" | "alert" | "hit";
 
-/* Four legs hanging from hips at (±x, top, ±z). */
-function legs(parts: Part[], x: number, z: number, top: number, w: number) {
-  for (const [part, sx, sz] of [
-    [LEG.fl, -1, -1],
-    [LEG.fr, 1, -1],
-    [LEG.bl, -1, 1],
-    [LEG.br, 1, 1],
-  ] as const) {
-    parts.push({
-      geo: box(w, top, w),
-      matrix: compose(sx * x, top / 2, sz * z),
-      part,
-      pivot: [sx * x, top, sz * z],
-    });
-  }
-}
+/* Which clips in a pack's file play each part, best match first. */
+const CLIPS: Record<ClipName, readonly string[]> = {
+  idle: ["Idle", "Idle_A"],
+  graze: ["Eating", "Idle_Eating", "Idle_Headlow", "Idle_2_HeadLow", "Idle"],
+  walk: ["Walk"],
+  run: ["Gallop", "Run", "Walk"],
+  attack: ["Attack_Headbutt", "Attack", "Headbutt", "Attack_Kick"],
+  death: ["Death", "Dead"],
+  alert: ["Idle_2", "Idle"],
+  hit: ["Idle_HitReact1", "HitReact", "Idle"],
+};
 
-/* A deer, facing -z: long legs, a slim barrel, a raised neck and head, antlers. */
-function deerParts(): Part[] {
-  const parts: Part[] = [];
-  parts.push({ geo: barrel(0.23, 0.26, 1.1), matrix: compose(0, 1.08, 0) });
-  parts.push({ geo: box(0.08, 0.14, 0.12), matrix: compose(0, 1.18, 0.6, 0, 1, 1, 1, 0.5) });
-  legs(parts, 0.14, 0.4, 0.98, 0.075);
-  const neck: [number, number, number] = [0, 1.2, -0.42];
-  parts.push({
-    geo: box(0.15, 0.6, 0.17),
-    matrix: compose(0, 1.45, -0.55, 0, 1, 1, 1, -0.45),
-    part: HEAD,
-    pivot: neck,
-  });
-  parts.push({
-    geo: box(0.17, 0.18, 0.4),
-    matrix: compose(0, 1.72, -0.78, 0, 1, 1, 1, 0.15),
-    part: HEAD,
-    pivot: neck,
-  });
-  for (const s of [-1, 1]) {
-    parts.push({
-      geo: new THREE.ConeGeometry(0.05, 0.18, 4),
-      matrix: compose(s * 0.11, 1.86, -0.66, 0, 1, 1, 1, 0, s * -0.5),
-      part: HEAD,
-      pivot: neck,
-    });
-    /* Antlers: a tine up and one forward. */
-    parts.push({
-      geo: new THREE.CylinderGeometry(0.012, 0.02, 0.42, 4),
-      matrix: compose(s * 0.1, 2.02, -0.7, 0, 1, 1, 1, -0.2, s * -0.35),
-      part: HEAD,
-      pivot: neck,
-      angle: 60,
-    });
-    parts.push({
-      geo: new THREE.CylinderGeometry(0.01, 0.015, 0.22, 4),
-      matrix: compose(s * 0.16, 2.08, -0.8, 0, 1, 1, 1, -0.9, s * -0.2),
-      part: HEAD,
-      pivot: neck,
-      angle: 60,
-    });
-  }
-  return parts;
-}
+type ModelDef = {
+  url: string;
+  /* An alpha of this kind can wear a different coat. */
+  alphaUrl?: string;
+  /* How tall it stands, in metres (an alpha is ALPHA.scale times that). */
+  height: number;
+  /* Turn the model so its nose points down -z, the game's forward. */
+  yaw?: number;
+  /* A pack with only a walk: run plays it this much faster. */
+  stride?: number;
+  /* Lift a model whose feet don't reach its own floor. */
+  lift?: number;
+};
 
-/* A boar, facing -z: low and heavy, a bristled ridge, a long snout and tusks. */
-function boarParts(): Part[] {
-  const parts: Part[] = [];
-  parts.push({ geo: barrel(0.32, 0.36, 1.05), matrix: compose(0, 0.66, 0, 0, 1, 1.15, 1) });
-  parts.push({ geo: box(0.07, 0.12, 0.8), matrix: compose(0, 1.06, -0.05) });
-  parts.push({ geo: box(0.05, 0.16, 0.05), matrix: compose(0, 0.72, 0.56, 0, 1, 1, 1, 0.6) });
-  legs(parts, 0.19, 0.32, 0.44, 0.1);
-  const neck: [number, number, number] = [0, 0.7, -0.45];
-  parts.push({
-    geo: box(0.36, 0.34, 0.36),
-    matrix: compose(0, 0.66, -0.66),
-    part: HEAD,
-    pivot: neck,
-  });
-  parts.push({
-    geo: new THREE.CylinderGeometry(0.1, 0.13, 0.3, 6).rotateX(Math.PI / 2),
-    matrix: compose(0, 0.58, -0.96),
-    part: HEAD,
-    pivot: neck,
-  });
-  for (const s of [-1, 1]) {
-    parts.push({
-      geo: new THREE.ConeGeometry(0.025, 0.16, 4),
-      matrix: compose(s * 0.1, 0.56, -1.0, 0, 1, 1, 1, -0.6, s * 0.4),
-      part: HEAD,
-      pivot: neck,
-    });
-    parts.push({
-      geo: new THREE.ConeGeometry(0.06, 0.14, 3),
-      matrix: compose(s * 0.13, 0.9, -0.6, 0, 1, 1, 1, -0.3, s * -0.4),
-      part: HEAD,
-      pivot: neck,
-    });
-  }
-  return parts;
-}
+const Q = "/models/animals/";
+export const ANIMAL_MODELS: Record<SpeciesId, ModelDef> = {
+  deer: { url: `${Q}deer.glb`, height: 1.55 },
+  stag: { url: `${Q}stag.glb`, height: 2.1 },
+  alpaca: { url: `${Q}alpaca.glb`, height: 1.8 },
+  horse: { url: `${Q}horse.glb`, alphaUrl: `${Q}horse_white.glb`, height: 2 },
+  donkey: { url: `${Q}donkey.glb`, height: 1.5 },
+  rabbit: { url: `${Q}hare.glb`, height: 0.55, stride: 2.6 },
+  fox: { url: `${Q}fox.glb`, height: 0.7 },
+  goat: { url: `${Q}goat.glb`, height: 1.15, stride: 2.2 },
+  ram: { url: `${Q}ram.glb`, height: 1.25, stride: 2.2 },
+  boar: { url: `${Q}boar.glb`, height: 1, stride: 2.2 },
+  bull: { url: `${Q}bull.glb`, height: 1.75 },
+  wolf: { url: `${Q}wolf.glb`, height: 1.05 },
+};
 
-type Shown = {
+/* A loaded pack model, ready to copy: its scene at the right size, and its clips by part. */
+type Template = {
+  scene: THREE.Object3D;
+  clips: Partial<Record<ClipName, THREE.AnimationClip>>;
+  stride: number;
+};
+
+export type Shown = {
   id: number;
-  kind: AnimalKind;
+  species: SpeciesId;
   x: number;
   y: number;
   z: number;
@@ -126,36 +76,108 @@ type Shown = {
   tyaw: number;
   state: number;
   health: number;
-  phase: number;
-  swing: number;
-  roll: number;
-  head: number;
+  flags: number;
   seen: number;
+  /* Drawn once its model has loaded. */
+  view: {
+    root: THREE.Object3D;
+    mixer: THREE.AnimationMixer;
+    actions: Partial<Record<ClipName, THREE.AnimationAction>>;
+    playing: ClipName | null;
+  } | null;
 };
 
-/* Every animal on the island in four draw calls, eased toward the room's latest word. */
+/* Past this, an animal isn't drawn (the fog has it by then anyway). */
+const DRAW_RANGE = 300;
+/* Past this, its animation steps less often. */
+const NEAR_RANGE = 90;
+
+function pickClip(clips: readonly THREE.AnimationClip[], wanted: readonly string[]) {
+  /* Packs prefix clip names with their armature ("AnimalArmature|Walk"); match the last part. */
+  const bare = (n: string) => n.split("|").pop()!.toLowerCase();
+  for (const w of wanted) {
+    const hit = clips.find((c) => bare(c.name) === w.toLowerCase());
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 export class HerdView {
   readonly group = new THREE.Group();
-  private models: Record<AnimalKind, InstancedModel>;
   private shown = new Map<number, Shown>();
   private stamp = 0;
+  /* By model file: an alpha may wear its own. */
+  private templates = new Map<string, Template | "loading" | "failed">();
+  private frame = 0;
 
-  constructor() {
-    this.models = {
-      deer: new InstancedModel(deerParts(), MAX, { tone: 0.13, lineTone: 0.85, animated: true }),
-      boar: new InstancedModel(boarParts(), MAX, { tone: 0.06, lineTone: 0.8, animated: true }),
-    };
-    this.group.add(this.models.deer.group, this.models.boar.group);
+  /* Start fetching the models, so they're ready by the time anyone reaches an island. */
+  preload() {
+    for (const s of SPECIES_IDS) this.template(s, false);
+  }
+
+  private template(species: SpeciesId, alpha: boolean): Template | null {
+    const def = ANIMAL_MODELS[species];
+    const url = alpha && def.alphaUrl ? def.alphaUrl : def.url;
+    const have = this.templates.get(url);
+    if (have === "loading" || have === "failed") return null;
+    if (have) return have;
+    this.templates.set(url, "loading");
+    loadModel(url).then(
+      (gltf) => {
+        const scene = gltf.scene;
+        flatten(scene);
+        scene.traverse((o) => {
+          o.frustumCulled = false;
+        });
+        /* Stand it on the ground, the right height, facing -z. */
+        const holder = new THREE.Group();
+        holder.add(scene);
+        const box = measure(scene);
+        const size = box.getSize(new THREE.Vector3());
+        const k = def.height / Math.max(size.y, 1e-3);
+        scene.scale.multiplyScalar(k);
+        scene.rotation.y += def.yaw ?? Math.PI;
+        const after = measure(scene);
+        scene.position.y -= after.min.y - (def.lift ?? 0);
+        const clips: Template["clips"] = {};
+        for (const name of Object.keys(CLIPS) as ClipName[]) {
+          const c = pickClip(gltf.animations, CLIPS[name]);
+          if (c) clips[name] = c;
+        }
+        this.templates.set(url, { scene: holder, clips, stride: def.stride ?? 1 });
+      },
+      () => this.templates.set(url, "failed"),
+    );
+    return null;
+  }
+
+  /* Whether this species index runs, fights back, or hunts. */
+  roleOf(index: number): Role {
+    const s = SPECIES_IDS[index];
+    return s ? SPECIES[s].role : "prey";
+  }
+
+  /* Where the crosshair should look on it: about its middle. */
+  aimHeight(a: Shown) {
+    return ANIMAL_MODELS[a.species].height * 0.6 * (a.flags & ANIMAL_FLAG.alpha ? ALPHA.scale : 1);
+  }
+
+  nameOf(a: Shown) {
+    const name = SPECIES[a.species].name;
+    return a.flags & ANIMAL_FLAG.alpha ? `Alpha ${name.toLowerCase()}` : name;
   }
 
   set(snaps: readonly AnimalSnap[]) {
     this.stamp++;
-    for (const [id, kind, x, y, z, yaw, state, health] of snaps) {
+    for (const [id, kind, x, y, z, yaw, state, health, flags] of snaps) {
+      const species = SPECIES_IDS[kind];
+      if (!species) continue;
       let s = this.shown.get(id);
-      if (!s) {
+      if (!s || s.species !== species) {
+        if (s) this.drop(s);
         s = {
           id,
-          kind: kind === 0 ? "deer" : "boar",
+          species,
           x,
           y,
           z,
@@ -166,11 +188,9 @@ export class HerdView {
           tyaw: yaw,
           state,
           health,
-          phase: id,
-          swing: 0,
-          roll: 0,
-          head: 0,
+          flags: flags ?? 0,
           seen: this.stamp,
+          view: null,
         };
         this.shown.set(id, s);
       }
@@ -180,18 +200,81 @@ export class HerdView {
       s.tyaw = yaw;
       s.state = state;
       s.health = health;
+      s.flags = flags ?? 0;
       s.seen = this.stamp;
     }
-    for (const [id, s] of this.shown) if (s.seen !== this.stamp) this.shown.delete(id);
+    for (const [id, s] of this.shown) {
+      if (s.seen === this.stamp) continue;
+      this.drop(s);
+      this.shown.delete(id);
+    }
   }
 
   list(): ReadonlyMap<number, Shown> {
     return this.shown;
   }
 
-  update(dt: number) {
+  private build(s: Shown, t: Template) {
+    const root = cloneSkinned(t.scene);
+    if (s.flags & ANIMAL_FLAG.alpha) root.scale.setScalar(ALPHA.scale);
+    const mixer = new THREE.AnimationMixer(root);
+    const actions: Partial<Record<ClipName, THREE.AnimationAction>> = {};
+    for (const [name, clip] of Object.entries(t.clips) as [ClipName, THREE.AnimationClip][]) {
+      const a = mixer.clipAction(clip);
+      if (name === "death" || name === "attack" || name === "hit") {
+        a.setLoop(THREE.LoopOnce, 1);
+        /* Hold the last frame rather than dropping back to the bind pose. */
+        a.clampWhenFinished = true;
+      }
+      if (name === "run" && t.clips.run === t.clips.walk) a.timeScale = t.stride;
+      actions[name] = a;
+    }
+    /* A different moment in the loop for each, so a herd doesn't move in step. */
+    mixer.setTime((s.id * 0.37) % 3);
+    this.group.add(root);
+    s.view = { root, mixer, actions, playing: null };
+  }
+
+  private drop(s: Shown) {
+    if (!s.view) return;
+    s.view.mixer.stopAllAction();
+    this.group.remove(s.view.root);
+    s.view = null;
+  }
+
+  private play(s: Shown, want: ClipName) {
+    const v = s.view!;
+    if (v.playing === want) return;
+    const next = v.actions[want] ?? v.actions.idle;
+    if (!next) return;
+    const prev = v.playing ? v.actions[v.playing] : null;
+    next.reset();
+    next.enabled = true;
+    next.setEffectiveWeight(1);
+    if (prev && prev !== next) next.crossFadeFrom(prev, want === "death" ? 0.15 : 0.25, false);
+    next.play();
+    v.playing = want;
+  }
+
+  /* What it should be doing, from what the room says and how fast it's going. */
+  private clipFor(s: Shown, speed: number): ClipName {
+    switch (s.state) {
+      case ANIMAL_STATE.dead:
+        return "death";
+      case ANIMAL_STATE.attack:
+        return "attack";
+      case ANIMAL_STATE.alert:
+        return "alert";
+      case ANIMAL_STATE.graze:
+        return speed > 0.5 ? "walk" : "graze";
+      default:
+        return speed > 3.2 ? "run" : speed > 0.25 ? "walk" : "idle";
+    }
+  }
+
+  update(dt: number, eye: THREE.Vector3) {
+    this.frame++;
     const k = 1 - Math.exp(-dt * 12);
-    const counts = { deer: 0, boar: 0 };
     for (const s of this.shown.values()) {
       const px = s.x;
       const pz = s.z;
@@ -200,44 +283,36 @@ export class HerdView {
       s.z += (s.tz - s.z) * k;
       s.yaw = wrapAngle(s.yaw + wrapAngle(s.tyaw - s.yaw) * k);
       const speed = dt > 0 ? Math.hypot(s.x - px, s.z - pz) / dt : 0;
-      const dead = s.state === ANIMAL_STATE.dead;
-      s.phase += speed * (s.kind === "deer" ? 2.4 : 4.2) * dt;
-      s.swing += (clamp(speed / 5, 0, 1) * 0.65 - s.swing) * Math.min(1, dt * 8);
-      s.roll += ((dead ? Math.PI / 2 : 0) - s.roll) * Math.min(1, dt * 6);
-      const head =
-        s.state === ANIMAL_STATE.graze
-          ? -0.75
-          : s.state === ANIMAL_STATE.charge
-            ? -0.3
-            : s.state === ANIMAL_STATE.alert
-              ? 0.15
-              : 0;
-      s.head += (head - s.head) * Math.min(1, dt * 4);
 
-      const m = this.models[s.kind];
-      const i = counts[s.kind]++;
-      if (i >= m.max) continue;
-      m.inst[i * 4] = s.x;
-      m.inst[i * 4 + 1] = s.y - (dead ? 0.2 : 0);
-      m.inst[i * 4 + 2] = s.z;
-      m.inst[i * 4 + 3] = s.yaw;
-      const a = m.anim!;
-      a[i * 4] = s.phase;
-      a[i * 4 + 1] = dead ? 0 : s.swing;
-      a[i * 4 + 2] = s.roll;
-      a[i * 4 + 3] = s.head;
+      const d = Math.hypot(s.x - eye.x, s.z - eye.z);
+      if (d > DRAW_RANGE) {
+        if (s.view) s.view.root.visible = false;
+        continue;
+      }
+      if (!s.view) {
+        const t = this.template(s.species, (s.flags & ANIMAL_FLAG.alpha) !== 0);
+        if (!t) continue;
+        this.build(s, t);
+      }
+      const v = s.view!;
+      v.root.visible = true;
+      v.root.position.set(s.x, s.y, s.z);
+      v.root.rotation.y = s.yaw;
+      this.play(s, this.clipFor(s, speed));
+      /* Faraway animals animate every few frames, at the same pace overall. */
+      const step = d < NEAR_RANGE ? 1 : 3;
+      if ((this.frame + s.id) % step === 0) v.mixer.update(dt * step);
     }
-    this.models.deer.commit(counts.deer);
-    this.models.boar.commit(counts.boar);
   }
 
   clear() {
+    for (const s of this.shown.values()) this.drop(s);
     this.shown.clear();
-    this.update(0);
   }
 
   dispose() {
-    this.models.deer.dispose();
-    this.models.boar.dispose();
+    this.clear();
+    for (const t of this.templates.values()) if (typeof t === "object") disposeModel(t.scene);
+    this.templates.clear();
   }
 }

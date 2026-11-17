@@ -1,21 +1,22 @@
 /*
  * What's switched on. Everything here still has its code; flipping a flag
- * back brings it back. For now the island is bare: just the sea and you.
+ * back brings it back.
  */
 export const FEATURES = {
-  /* The lighthouse on the summit, with the bounty board and the keeper's stall on its plinth. */
+  /* A lighthouse on every island's summit. The Harbor always has its own, at its centre. */
   lighthouse: false,
-  /* Everything else built: windmill, chapel, mast, henge, villages, towers, aqueduct, wrecks, jetties. */
+  /* Everything else built: windmill, chapel, mast, henge, villages, towers, aqueduct, wrecks. */
   landmarks: false,
-  /* Natural and leftover props. */
-  trees: false,
-  rocks: false,
+  /* Trees, bushes and rocks on the islands, and the grass and flowers between them. */
+  trees: true,
+  rocks: true,
   ruins: false,
   cairns: false,
   buoys: false,
-  /* Deer and boar. */
-  animals: false,
-  /* The bounty board (the only source of coins) and the shop (the only place to spend them). */
-  bounties: false,
+  /* The herds on the hunting islands. */
+  animals: true,
+  /* The Guild Board at the top of the Harbor lighthouse: the only source of coins. */
+  board: true,
+  /* The keeper's stall on the lighthouse plinth: the only place to spend them. */
   shop: false,
 };

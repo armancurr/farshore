@@ -1,37 +1,11 @@
-import type { Bounty } from "./bounties";
+import type { Contract, Payout } from "./missions";
+import { SPECIES, SPECIES_IDS, type SpeciesId } from "./species";
 import { WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
- * Everything you can own. Stackable items (fish, game, building kits) are
- * counted; tools (weapons and rods) are individual, with wear, and the five
- * hotbar slots point at them.
+ * Everything you can own. Stackable items (carcasses, building kits) are
+ * counted; tools (weapons) are individual, and the hotbar slots point at them.
  */
-
-export type Rarity = "common" | "uncommon" | "rare" | "legendary";
-export const RARITIES: readonly Rarity[] = ["common", "uncommon", "rare", "legendary"];
-
-export type FishId =
-  | "sprat"
-  | "mackerel"
-  | "mullet"
-  | "bass"
-  | "cod"
-  | "eel"
-  | "moonfish"
-  | "lanternfish";
-export const FISH_IDS: readonly FishId[] = [
-  "sprat",
-  "mackerel",
-  "mullet",
-  "bass",
-  "cod",
-  "eel",
-  "moonfish",
-  "lanternfish",
-];
-
-export type AnimalKind = "deer" | "boar";
-export const ANIMAL_KINDS: readonly AnimalKind[] = ["deer", "boar"];
 
 export type KitId =
   | "campfire"
@@ -53,91 +27,35 @@ export const KIT_IDS: readonly KitId[] = [
   "desertbike",
 ];
 
-/* A carcass is filed under the animal it came from. */
-export type ItemId = FishId | AnimalKind | KitId;
+/* A carcass is filed under the species it came from. */
+export type ItemId = SpeciesId | KitId;
 
 type ItemDef = {
   name: string;
   plural: string;
-  kind: "fish" | "game" | "kit";
-  rarity?: Rarity;
+  kind: "game" | "kit";
   note: string;
 };
 
+const CARCASSES = Object.fromEntries(
+  SPECIES_IDS.map((s) => [
+    s,
+    {
+      name: `${SPECIES[s].name} carcass`,
+      plural: `${SPECIES[s].name.toLowerCase()} carcasses`,
+      kind: "game",
+      note: SPECIES[s].note,
+    },
+  ]),
+) as Record<SpeciesId, ItemDef>;
+
 export const ITEMS: Record<ItemId, ItemDef> = {
+  ...CARCASSES,
   desertbike: {
     name: "Desert bike",
     plural: "desert bikes",
     kind: "kit",
     note: "A fast trail machine. Spawn from Marketplace → Vehicles on clear dry ground.",
-  },
-  sprat: {
-    name: "Sprat",
-    plural: "sprats",
-    kind: "fish",
-    rarity: "common",
-    note: "Silver flickers in the shallows.",
-  },
-  mackerel: {
-    name: "Mackerel",
-    plural: "mackerel",
-    kind: "fish",
-    rarity: "common",
-    note: "Striped and quick, close to shore.",
-  },
-  mullet: {
-    name: "Grey mullet",
-    plural: "grey mullet",
-    kind: "fish",
-    rarity: "uncommon",
-    note: "Grazes the shelf where the sand drops away.",
-  },
-  bass: {
-    name: "Sea bass",
-    plural: "sea bass",
-    kind: "fish",
-    rarity: "uncommon",
-    note: "Hunts the middle water.",
-  },
-  cod: {
-    name: "Cod",
-    plural: "cod",
-    kind: "fish",
-    rarity: "uncommon",
-    note: "Heavy, and only out in deeper water.",
-  },
-  eel: {
-    name: "Conger eel",
-    plural: "conger eels",
-    kind: "fish",
-    rarity: "rare",
-    note: "Comes up from the dark, in deeper water.",
-  },
-  moonfish: {
-    name: "Moonfish",
-    plural: "moonfish",
-    kind: "fish",
-    rarity: "rare",
-    note: "A pale disc, far from land.",
-  },
-  lanternfish: {
-    name: "Lanternfish",
-    plural: "lanternfish",
-    kind: "fish",
-    rarity: "legendary",
-    note: "Glows in the deep, and seldom bites.",
-  },
-  deer: {
-    name: "Deer carcass",
-    plural: "deer carcasses",
-    kind: "game",
-    note: "Skittish; they bolt at the sound of running feet.",
-  },
-  boar: {
-    name: "Boar carcass",
-    plural: "boar carcasses",
-    kind: "game",
-    note: "Bad-tempered, and they charge.",
   },
   campfire: {
     name: "Campfire",
@@ -145,7 +63,7 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     kind: "kit",
     note: "Warmth: you heal faster beside it.",
   },
-  chest: { name: "Storage chest", plural: "chests", kind: "kit", note: "Keeps your catch safe." },
+  chest: { name: "Storage chest", plural: "chests", kind: "kit", note: "Keeps your spoils safe." },
   bed: { name: "Bed", plural: "beds", kind: "kit", note: "Rest here, and wake here." },
   hut: { name: "Hut", plural: "huts", kind: "kit", note: "Four walls, a door and a roof." },
   cabin: {
@@ -155,16 +73,16 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     note: "Roomy, with windows and a porch.",
   },
   dock: {
-    name: "Fishing dock",
+    name: "Dock",
     plural: "docks",
     kind: "kit",
-    note: "Walk out over deeper water to fish.",
+    note: "Walk out over the water, and tie up a boat.",
   },
   rowboat: {
     name: "Rowboat",
     plural: "rowboats",
     kind: "kit",
-    note: "Row out to sea, where the rare fish are.",
+    note: "Row out to the hunting islands.",
   },
 };
 
@@ -173,49 +91,19 @@ export const isItemId = (v: unknown): v is ItemId =>
 export const isKitId = (v: unknown): v is KitId =>
   typeof v === "string" && (KIT_IDS as readonly string[]).includes(v);
 
-export function rarityRank(r: Rarity) {
-  return RARITIES.indexOf(r);
-}
-
 /* ---------- tools ---------- */
 
-export type RodDef = {
-  /* How far it casts, metres. */
-  cast: number;
-  /* Seconds to a bite, at least and at most. */
-  bite: [number, number];
-  /* Multiplies the catch window. */
-  window: number;
-  /* Shifts the odds toward rarer fish. */
-  luck: number;
-};
-
-export type ToolKind = WeaponKind | "rod" | "rod2";
+export type ToolKind = WeaponKind;
 
 type ToolDef = {
   name: string;
-  /* The weapon it swings like, or null for a rod. */
-  weapon: WeaponKind | null;
-  rod?: RodDef;
+  /* The weapon it swings like. */
+  weapon: WeaponKind;
 };
 
-const ARMS = Object.fromEntries(
+export const TOOLS: Record<ToolKind, ToolDef> = Object.fromEntries(
   WEAPON_KINDS.map((k) => [k, { name: WEAPONS[k].name, weapon: k }]),
-) as Record<WeaponKind, ToolDef>;
-
-export const TOOLS: Record<ToolKind, ToolDef> = {
-  ...ARMS,
-  rod: {
-    name: "Driftwood rod",
-    weapon: null,
-    rod: { cast: 12, bite: [4, 10], window: 1, luck: 0 },
-  },
-  rod2: {
-    name: "Ashwood rod",
-    weapon: null,
-    rod: { cast: 18, bite: [2.5, 6.5], window: 1.4, luck: 1 },
-  },
-};
+) as Record<ToolKind, ToolDef>;
 
 export const isToolKind = (v: unknown): v is ToolKind =>
   typeof v === "string" && Object.hasOwn(TOOLS, v);
@@ -239,8 +127,10 @@ export type Inventory = {
   /* Tool ids per hotbar slot. Slot 0 is always your fists. */
   hotbar: (number | null)[];
   slot: number;
-  /* The bounty you've taken from the board. */
-  bounty: Bounty | null;
+  /* The contract you've taken from the Guild Board. */
+  mission: Contract | null;
+  /* Alpha bounties and cull shares, waiting to be collected at the board. */
+  payouts: Payout[];
   /* The bed you last slept in or set down: where you wake after blacking out. */
   bed: number | null;
 };
@@ -252,7 +142,8 @@ export function emptyInventory(): Inventory {
     tools: [],
     hotbar: Array<number | null>(HOTBAR).fill(null),
     slot: 0,
-    bounty: null,
+    mission: null,
+    payouts: [],
     bed: null,
   };
 }

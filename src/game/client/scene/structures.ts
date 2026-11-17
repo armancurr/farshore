@@ -9,7 +9,7 @@ import {
   toWorld,
 } from "../../shared/structures";
 import { Batch, compose } from "./batch";
-import { inkMaterial, lineMaterial, shared } from "./materials";
+import { inkMaterial, lineMaterial, PALETTE, shared } from "./materials";
 
 /*
  * Meshes for everything planStructures() put on the island. The blocks it
@@ -131,7 +131,8 @@ function createBeam() {
   return beam;
 }
 
-type Kit = Record<Tone, Batch> & { lines: Lines; faint: Lines };
+/* `accent` is the lighthouse's painted bands and trim. */
+type Kit = Record<Tone, Batch> & { accent: Batch; lines: Lines; faint: Lines };
 
 export class Structures {
   readonly group = new THREE.Group();
@@ -144,6 +145,7 @@ export class Structures {
       dark: new Batch(),
       mid: new Batch(),
       light: new Batch(),
+      accent: new Batch(),
       lines: new Lines(),
       faint: new Lines(),
     };
@@ -152,7 +154,8 @@ export class Structures {
       for (const b of s.blocks) {
         if (b.hidden) continue;
         const sides = b.shape === "cyl" ? (b.sides ?? 12) : 4;
-        kit[b.tone].add(
+        const batch = s.kind === "lighthouse" && b.tone === "dark" ? kit.accent : kit[b.tone];
+        batch.add(
           blockGeometry(b),
           compose(b.x, b.hole ? b.bottom : (b.bottom + b.top) / 2, b.z, b.rot),
           sides > 8 ? 35 : 20,
@@ -187,9 +190,13 @@ export class Structures {
     }
 
     this.group.add(
-      kit.dark.build(inkMaterial(0.05), lineMaterial(0.8)),
-      kit.mid.build(inkMaterial(0.15), lineMaterial(0.72)),
-      kit.light.build(inkMaterial(0.56, { side: THREE.DoubleSide }), lineMaterial(0.2)),
+      kit.dark.build(inkMaterial(0.05, { color: PALETTE.timber }), lineMaterial(0.8)),
+      kit.mid.build(inkMaterial(0.15, { color: PALETTE.plank }), lineMaterial(0.72)),
+      kit.light.build(
+        inkMaterial(0.56, { side: THREE.DoubleSide, color: PALETTE.whitewash }),
+        lineMaterial(0.2),
+      ),
+      kit.accent.build(inkMaterial(0.05, { color: PALETTE.accent }), lineMaterial(0.8)),
       kit.lines.build(lineMaterial(0.78)),
       kit.faint.build(lineMaterial(0.42)),
     );

@@ -9,7 +9,7 @@ import {
   createBike,
   stepBike,
 } from "../src/game/shared/bike.ts";
-import { stepBoat } from "../src/game/shared/boat.ts";
+import { ROW_SPEED, stepBoat } from "../src/game/shared/boat.ts";
 import { BOUNDARY } from "../src/game/shared/constants.ts";
 import { parseClientMsg } from "../src/game/shared/protocol.ts";
 import { Room } from "../src/game/server/room.ts";
@@ -362,7 +362,7 @@ test("rowboat still moves on water and rejects dry land", () => {
       1 / 60,
       ground(() => -10),
     );
-  assert(boat.z < -5 && boat.speed <= 5.4);
+  assert(boat.z < -5 && boat.speed <= ROW_SPEED);
   const dry = { x: 0, z: 0, rot: 0, speed: 2, turn: 0 };
   stepBoat(dry, throttle, 1 / 60, ground());
   assert.equal(dry.z, 0);

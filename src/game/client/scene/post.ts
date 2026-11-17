@@ -1,9 +1,9 @@
 import * as THREE from "three";
 
 /*
- * The last pass: everything to grey (but the build ghost), a fine ordered dither so gradients break
- * into texture, a vignette, and the moods — underwater murk, a white flash
- * when someone shoves you.
+ * The last pass: a soft vignette, the faintest grain so flat colour doesn't
+ * band, and the moods — underwater, a teal murk; a white flash when someone
+ * shoves you; the fade when you black out.
  */
 const FRAGMENT = /* glsl */ `
   uniform sampler2D tScene;
@@ -14,47 +14,32 @@ const FRAGMENT = /* glsl */ `
   uniform float uFade;
   varying vec2 vUv;
 
-  float bayer4(vec2 p) {
-    vec2 q = mod(floor(p), 4.0);
-    float i = q.x + q.y * 4.0;
-    float m[16];
-    m[0]=0.;m[1]=8.;m[2]=2.;m[3]=10.;m[4]=12.;m[5]=4.;m[6]=14.;m[7]=6.;
-    m[8]=3.;m[9]=11.;m[10]=1.;m[11]=9.;m[12]=15.;m[13]=7.;m[14]=13.;m[15]=5.;
-    for (int k = 0; k < 16; k++) if (float(k) == i) return m[k] / 16.0;
-    return 0.0;
-  }
-
   void main() {
     vec2 uv = vUv;
     if (uUnder > 0.0) {
       uv.x += sin(uv.y * 24.0 + uTime * 2.1) * 0.0035 * uUnder;
       uv.y += cos(uv.x * 19.0 + uTime * 1.7) * 0.0025 * uUnder;
     }
-    vec3 col = texture2D(tScene, uv).rgb;
-    float l = dot(col, vec3(0.299, 0.587, 0.114));
-    /* The world is grey; the only colour that ever reaches here is the build ghost's, kept as is. */
-    vec3 chroma = col - vec3(l);
+    /* The scene is drawn in linear light (three.js colours are); show it in sRGB. */
+    vec3 lin = max(texture2D(tScene, uv).rgb, vec3(0.0));
+    vec3 col = mix(lin * 12.92, 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, lin));
 
-    /* Underwater: lifted blacks, crushed highlights, a murky falloff. */
-    float murk = mix(l, 0.09 + l * 0.45, uUnder);
-    l = murk;
+    /* Underwater: everything sinks into a deep teal. */
+    float l = dot(col, vec3(0.299, 0.587, 0.114));
+    vec3 murk = vec3(0.07, 0.33, 0.34) + col * vec3(0.25, 0.45, 0.45) + l * 0.08;
+    col = mix(col, murk, uUnder);
 
     vec2 c = vUv - 0.5;
     c.x *= uResolution.x / uResolution.y;
     float r = length(c);
-    float vignette = 1.0 - smoothstep(0.45, 1.15, r) * 0.75;
+    col *= 1.0 - smoothstep(0.55, 1.25, r) * 0.45;
 
-    l *= vignette;
-
-    l += uFlash * 0.35 * (1.0 - r);
+    col += uFlash * 0.3 * (1.0 - r);
 
     float grain = fract(sin(dot(gl_FragCoord.xy + uTime * 61.0, vec2(12.9898, 78.233))) * 43758.5453);
-    l += (grain - 0.5) * 0.025;
+    col += (grain - 0.5) * 0.012;
 
-    float levels = 28.0;
-    l = floor(l * levels + bayer4(gl_FragCoord.xy)) / levels;
-    l *= uFade;
-    gl_FragColor = vec4(clamp(vec3(l) + chroma * uFade, 0.0, 1.0), 1.0);
+    gl_FragColor = vec4(clamp(col * uFade, 0.0, 1.0), 1.0);
   }
 `;
 

@@ -31,7 +31,7 @@ export class TideRoom extends DurableObject<Env> {
       const world = parseWorldSave(await ctx.storage.get("world"));
       this.room = new Room({
         online: true,
-        settle: true,
+        grand: true,
         world,
         onChange: () => {
           this.saving ??= setTimeout(() => {

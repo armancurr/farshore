@@ -1,12 +1,11 @@
 import * as THREE from "three";
 import { SEA_LEVEL } from "../../shared/constants";
-import { hash3, mulberry32, range } from "../../shared/math";
+import { hash3, mulberry32 } from "../../shared/math";
 import type { Prop, Terrain } from "../../shared/terrain";
 import { Batch, compose } from "./batch";
 import { inkMaterial, lineMaterial } from "./materials";
+import { Nature } from "./nature";
 import { Structures } from "./structures";
-
-const UP = new THREE.Vector3(0, 1, 0);
 
 /* Unit rock: an icosahedron with every shared corner nudged the same way, top shaved flat. */
 function rockGeometry(seed: number, detail = 1, flatTop = 0.72) {
@@ -23,54 +22,6 @@ function rockGeometry(seed: number, detail = 1, flatTop = 0.72) {
     pos.setXYZ(k, x * j, Math.min(y * j, flatTop), z * j);
   }
   return geo;
-}
-
-function segment(
-  batch: Batch,
-  from: THREE.Vector3,
-  to: THREE.Vector3,
-  r0: number,
-  r1: number,
-  sides = 5,
-) {
-  const dir = to.clone().sub(from);
-  const len = dir.length();
-  const geo = new THREE.CylinderGeometry(r1, r0, len, sides, 1);
-  geo.translate(0, len / 2, 0);
-  const q = new THREE.Quaternion().setFromUnitVectors(UP, dir.normalize());
-  batch.add(geo, new THREE.Matrix4().compose(from, q, new THREE.Vector3(1, 1, 1)), 40);
-}
-
-/* A dead, wind-bent tree: a leaning trunk that forks two or three times. */
-function addTree(batch: Batch, p: Prop) {
-  const rng = mulberry32(p.variant);
-  const s = p.scale;
-  const lean = new THREE.Vector3(range(rng, -0.25, 0.25), 1, range(rng, -0.25, 0.25)).normalize();
-  const base = new THREE.Vector3(p.x, p.y, p.z);
-  const trunkTop = base.clone().addScaledVector(lean, 3.4 * s);
-  segment(batch, base, trunkTop, 0.3 * s, 0.17 * s, 6);
-
-  const grow = (from: THREE.Vector3, dir: THREE.Vector3, len: number, r: number, depth: number) => {
-    const to = from.clone().addScaledVector(dir, len);
-    segment(batch, from, to, r, r * 0.6, depth > 1 ? 5 : 4);
-    if (depth >= 3) return;
-    const kids = depth === 0 ? 3 : 2;
-    for (let k = 0; k < kids; k++) {
-      const a = rng() * Math.PI * 2;
-      const spread = range(rng, 0.45, 0.9);
-      const next = dir
-        .clone()
-        .add(new THREE.Vector3(Math.cos(a) * spread, range(rng, 0.05, 0.35), Math.sin(a) * spread))
-        .normalize();
-      grow(to, next, len * range(rng, 0.55, 0.75), r * 0.6, depth + 1);
-    }
-  };
-  const forks = 2 + Math.floor(rng() * 2);
-  for (let f = 0; f < forks; f++) {
-    const a = (f / forks) * Math.PI * 2 + rng();
-    const dir = new THREE.Vector3(Math.cos(a) * 0.55, 1, Math.sin(a) * 0.55).normalize();
-    grow(trunkTop, dir, range(rng, 1.4, 2.2) * s, 0.15 * s, 1);
-  }
 }
 
 /* A classical column: plinth, fluted shaft, capital — or a broken stump. */
@@ -114,15 +65,6 @@ function addColumn(batch: Batch, p: Prop) {
   }
 }
 
-function addRock(batch: Batch, p: Prop) {
-  const geo = rockGeometry(p.variant, p.scale > 2 ? 2 : 1);
-  batch.add(
-    geo,
-    compose(p.x, p.y + p.height * 0.42, p.z, p.rot, p.scale * 0.95, p.height * 0.6, p.scale),
-    22,
-  );
-}
-
 /* A cairn: a few flat stones stacked by whoever was here before. */
 function addCairn(batch: Batch, p: Prop) {
   let y = 0;
@@ -159,16 +101,17 @@ function buildBuoy(fill: THREE.Material, line: THREE.Material) {
 export class WorldProps {
   readonly group = new THREE.Group();
   private structures: Structures;
+  private nature: Nature;
   private buoys: { group: THREE.Group; phase: number; lamp: THREE.Object3D }[] = [];
   private disposables: { dispose(): void }[] = [];
 
   constructor(terrain: Terrain) {
+    /* Trees, rocks, bushes, grass and flowers: models from the nature pack. */
+    this.nature = new Nature(terrain);
+    this.group.add(this.nature.group);
+
     const statics = new Batch();
-    for (const p of terrain.props) {
-      if (p.kind === "rock") addRock(statics, p);
-      else if (p.kind === "tree") addTree(statics, p);
-      else if (p.kind === "column") addColumn(statics, p);
-    }
+    for (const p of terrain.props) if (p.kind === "column") addColumn(statics, p);
     this.group.add(statics.build(inkMaterial(0.055), lineMaterial(0.78)));
     const cairns = new Batch();
     for (const p of terrain.props) if (p.kind === "cairn") addCairn(cairns, p);
@@ -190,8 +133,9 @@ export class WorldProps {
     this.disposables.push(buoyFill, buoyLine);
   }
 
-  update(time: number) {
+  update(time: number, eye?: THREE.Vector3) {
     this.structures.update(time);
+    if (eye) this.nature.update(eye);
     for (const b of this.buoys) {
       b.group.position.y = SEA_LEVEL - 0.25 + Math.sin(time * 1.3 + b.phase) * 0.18;
       b.group.rotation.z = Math.sin(time * 0.9 + b.phase) * 0.08;
@@ -201,6 +145,8 @@ export class WorldProps {
   }
 
   dispose() {
+    this.nature.dispose();
+    this.group.remove(this.nature.group);
     this.group.traverse((o) => {
       const m = o as THREE.Mesh;
       m.geometry?.dispose();

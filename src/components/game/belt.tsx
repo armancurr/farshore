@@ -5,7 +5,6 @@ import {
   BedIcon,
   BoatIcon,
   CampfireIcon,
-  FishSimpleIcon,
   HammerIcon,
   HandFistIcon,
   HeartIcon,
@@ -28,8 +27,6 @@ import type { HudState } from "../../game/client/game";
 import type { KitId, ToolKind } from "../../game/shared/items";
 
 const TOOL_ICONS: Record<ToolKind, Icon> = {
-  rod: FishSimpleIcon,
-  rod2: FishSimpleIcon,
   daggers: KnifeIcon,
   sickle: MoonIcon,
   machete: KnifeIcon,
@@ -58,7 +55,7 @@ const KIT_ICONS: Record<KitId, Icon> = {
 /* The little number in a slot's corner; it darkens on the bright selected slot. */
 function SlotKey(props: { n: number }) {
   return (
-    <span className="absolute top-0.5 left-1 font-key text-[9px] leading-none text-[#5c5c5c] group-data-[selected=true]/button:text-black/45">
+    <span className="absolute top-0.5 left-1 font-key text-[9px] leading-none text-white/80 group-data-[selected=true]/button:text-black/45">
       {props.n}
     </span>
   );
@@ -174,7 +171,7 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
         </div>
       </div>
       {build && !touch && (
-        <div className="font-sans text-[11px] text-white/45">
+        <div className="font-sans text-[11px] text-white/80">
           1–{build.kits.length} or wheel to choose · R to turn · B when done
         </div>
       )}
