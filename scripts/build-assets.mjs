@@ -197,7 +197,11 @@ const fresh = (pack) => {
     "forest",
     (n) => n.endsWith("_Color1") && !n.includes("Singlesided"),
   );
-  for (const [name, leaf] of [["palette", "foliage"], ["palette-teal", "teal"], ["palette-peach", "peach"]])
+  for (const [name, leaf] of [
+    ["palette", "foliage"],
+    ["palette-teal", "teal"],
+    ["palette-peach", "peach"],
+  ])
     await palette(join(dir, "Textures/forest_texture.png"), join(OUT, `forest/${name}.png`), {
       resize: [32, 256],
       bark: true,
