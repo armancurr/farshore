@@ -493,7 +493,8 @@ type Shown = {
 };
 
 /* Cars with nothing round the driver: their wheels are part of the view. */
-const OPEN = new Set<VehicleKind>(["racer", "prototype", "tractor", "loader"]);
+/* Open cockpits (the racers and tractors, all put away for now): "racer", "prototype", "tractor", "loader". */
+const OPEN = new Set<VehicleKind>([]);
 
 /* Past this, a vehicle isn't drawn (the fog has it anyway). */
 const DRAW_RANGE = 700;

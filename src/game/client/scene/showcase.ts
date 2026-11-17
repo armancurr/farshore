@@ -463,6 +463,8 @@ export async function vehiclePortraitsOf(
   const missing = kinds.filter((k) => !vehiclePortraits.has(k));
   if (missing.length) {
     const shown = await Promise.all(missing.map((k) => displayVehicle(k).catch(() => null)));
+    /* The pack palettes load on their own: drawn before they arrive, a boat is a black silhouette. */
+    await texturesLoaded(shown.filter((r): r is THREE.Group => r !== null));
     const canvas = document.createElement("canvas");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(1);
