@@ -71,10 +71,20 @@ export const HARBOR: IslandInfo = {
   harbor: true,
 };
 
-/* The hunting islands: a ring round the Harbor, a good row apart. */
+/*
+ * The hunting islands: a ring round the Harbor, close enough to hop between
+ * (about 500 to 700 m of open water from coast to coast). Their tiles' sea
+ * corners overlap a little; see Archipelago for who owns the water there.
+ */
 const WILD_SIZE = 1400;
 const WILD_CELL = 4.375;
-const RING = 1800;
+const RING = 1220;
+/*
+ * Metres a side of the grid that settles who owns overlapping sea (see
+ * bakeOwnership). Tile centres sit on it and every tile's half-size is a
+ * whole number of cells, so no cell straddles a tile's edge.
+ */
+export const OWN_CELL = 4;
 const wild = (
   id: number,
   name: string,
@@ -89,8 +99,9 @@ const wild = (
     id,
     shape,
     seed,
-    x: Math.round(Math.sin(a) * RING),
-    z: Math.round(-Math.cos(a) * RING),
+    /* On whole OWN_CELLs, so every tile's edges fall on the same world grid. */
+    x: Math.round((Math.sin(a) * RING) / OWN_CELL) * OWN_CELL,
+    z: Math.round((-Math.cos(a) * RING) / OWN_CELL) * OWN_CELL,
     size: WILD_SIZE,
     cell: WILD_CELL,
     lift,
@@ -593,11 +604,5 @@ function terraced(
 }
 
 /* ---------- the grand map ---------- */
-
-/* Do two islands' tiles overlap? Tiles may touch, but not share sea. */
-export function tilesOverlap(a: IslandInfo, b: IslandInfo) {
-  const reach = (a.size + b.size) / 2 - 0.01;
-  return Math.abs(a.x - b.x) < reach && Math.abs(a.z - b.z) < reach;
-}
 
 export const islandById = (id: number) => WORLD.find((o) => o.id === id) ?? null;

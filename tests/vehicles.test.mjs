@@ -804,3 +804,26 @@ test("sat in a car under the sea you drown, a few seconds after it goes under", 
   assert(hurts() >= 1, "then the water gets in");
   room.leave(a.id);
 });
+
+/* ---------- the grand map ---------- */
+
+test("where island tiles overlap, the higher seabed owns the point and the floor never steps", async () => {
+  const { Archipelago } = await import("../src/game/shared/archipelago.ts");
+  const { WORLD } = await import("../src/game/shared/islands.ts");
+  const world = new Archipelago(WORLD);
+  const tiles = [...world.islands.values()].map((o) => o.terrain);
+  let shared = 0;
+  for (let x = -2000; x <= 2000; x += 8) {
+    for (let z = -2000; z <= 2000; z += 8) {
+      const under = tiles.filter((t) => t.contains(x, z));
+      if (under.length < 2) continue;
+      shared++;
+      const top = Math.max(...under.map((t) => t.heightAt(x, z)));
+      assert.equal(world.heightAt(x, z), top);
+      assert(under.includes(world.at(x, z)));
+    }
+  }
+  assert(shared > 0, "the islands are close enough that some sea is shared");
+  /* And every island still stands where it was put. */
+  for (const o of WORLD) assert(world.heightAt(o.x, o.z) > 0, `${o.name} still stands`);
+});

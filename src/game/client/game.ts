@@ -105,7 +105,7 @@ import { Avatar } from "./scene/avatars";
 import { preloadCharacters } from "./scene/characters";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
-import { createLand, OpenSea } from "./scene/land";
+import { createLand, OpenSea, setOwnership } from "./scene/land";
 import { PALETTE, shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
@@ -307,6 +307,9 @@ function disposeTree(root: THREE.Object3D) {
     else mat?.dispose();
   });
 }
+
+/* A render layer used only by Game.warmUp, for drawing just the meshes it's warming. */
+const WARM_LAYER = 30;
 
 export class Game {
   readonly input: Input;
@@ -817,6 +820,12 @@ export class Game {
     });
     world.seed ??= info.seed;
     world.sea.setTiles(world.ground.list());
+    /* A new neighbour may share sea with the islands already up: settle who draws it. */
+    for (const o of world.islands.values()) {
+      const mesh = o.group.getObjectByName("terrain");
+      const land = world.ground.islands.get(o.info.id);
+      if (mesh && land) setOwnership(mesh, land.terrain, world.ground);
+    }
   }
 
   /* Is the world we have drawn the same set of islands as this one, or a start on it? */
@@ -1395,6 +1404,72 @@ export class Game {
     return Math.hypot(this.camera.position.x - x, this.camera.position.z - z);
   }
 
+  /*
+   * Hand the GPU everything new in the scene before it's needed. three.js
+   * uploads a mesh's buffers and compiles its shader the first time the mesh
+   * is drawn, so the trees, rocks and full-detail ground of every island
+   * would otherwise arrive one stall at a time, whenever they first came into
+   * view (at a speedboat's pace, on every turn). Once a second, any mesh not
+   * yet seen is drawn once, alone on WARM_LAYER with the lights, forced on,
+   * unculled and at both its levels of detail, into the scene target; the
+   * real frame then draws over it.
+   */
+  private warmSeen = new WeakSet<THREE.Object3D>();
+  private warmAt = 0;
+
+  private warmUp() {
+    const fresh: THREE.Object3D[] = [];
+    const lights: THREE.Object3D[] = [];
+    this.scene.traverse((o) => {
+      if ((o as THREE.Light).isLight) lights.push(o);
+      if (this.warmSeen.has(o)) return;
+      this.warmSeen.add(o);
+      if ((o as THREE.Mesh).geometry) fresh.push(o);
+    });
+    if (!fresh.length) return;
+    const shown = new Map<THREE.Object3D, boolean>();
+    const culled = new Map<THREE.Object3D, boolean>();
+    const lods: { mesh: THREE.Mesh; geometry: THREE.BufferGeometry; far: THREE.BufferGeometry }[] =
+      [];
+    for (const o of [...fresh, ...lights]) o.layers.enable(WARM_LAYER);
+    for (const o of fresh) {
+      culled.set(o, o.frustumCulled);
+      o.frustumCulled = false;
+      for (let p: THREE.Object3D | null = o; p && p !== this.scene; p = p.parent) {
+        if (shown.has(p)) break;
+        shown.set(p, p.visible);
+        p.visible = true;
+      }
+      const lod = o.userData.lod as
+        | { near: THREE.BufferGeometry; far: THREE.BufferGeometry }
+        | undefined;
+      const mesh = o as THREE.Mesh;
+      if (lod) {
+        lods.push({ mesh, geometry: mesh.geometry, far: lod.far });
+        mesh.geometry = lod.near;
+      }
+    }
+    const r = this.renderer;
+    const mask = this.camera.layers.mask;
+    this.camera.layers.set(WARM_LAYER);
+    r.setRenderTarget(this.post.target);
+    r.render(this.scene, this.camera);
+    if (lods.length) {
+      for (const o of fresh) o.layers.disable(WARM_LAYER);
+      for (const l of lods) {
+        l.mesh.geometry = l.far;
+        l.mesh.layers.enable(WARM_LAYER);
+      }
+      r.render(this.scene, this.camera);
+    }
+    r.setRenderTarget(null);
+    this.camera.layers.mask = mask;
+    for (const o of [...fresh, ...lights]) o.layers.disable(WARM_LAYER);
+    for (const l of lods) l.mesh.geometry = l.geometry;
+    for (const [o, v] of shown) o.visible = v;
+    for (const [o, c] of culled) o.frustumCulled = c;
+  }
+
   /* ---------- frame ---------- */
 
   private frame = (now: number) => {
@@ -1474,6 +1549,10 @@ export class Game {
     this.sky.follow(this.camera);
     this.clouds.update(this.worldTime(), this.camera.position);
     this.camera.updateMatrixWorld();
+    if (t - this.warmAt > 1) {
+      this.warmAt = t;
+      this.warmUp();
+    }
     this.shadows.render(this.renderer, this.scene, this.camera.position);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;

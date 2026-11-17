@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { CONTOUR, GRAND_SIZE, MAX_ISLANDS } from "../../shared/constants";
+import type { Archipelago } from "../../shared/archipelago";
+import { OWN_CELL } from "../../shared/islands";
 import type { Terrain } from "../../shared/terrain";
 import { GLSL_COMMON, PALETTE, shared } from "./materials";
 import { pathDistance } from "../../shared/paths";
@@ -42,6 +44,12 @@ const GLSL_FIELD = /* glsl */ `
   uniform float uHalf;
   uniform float uCell;
   uniform int uGrid;
+  /* Where this tile's sea overlaps another's: 1 where this one owns it (see bakeOwnership). */
+  uniform sampler2D uOwn;
+
+  bool owned(vec2 xz) {
+    return texture2D(uOwn, clamp((xz - uOrigin + uHalf) / (2.0 * uHalf), 0.0, 1.0)).r > 0.5;
+  }
 
   void bspline(float t, out vec4 w, out vec4 d) {
     float t2 = t * t;
@@ -188,6 +196,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
   }
 
   void main() {
+    if (!owned(vWorld.xz)) discard;
     vec3 hf = field(vWorld.xz);
     float h = hf.x;
     float slope = length(hf.yz);
@@ -320,6 +329,7 @@ const WATER_FRAGMENT = /* glsl */ `
 
   void main() {
     vec2 xz = vWorld.xz;
+    if (!owned(xz)) discard;
     vec2 local = xz - uOrigin;
     float edge = max(abs(local.x), abs(local.y));
     float inside = step(edge, uHalf);
@@ -489,6 +499,59 @@ function heightTexture(terrain: Terrain) {
   return tex;
 }
 
+/* A tile that shares its sea with nobody owns all of it. */
+const OWN_ALL = (() => {
+  const tex = new THREE.DataTexture(new Uint8Array([255]), 1, 1, THREE.RedFormat);
+  tex.needsUpdate = true;
+  return tex;
+})();
+
+/*
+ * Where tiles overlap (out in the sea between close islands), only the owner
+ * draws its ground and water, so the seabed doesn't flicker and the sea isn't
+ * laid on twice. Ownership is the ground's own (Archipelago.at), taken once
+ * per OWN_CELL square at its centre. The squares are the same world grid for
+ * every tile, so neighbours always agree on whose each one is. Null if this
+ * tile shares no sea with anyone.
+ */
+function bakeOwnership(terrain: Terrain, ground: Archipelago): THREE.DataTexture | null {
+  const others = [...ground.islands.values()]
+    .map((o) => o.terrain)
+    .filter(
+      (t) =>
+        t !== terrain &&
+        Math.abs(t.ox - terrain.ox) < t.half + terrain.half &&
+        Math.abs(t.oz - terrain.oz) < t.half + terrain.half,
+    );
+  if (!others.length) return null;
+  const n = Math.round(terrain.size / OWN_CELL);
+  const data = new Uint8Array(n * n).fill(255);
+  const x0 = terrain.ox - terrain.half;
+  const z0 = terrain.oz - terrain.half;
+  for (let i = 0; i < n; i++) {
+    const z = z0 + (i + 0.5) * OWN_CELL;
+    for (let j = 0; j < n; j++) {
+      const x = x0 + (j + 0.5) * OWN_CELL;
+      if (!others.some((t) => t.contains(x, z))) continue;
+      if (ground.at(x, z) !== terrain) data[i * n + j] = 0;
+    }
+  }
+  const tex = new THREE.DataTexture(data, n, n, THREE.RedFormat);
+  tex.unpackAlignment = 1;
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/* Settle who draws the shared sea, for an island's ground (from createLand), now its neighbours are known. */
+export function setOwnership(groundMesh: THREE.Object3D, terrain: Terrain, ground: Archipelago) {
+  const own = groundMesh.userData.own as { value: THREE.Texture } | undefined;
+  if (!own) return;
+  if (own.value !== OWN_ALL) own.value.dispose();
+  own.value = bakeOwnership(terrain, ground) ?? OWN_ALL;
+}
+
 /*
  * One island: its ground and the sea over its tile, sharing one height
  * texture, both placed at the island's spot on the grand map.
@@ -504,6 +567,7 @@ export function createLand(terrain: Terrain) {
     uHalf: { value: terrain.half },
     uCell: { value: terrain.cell },
     uGrid: { value: terrain.grid },
+    uOwn: { value: OWN_ALL as THREE.Texture },
   };
 
   /* The ground at full detail, and a quarter of it for when the island is far off. */
@@ -539,6 +603,8 @@ export function createLand(terrain: Terrain) {
   /* The shadows come from what stands on the ground; the ground's own relief is shaded by the sun. */
   ground.userData.noCast = true;
   ground.userData.lod = { near: geo, far };
+  /* Set by setOwnership once the neighbours are raised. */
+  ground.userData.own = field.uOwn;
   ground.position.set(terrain.ox, 0, terrain.oz);
 
   /* A touch wider than the tile, so it overlaps the open sea rather than leaving a crack. */
@@ -571,6 +637,7 @@ export function createLand(terrain: Terrain) {
     flora.dispose();
     zones.dispose();
     far.dispose();
+    if (field.uOwn.value !== OWN_ALL) field.uOwn.value.dispose();
   });
 
   return [ground, sea] as const;

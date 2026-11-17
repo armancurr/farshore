@@ -12,7 +12,11 @@ const NONE: readonly Solid[] = [];
 /*
  * The grand map: open sea with the islands in it. Any question about
  * the ground goes to the island whose tile holds the point; anywhere else is
- * deep water. Tiles never overlap, so there's only ever one to ask.
+ * deep water. The islands sit close enough that the corners of their tiles
+ * overlap, out in the sea between them: there the tile whose seabed stands
+ * higher owns the point (the first raised, on a tie), so the floor is the
+ * higher of the two and never steps. The client draws each tile's ground and
+ * water only where it owns them (see bakeOwnership).
  */
 export class Archipelago implements Ground {
   readonly islands = new Map<number, Island>();
@@ -21,7 +25,6 @@ export class Archipelago implements Ground {
   private dynamic = new Map<number, readonly Solid[]>();
   /* The same, all together: what's out on the open sea between the tiles. */
   private loose: Solid[] = [];
-  private last: Terrain | null = null;
 
   constructor(islands: readonly IslandInfo[] = []) {
     for (const info of islands) this.add(info);
@@ -48,17 +51,25 @@ export class Archipelago implements Ground {
     return this.islands.values().next().value?.terrain ?? null;
   }
 
-  /* The island under (x, z), if any. */
+  /* The island that owns (x, z), if any. */
   at(x: number, z: number): Terrain | null {
-    const last = this.last;
-    if (last?.contains(x, z)) return last;
+    let best: Terrain | null = null;
+    let top = Number.NEGATIVE_INFINITY;
     for (const { terrain } of this.islands.values()) {
-      if (terrain.contains(x, z)) {
-        this.last = terrain;
-        return terrain;
+      if (!terrain.contains(x, z)) continue;
+      if (!best) {
+        best = terrain;
+        continue;
+      }
+      /* Only where tiles overlap does it come to comparing heights. */
+      if (top === Number.NEGATIVE_INFINITY) top = best.heightAt(x, z);
+      const h = terrain.heightAt(x, z);
+      if (h > top) {
+        best = terrain;
+        top = h;
       }
     }
-    return null;
+    return best;
   }
 
   /* The highest peak anywhere, for clamping how high a body can be. */
