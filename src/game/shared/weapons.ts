@@ -300,3 +300,26 @@ export function weaponIndex(kind: WeaponKind | null) {
 export function weaponFromIndex(i: number): WeaponKind | null {
   return i > 0 ? (WEAPON_KINDS[i - 1] ?? null) : null;
 }
+
+/*
+ * How a weapon is held, which picks the character's animations: one hand,
+ * two hands, a pair, a long shaft, or a shield on the arm.
+ */
+export type Grip = "unarmed" | "1h" | "2h" | "dual" | "polearm" | "shield";
+
+const GRIPS: Record<WeaponKind, Grip> = {
+  daggers: "dual",
+  sickle: "1h",
+  machete: "1h",
+  boardaxe: "1h",
+  spear: "polearm",
+  trident: "polearm",
+  mace: "1h",
+  halberd: "polearm",
+  axe: "2h",
+  greatsword: "2h",
+  hammer: "2h",
+  shield: "shield",
+};
+
+export const gripOf = (kind: WeaponKind | null): Grip => (kind ? GRIPS[kind] : "unarmed");
