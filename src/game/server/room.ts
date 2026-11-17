@@ -80,6 +80,7 @@ import {
 } from "../shared/save";
 import { SHOP_REACH, shopEntry } from "../shared/shop";
 import { canWear, DEFAULT_SKIN, type SkinId } from "../shared/skins";
+import { VEHICLES, type VehicleKind } from "../shared/vehicles";
 import { blockSolid, overSolid, type Terrain } from "../shared/terrain";
 import {
   BLEED_TIME,
@@ -133,6 +134,8 @@ type Member = {
   line: Line | null;
   /* The rowboat you're in. */
   boat: number | null;
+  /* The vehicle you last spawned from the marketplace. */
+  vehicle: number | null;
   /* Something in the inventory changed; send it at the end of the step. */
   invDirty: boolean;
   stagger: number;
@@ -195,6 +198,8 @@ const PROBES = [
 
 /* Seconds after you last hit or were hit before you can fast travel. */
 const TRAVEL_CALM = 5;
+/* How far from you a vehicle from the marketplace may be launched, in metres. */
+const LAUNCH_RANGE = 32;
 
 /*
  * The world. Transport-agnostic: the Cloudflare Durable Object and the Vite dev
@@ -228,6 +233,8 @@ export class Room {
   private posted = new Map<number, number>();
   private prefabs = new Map<number, Prefab>();
   private boatSpeed = new Map<number, number>();
+  /* Prefabs that came from the marketplace rather than out of someone's pack. */
+  private spawned = new Set<number>();
   private prefabId = 1;
   private bountyId = 1;
   private prey: Prey[] = [];
@@ -457,6 +464,7 @@ export class Room {
       inv: emptyInventory(),
       line: null,
       boat: null,
+      vehicle: null,
       invDirty: true,
       stagger: 0,
       lastHitAt: 0,
@@ -503,6 +511,7 @@ export class Room {
       this.opts.onChange?.();
     }
     m.boat = null;
+    this.despawn(m);
     this.members.delete(id);
     if (!m.spectator) {
       this.broadcastRoster();
@@ -721,6 +730,9 @@ export class Room {
         return;
       case "place":
         this.place(m, msg.kind, msg.x, msg.z, msg.rot);
+        return;
+      case "spawn":
+        this.spawnVehicle(m, msg.kind);
         return;
       case "pickup":
         this.pickupPrefab(m, msg.id);
@@ -969,7 +981,10 @@ export class Room {
     if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
     this.prefabs.delete(id);
     this.world.removeSolids(id);
-    this.addItem(m, p.kind, 1);
+    /* A vehicle from the marketplace just goes: there's always another to spawn. */
+    if (this.spawned.delete(id)) {
+      for (const o of this.members.values()) if (o.vehicle === id) o.vehicle = null;
+    } else this.addItem(m, p.kind, 1);
     for (const [item, n] of Object.entries(p.store ?? {}) as [ItemId, number][])
       this.addItem(m, item, n);
     for (const o of this.members.values()) {
@@ -990,6 +1005,79 @@ export class Room {
     }
     if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > 4) return;
     if (p.kind === "bed") this.sleep(m, p);
+  }
+
+  /* ---------- vehicles ---------- */
+
+  /* A vehicle from the marketplace, afloat near you. The one you spawned before goes. */
+  private spawnVehicle(m: Member, kind: VehicleKind) {
+    if (m.boat !== null) {
+      m.peer.send({ t: "feed", text: "You're already afloat" });
+      return;
+    }
+    const at = this.launchSpot(m, kind);
+    if (!at) {
+      m.peer.send({ t: "feed", text: "Head down to the water to launch it" });
+      return;
+    }
+    this.despawn(m);
+    if (this.prefabs.size >= MAX_PREFABS) {
+      m.peer.send({ t: "feed", text: "The island can't hold any more" });
+      return;
+    }
+    const p: Prefab = {
+      id: this.prefabId++,
+      kind,
+      x: round2(at.x),
+      y: round2(at.y),
+      z: round2(at.z),
+      rot: round2(at.rot),
+    };
+    this.build(p);
+    this.spawned.add(p.id);
+    m.vehicle = p.id;
+    this.broadcast({ t: "prefab", prefab: p });
+    m.peer.send({ t: "feed", text: `Your ${VEHICLES[kind].name.toLowerCase()} is in the water` });
+  }
+
+  /*
+   * The nearest open water around you, looking ahead first: deep enough to
+   * float in and clear of other boats, bow pointing away from you.
+   */
+  private launchSpot(m: Member, kind: VehicleKind) {
+    const { x: px, z: pz, yaw } = m.body;
+    for (let r = 3; r <= LAUNCH_RANGE; r += 1.5) {
+      for (let i = 0; i < 16; i++) {
+        /* 0, then alternately either side of straight ahead. */
+        const a = yaw + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * (Math.PI / 8);
+        const x = px - Math.sin(a) * r;
+        const z = pz - Math.cos(a) * r;
+        if (Math.abs(x) > BOUNDARY - 4 || Math.abs(z) > BOUNDARY - 4) continue;
+        let crowded = false;
+        for (const p of this.prefabs.values()) {
+          /* Your own last one makes way, unless someone has rowed off in it. */
+          const going = p.id === m.vehicle && !this.aboard(p.id);
+          if (p.kind === "rowboat" && !going && Math.hypot(p.x - x, p.z - z) < 4.5) crowded = true;
+        }
+        if (crowded) continue;
+        /* Placement measures reach from the body; here the reach is ours to judge. */
+        const v = checkPlacement(this.world, kind, x, z, a, { ...m.body, x, z });
+        if (v.ok) return { x, y: v.y, z, rot: a };
+      }
+    }
+    return null;
+  }
+
+  /* Take back the vehicle you spawned, unless someone is sitting in it. */
+  private despawn(m: Member) {
+    const id = m.vehicle;
+    m.vehicle = null;
+    if (id === null || !this.prefabs.has(id) || this.aboard(id)) return;
+    this.prefabs.delete(id);
+    this.spawned.delete(id);
+    this.boatSpeed.delete(id);
+    this.world.removeSolids(id);
+    this.broadcast({ t: "unprefab", id });
   }
 
   /* ---------- boats ---------- */

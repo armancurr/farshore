@@ -44,6 +44,7 @@ import {
 } from "../shared/prefabs";
 import { SHOP, SHOP_REACH } from "../shared/shop";
 import { canWear, type SkinId } from "../shared/skins";
+import type { VehicleKind } from "../shared/vehicles";
 import { Archipelago } from "../shared/archipelago";
 import { type IslandInfo, type ShapeId } from "../shared/islands";
 import { blockSolid } from "../shared/terrain";
@@ -544,6 +545,16 @@ export class Game {
   arm(kind: WeaponKind | null) {
     keepWeapon(kind);
     if (this.conn?.kind === "online") this.conn.send({ t: "arm", kind });
+  }
+
+  /* Whether a vehicle can be spawned now: only once you're out in the world. */
+  get canSpawn(): boolean {
+    return !!this.body && this.conn?.kind === "online";
+  }
+
+  /* Put a vehicle from the marketplace in the water nearby, in place of the last one. */
+  spawnVehicle(kind: VehicleKind) {
+    if (this.canSpawn) this.conn?.send({ t: "spawn", kind });
   }
 
   /* Ask for your island at (x, z) on the grand map. */
