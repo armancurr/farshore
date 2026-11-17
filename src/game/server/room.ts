@@ -37,11 +37,22 @@ import {
   type Payout,
   progress,
 } from "../shared/missions";
+import {
+  BIKE_SEAT,
+  bikeExit,
+  bikeGround,
+  bikeSolid,
+  createBike,
+  stepBike,
+  type BikeIntent,
+  type BikeState,
+} from "../shared/bike";
 import { type Body, createBody } from "../shared/physics";
 import {
   type ClientMsg,
   FLAG,
   type BoatSnap,
+  type BikeSnap,
   type HurtCause,
   type PlayerSnap,
   round2,
@@ -235,6 +246,8 @@ export class Room {
   private boardDirty = false;
   private prefabs = new Map<number, Prefab>();
   private boatSpeed = new Map<number, number>();
+  private bikes = new Map<number, BikeState>();
+  private bikeInputs = new Map<number, { input: BikeIntent; at: number }>();
   /* Prefabs that came from the marketplace rather than out of someone's pack. */
   private spawned = new Set<number>();
   private prefabId = 1;
@@ -568,6 +581,15 @@ export class Room {
   private apply(m: Member, msg: ClientMsg) {
     switch (msg.t) {
       case "move": {
+        // A rider sends controls, never an authoritative vehicle transform.
+        if (m.boat !== null && this.bikes.has(m.boat)) {
+          this.bikeInputs.set(m.boat, {
+            input: msg.drive ?? { forward: 0, right: 0, brake: true },
+            at: this.now(),
+          });
+          m.pitch = msg.pitch;
+          return;
+        }
         this.landing(m, msg.vy, msg.flags);
         if (m.boat !== null) this.row(m, msg.x, msg.z, msg.boat);
         m.body.yaw = msg.yaw;
@@ -755,6 +777,13 @@ export class Room {
 
   private build(p: Prefab) {
     this.prefabs.set(p.id, p);
+    if (p.kind === "desertbike") {
+      const bike = createBike(p.x, p.y, p.z, p.rot);
+      const ground = bikeGround(this.world, p.x, p.z, p.rot);
+      if (ground) Object.assign(bike, ground);
+      this.bikes.set(p.id, bike);
+      this.world.addSolids(p.id, [bikeSolid(bike)]);
+    }
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
       .map(blockSolid);
@@ -789,6 +818,8 @@ export class Room {
     const p = this.prefabs.get(id);
     if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
     this.prefabs.delete(id);
+    this.bikes.delete(id);
+    this.bikeInputs.delete(id);
     this.world.removeSolids(id);
     /* A vehicle from the marketplace just goes: there's always another to spawn. */
     if (this.spawned.delete(id)) {
@@ -808,6 +839,10 @@ export class Room {
   private usePrefab(m: Member, id: number) {
     const p = this.prefabs.get(id);
     if (!p) return;
+    if (p.kind === "desertbike") {
+      this.bikeInteract(m, p);
+      return;
+    }
     if (p.kind === "rowboat") {
       this.boatInteract(m, p);
       return;
@@ -821,12 +856,18 @@ export class Room {
   /* A vehicle from the marketplace, afloat near you. The one you spawned before goes. */
   private spawnVehicle(m: Member, kind: VehicleKind) {
     if (m.boat !== null) {
-      m.peer.send({ t: "feed", text: "You're already afloat" });
+      m.peer.send({ t: "feed", text: "Get off your vehicle before spawning another" });
       return;
     }
     const at = this.launchSpot(m, kind);
     if (!at) {
-      m.peer.send({ t: "feed", text: "Head down to the water to launch it" });
+      m.peer.send({
+        t: "feed",
+        text:
+          kind === "desertbike"
+            ? "Find clear, dry, fairly level ground for the bike"
+            : "Head down to the water to launch it",
+      });
       return;
     }
     this.despawn(m);
@@ -846,7 +887,13 @@ export class Room {
     this.spawned.add(p.id);
     m.vehicle = p.id;
     this.broadcast({ t: "prefab", prefab: p });
-    m.peer.send({ t: "feed", text: `Your ${VEHICLES[kind].name.toLowerCase()} is in the water` });
+    m.peer.send({
+      t: "feed",
+      text:
+        kind === "desertbike"
+          ? "Your desert bike is ready · approach and press E to ride"
+          : `Your ${VEHICLES[kind].name.toLowerCase()} is in the water`,
+    });
   }
 
   /*
@@ -874,10 +921,20 @@ export class Room {
           for (const p of this.prefabs.values()) {
             /* Your own last one makes way, unless someone has rowed off in it. */
             const going = p.id === m.vehicle && !this.aboard(p.id);
-            if (p.kind === "rowboat" && !going && Math.hypot(p.x - x, p.z - z) < 4.5)
+            if (
+              (p.kind === "rowboat" || p.kind === "desertbike") &&
+              !going &&
+              Math.hypot(p.x - x, p.z - z) < 4.5
+            )
               crowded = true;
           }
           if (crowded) continue;
+          /* A bike wants clear, dry ground rather than water. */
+          if (kind === "desertbike") {
+            const ground = bikeGround(this.world, x, z, a);
+            if (ground) return { x, y: ground.y, z, rot: a };
+            continue;
+          }
           /*
            * Placement measures reach from the body, and keeps the hull off it.
            * The reach here is ours to judge, so a spot beyond it is measured
@@ -906,11 +963,88 @@ export class Room {
     this.prefabs.delete(id);
     this.spawned.delete(id);
     this.boatSpeed.delete(id);
+    this.bikes.delete(id);
+    this.bikeInputs.delete(id);
     this.world.removeSolids(id);
     this.broadcast({ t: "unprefab", id });
   }
 
   /* ---------- boats ---------- */
+
+  private bikeInteract(m: Member, p: Prefab) {
+    const bike = this.bikes.get(p.id);
+    if (!bike) return;
+    if (m.boat === p.id) {
+      if (Math.hypot(bike.speed, bike.slipX ?? 0, bike.slipZ ?? 0) > 1.5) {
+        m.peer.send({ t: "feed", text: "Brake before getting off the bike" });
+        return;
+      }
+      const exit = bikeExit(bike, this.world);
+      if (!exit) {
+        m.peer.send({ t: "feed", text: "Move to a clear spot before getting off" });
+        return;
+      }
+      bike.speed = 0;
+      bike.slipX = bike.slipZ = 0;
+      this.bikeInputs.delete(p.id);
+      m.boat = null;
+      m.body = createBody(exit.x, exit.y, exit.z, exit.yaw);
+      m.peer.send({ t: "aboard", boat: null });
+      m.peer.send({ t: "respawn", ...exit });
+      return;
+    }
+    if (
+      m.boat !== null ||
+      this.aboard(p.id) ||
+      Math.hypot(p.x - m.body.x, p.z - m.body.z) > 3.6 ||
+      Math.abs(p.y - m.body.y) > 2
+    )
+      return;
+    this.bikeInputs.delete(p.id);
+    m.boat = p.id;
+    m.airVy = 0;
+    m.body = createBody(bike.x, bike.y + BIKE_SEAT, bike.z, bike.rot);
+    m.peer.send({ t: "aboard", boat: p.id });
+  }
+
+  private tickBikes(now: number, dt: number) {
+    for (const [id, bike] of this.bikes) {
+      const rider = this.aboard(id);
+      const controls = this.bikeInputs.get(id);
+      if (
+        !rider &&
+        Math.hypot(bike.speed, bike.slipX ?? 0, bike.slipZ ?? 0, bike.verticalSpeed ?? 0) < 0.01
+      )
+        continue;
+      const input =
+        rider && rider.respawnAt === null && controls && now - controls.at < 0.3
+          ? controls.input
+          : { forward: 0, right: 0, brake: true };
+      this.world.removeSolids(id); // Ignore only this bike's own hull.
+      stepBike(bike, input, dt, this.world);
+      this.world.addSolids(id, [bikeSolid(bike)]);
+      const p = this.prefabs.get(id);
+      if (p) {
+        p.x = bike.x;
+        p.y = bike.y;
+        p.z = bike.z;
+        p.rot = bike.rot;
+      }
+      if (rider) {
+        Object.assign(rider.body, {
+          x: bike.x,
+          y: bike.y + BIKE_SEAT,
+          z: bike.z,
+          yaw: bike.rot,
+          vx: -Math.sin(bike.rot) * bike.speed + (bike.slipX ?? 0),
+          vy: 0,
+          vz: -Math.cos(bike.rot) * bike.speed + (bike.slipZ ?? 0),
+          grounded: true,
+        });
+        rider.flags = FLAG.grounded | FLAG.riding | (rider.flags & FLAG.creative);
+      }
+    }
+  }
 
   private aboard(id: number) {
     for (const o of this.members.values()) if (o.boat === id) return o;
@@ -1286,6 +1420,7 @@ export class Room {
   }
 
   private simulate(now: number, dt: number) {
+    this.tickBikes(now, dt);
     this.resolveHits(now);
     this.herd?.tick(now, dt, this.preyList());
 
@@ -1734,6 +1869,17 @@ export class Room {
     }
     const time = round2(this.time);
     const b: BoatSnap[] = [];
+    const bikes: BikeSnap[] = [...this.bikes].map(([id, bike]) => [
+      id,
+      round2(bike.x),
+      round2(bike.y),
+      round2(bike.z),
+      round2(bike.rot),
+      round2(bike.speed),
+      round2(bike.steer),
+      round2(bike.pitch),
+      round2(bike.roll),
+    ]);
     for (const p of this.prefabs.values()) {
       if (p.kind === "rowboat")
         b.push([
@@ -1756,6 +1902,7 @@ export class Room {
         p,
         a,
         b,
+        bikes,
         me: !this.present(m)
           ? null
           : {

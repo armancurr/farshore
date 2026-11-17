@@ -20,6 +20,9 @@ export class TideAudio {
   private noise!: AudioBuffer;
   private muted = false;
   private lastHeart = 0;
+  private motorOscillator: OscillatorNode | null = null;
+  private motorGain: GainNode | null = null;
+  private motorFilter: BiquadFilterNode | null = null;
 
   get isMuted() {
     return this.muted;
@@ -101,6 +104,34 @@ export class TideAudio {
   close() {
     void this.ctx?.close();
     this.ctx = null;
+    this.motorOscillator = null;
+    this.motorGain = null;
+    this.motorFilter = null;
+  }
+
+  /** A quiet synthesized engine, through the existing mute/underwater chain. */
+  motor(speed: number | null) {
+    const ctx = this.ctx;
+    if (!ctx || (speed === null && !this.motorOscillator)) return;
+    if (!this.motorOscillator) {
+      this.motorOscillator = ctx.createOscillator();
+      this.motorOscillator.type = "sawtooth";
+      this.motorGain = ctx.createGain();
+      this.motorGain.gain.value = 0;
+      this.motorFilter = ctx.createBiquadFilter();
+      this.motorFilter.type = "lowpass";
+      this.motorFilter.Q.value = 0.7;
+      this.motorOscillator.connect(this.motorFilter).connect(this.motorGain).connect(this.muffle);
+      this.motorOscillator.start();
+    }
+    const revs = Math.min(1, Math.abs(speed ?? 0) / 20);
+    this.motorOscillator.frequency.setTargetAtTime(38 + revs * 100, ctx.currentTime, 0.12);
+    this.motorFilter!.frequency.setTargetAtTime(180 + revs * 420, ctx.currentTime, 0.12);
+    this.motorGain!.gain.setTargetAtTime(
+      speed === null ? 0 : 0.025 + revs * 0.035,
+      ctx.currentTime,
+      0.08,
+    );
   }
 
   /* Called every frame with how close the sea is and whether we're under it. */

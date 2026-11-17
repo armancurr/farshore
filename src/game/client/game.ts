@@ -8,8 +8,9 @@ import {
   TICK_HZ,
 } from "../shared/constants";
 import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
+import { BIKE_SEAT, BIKE_SPEED, bikeSolid } from "../shared/bike";
 import { FEATURES } from "../shared/features";
-import { clamp, lerp } from "../shared/math";
+import { clamp, lerp, wrapAngle } from "../shared/math";
 import {
   BOARD_REACH,
   type BoardState,
@@ -80,6 +81,7 @@ import {
 } from "./net";
 import { Avatar } from "./scene/avatars";
 import { BoatView } from "./scene/boats";
+import { BikeView } from "./scene/bikes";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
 import { createLand, OpenSea } from "./scene/land";
@@ -299,6 +301,9 @@ export class Game {
   private herd = new HerdView();
   private built = new PrefabView();
   private boats = new BoatView();
+  private bikes = new BikeView();
+  private bike: number | null = null;
+  private bikeYaw = 0;
   /* The rowboat you're in, rowed here and reported to the room. */
   private boat: (BoatState & { id: number }) | null = null;
   private strokeAt = 0;
@@ -402,6 +407,7 @@ export class Game {
     this.scene.add(this.herd.group);
     this.scene.add(this.built.group);
     this.scene.add(this.boats.group);
+    this.scene.add(this.bikes.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -489,6 +495,9 @@ export class Game {
     this.herd.clear();
     this.built.reset([]);
     this.boats.clear();
+    this.bikes.clear();
+    this.bike = null;
+    this.audio.motor(null);
     this.creative = false;
     this.flying = false;
     this.safeFall = false;
@@ -620,6 +629,7 @@ export class Game {
     this.herd.dispose();
     this.built.dispose();
     this.boats.dispose();
+    this.bikes.dispose();
     this.dropWorld();
     this.sky.dispose();
     this.post.dispose();
@@ -752,6 +762,7 @@ export class Game {
         navigator.vibrate?.(80);
         break;
       case "died":
+        this.bike = null;
         this.endBuild();
         this.boat = null;
         this.down = msg.cause;
@@ -769,6 +780,7 @@ export class Game {
         this.dazeUntil = 0;
         break;
       case "warp":
+        this.bike = null;
         this.endBuild();
         this.boat = null;
         this.chargeStart = null;
@@ -808,6 +820,8 @@ export class Game {
         this.onAboard(msg.boat);
         break;
       case "unprefab":
+        this.bikes.remove(msg.id);
+        if (this.bike === msg.id) this.bike = null;
         this.built.remove(msg.id);
         this.boats.remove(msg.id);
         this.world?.ground.removeSolids(msg.id);
@@ -850,10 +864,23 @@ export class Game {
       if (!p) return;
       this.endBuild();
       this.flying = false;
+      if (p.kind === "desertbike") {
+        this.boat = null;
+        this.bike = id;
+        this.bikeYaw = p.rot;
+        this.acc = 0;
+        this.input.yaw = p.rot;
+        return;
+      }
       this.boat = { id, x: p.x, z: p.z, rot: p.rot, speed: 0, turn: 0 };
       this.input.yaw = p.rot;
       this.audio.splash(0.4);
       return;
+    }
+    if (this.bike !== null) {
+      this.bike = null;
+      this.acc = 0;
+      return; // The server supplies a checked dismount position.
     }
     const boat = this.boat;
     this.boat = null;
@@ -919,6 +946,12 @@ export class Game {
 
   /* Draw it, and make it solid for our own footsteps too. */
   private addPrefab(p: Prefab) {
+    if (p.kind === "desertbike") {
+      this.built.set(p);
+      this.bikes.set([p.id, p.x, p.y, p.z, p.rot, 0, 0, 0, 0], true);
+      this.world?.ground.addSolids(p.id, [bikeSolid(p)]);
+      return;
+    }
     if (p.kind === "rowboat") {
       this.built.set(p);
       if (this.boat?.id !== p.id) this.boats.set(p.id, p.x, p.z, p.rot, 0, true);
@@ -964,6 +997,8 @@ export class Game {
     for (const island of info.islands) this.addIsland(island);
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
+    this.bikes.clear();
+    this.boats.clear();
     this.board = info.board;
     for (const p of this.built.list()) world.ground.removeSolids(p.id);
     this.built.reset([]);
@@ -1019,6 +1054,13 @@ export class Game {
     }
 
     this.herd.set(msg.a);
+    for (const snap of msg.bikes ?? []) {
+      const [id, x, y, z, rot] = snap;
+      const p = this.built.get(id);
+      if (p) Object.assign(p, { x, y, z, rot });
+      this.bikes.set(snap);
+      this.world?.ground.addSolids(id, [bikeSolid({ x, y, z, rot })]);
+    }
     for (const [id, x, z, rot, speed] of msg.b) {
       const p = this.built.get(id);
       if (p) {
@@ -1112,14 +1154,16 @@ export class Game {
     const t = now / 1000;
     shared.uTime.value = t;
 
+    this.bikes.update(dt, this.world?.ground);
     this.update(dt);
+    this.audio.motor(this.bike === null ? null : (this.bikes.pose(this.bike)?.speed ?? 0));
 
     if (this.world) {
       for (const o of this.world.islands.values()) o.props.update(t, this.camera.position);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
-    const holding = held ? TOOLS[held.kind].weapon : null;
+    const holding = this.bike !== null ? null : held ? TOOLS[held.kind].weapon : null;
     this.viewmodel.set(holding);
     const def = weaponDef(holding);
     this.viewmodel.update(dt, {
@@ -1177,12 +1221,12 @@ export class Game {
       const def = weaponDef(this.weapon);
       this.blocking = this.weapon === "shield" && active && this.input.altHeld && !this.build;
       const charging = this.chargeStart !== null;
-      if (active && this.input.take("creative")) this.toggleCreative(b);
-      if (active && this.input.take("fly") && this.creative && !this.boat)
+      if (active && this.input.take("creative") && this.bike === null) this.toggleCreative(b);
+      if (active && this.input.take("fly") && this.creative && !this.boat && this.bike === null)
         this.setFlying(b, !this.flying);
       const tapped = active && this.input.take("jump");
       /* In creative, a double tap of Space takes off or comes down, as in the usual sandbox games. */
-      if (tapped && this.creative && !this.boat) {
+      if (tapped && this.creative && !this.boat && this.bike === null) {
         const now = performance.now() / 1000;
         if (now - this.lastJumpTap < 0.3) {
           this.setFlying(b, !this.flying);
@@ -1210,10 +1254,26 @@ export class Game {
           }
         : { forward: 0, right: 0, jump: false, sprint: false };
 
-      if (this.boat) this.row(dt, b, active);
+      if (this.bike !== null) {
+        const pose = this.bikes.pose(this.bike);
+        if (pose) {
+          this.input.yaw += wrapAngle(pose.rot - this.bikeYaw);
+          this.bikeYaw = pose.rot;
+          Object.assign(b, {
+            x: pose.x,
+            y: pose.y + BIKE_SEAT,
+            z: pose.z,
+            vx: -Math.sin(pose.rot) * pose.speed,
+            vy: 0,
+            vz: -Math.cos(pose.rot) * pose.speed,
+            grounded: true,
+          });
+        }
+        this.acc = 0;
+      } else if (this.boat) this.row(dt, b, active);
       else this.acc += dt;
       const stepWorld = { terrain: world.ground };
-      while (!this.boat && this.acc >= STEP) {
+      while (!this.boat && this.bike === null && this.acc >= STEP) {
         this.acc -= STEP;
         if (this.flying) {
           if (stepFly(b, fly, STEP, stepWorld).landed) {
@@ -1242,6 +1302,7 @@ export class Game {
       }
       const speed = Math.hypot(b.vx, b.vz);
       this.bobAmp = lerp(this.bobAmp, b.grounded ? Math.min(1, speed / 9) : 0, Math.min(1, dt * 8));
+      if (this.bike !== null) this.bobAmp = 0;
 
       /* Attack: instant swings on press; the warhammer and greatsword charge until release. */
       const now = performance.now() / 1000;
@@ -1298,6 +1359,14 @@ export class Game {
             (this.flying ? FLAG.fly : 0) |
             (this.creative || this.safeFall ? FLAG.creative : 0),
           boat: this.boat ? { rot: this.boat.rot, speed: this.boat.speed } : undefined,
+          drive:
+            this.bike !== null
+              ? {
+                  forward: active && !this.panel ? this.input.forward : 0,
+                  right: active && !this.panel ? this.input.right : 0,
+                  brake: !active || !!this.panel || this.input.jumpHeld,
+                }
+              : undefined,
         });
       }
 
@@ -1391,6 +1460,7 @@ export class Game {
         best = f();
       }
     };
+    if (this.bike !== null) return { kind: "prefab", id: this.bike, label: "E · Get off the bike" };
     if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
     const bd = world.ground.primary?.board;
     if (FEATURES.board && bd)
@@ -1403,7 +1473,13 @@ export class Game {
         label: "E · The keeper's stall",
       }));
     for (const p of this.built.list()) {
-      if (p.kind === "rowboat")
+      if (p.kind === "desertbike")
+        consider(p.x, p.y, p.z, 3.4, () => ({
+          kind: "prefab",
+          id: p.id,
+          label: "E · Ride desert bike",
+        }));
+      else if (p.kind === "rowboat")
         consider(p.x, b.y, p.z, BOAT_REACH, () => ({
           kind: "prefab",
           id: p.id,
@@ -1432,6 +1508,10 @@ export class Game {
   }
 
   private toggleBuild() {
+    if (this.bike !== null) {
+      this.say("Get off the bike before building", 2);
+      return;
+    }
     if (this.build) {
       this.endBuild();
       return;
@@ -1764,7 +1844,7 @@ export class Game {
     const t = performance.now() / 1000;
     const eye = this.boat
       ? b.y + EYE_HEIGHT - 0.55 + Math.sin(t * 1.3 + this.boat.id) * 0.04
-      : b.y + EYE_HEIGHT;
+      : b.y + EYE_HEIGHT - (this.bike !== null ? 0.5 : 0);
     if (eye > this.smoothEye && eye - this.smoothEye < 5 && !this.flying) {
       this.smoothEye += (eye - this.smoothEye) * Math.min(1, dt * 16);
     } else this.smoothEye = eye;
@@ -1784,7 +1864,11 @@ export class Game {
     this.camera.translateX(bobX);
 
     /* The view widens as you pick up speed in the air. */
-    const rush = this.flying ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST) : 0;
+    const rush = this.flying
+      ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST)
+      : this.bike !== null
+        ? Math.min(1, Math.hypot(b.vx, b.vz) / BIKE_SPEED) * 0.4
+        : 0;
     const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + rush * 22 + Math.abs(this.kick) * 4;
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
     this.setFov(this.fov);
@@ -1970,11 +2054,13 @@ export class Game {
       panel: this.panel,
       hint: this.flying
         ? "Space up · Shift down · double-tap W to rush · double-tap Space to drop"
-        : this.boat
-          ? "W/S row · A/D turn · E get out"
-          : held
-            ? def.hint
-            : null,
+        : this.bike !== null
+          ? `${Math.round(Math.abs(this.bikes.pose(this.bike)?.speed ?? 0) * 3.6)} km/h · W accelerate · S brake/reverse · A/D steer · Space brake · E get off`
+          : this.boat
+            ? "W/S row · A/D turn · E get out"
+            : held
+              ? def.hint
+              : null,
       banner: this.banner && now - this.banner.at < 4 ? this.banner : null,
       economy: FEATURES.board,
       guild: this.guildView(now),

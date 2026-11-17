@@ -20,7 +20,7 @@ const TABS: readonly [Tab, string][] = [
 /*
  * The marketplace: whatever you're looking at stands large on the left; the
  * right is everything on offer. Three shelves: skins (one row per character),
- * weapons (you carry one at a time) and vehicles (spawned into the water
+ * weapons (you carry one at a time) and vehicles (spawned on suitable terrain
  * near you, one at a time). Everything is free for now; prices show what
  * each will cost once the market takes coins.
  */

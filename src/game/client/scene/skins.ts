@@ -10,6 +10,7 @@ import { edges, flatten, inkMaterial, lineMaterial } from "./materials";
  */
 
 export type Rig = {
+  ride?(): void;
   root: THREE.Group;
   head: THREE.Object3D;
   /* Where a held weapon goes. */
@@ -281,6 +282,10 @@ function wanderer(v: number): Rig {
     hold: 0.6,
     top: 2.45,
     cadence: 1,
+    ride() {
+      legs[0].rotation.x = legs[1].rotation.x = 0.65;
+      arms[0].sh.rotation.x = arms[1].sh.rotation.x = 1.05;
+    },
     update(t, p, w, holding) {
       const s = Math.sin(p);
       body.position.y = Math.abs(Math.cos(p)) * 0.06 * w + Math.sin(t * 1.7) * 0.008 * (1 - w);
@@ -415,6 +420,10 @@ function lantern(v: number): Rig {
     hold: 0,
     top: 2.55,
     cadence: 1,
+    ride() {
+      hands[0].position.set(-0.4, 1, -0.55);
+      hands[1].position.set(0.4, 1, -0.55);
+    },
     update(t, p, w, holding) {
       const s = Math.sin(p);
       body.position.y = 0.18 + Math.sin(t * 2) * 0.06;
@@ -534,6 +543,10 @@ function diver(v: number): Rig {
     hold: 0.5,
     top: 2.55,
     cadence: 0.8,
+    ride() {
+      legs[0].rotation.x = legs[1].rotation.x = 0.65;
+      arms[0].sh.rotation.x = arms[1].sh.rotation.x = 1.05;
+    },
     update(t, p, w, holding) {
       const s = Math.sin(p);
       body.position.y = Math.abs(Math.cos(p)) * 0.04 * w + Math.sin(t * 1.4) * 0.008 * (1 - w);
@@ -660,6 +673,10 @@ function corsair(v: number): Rig {
     hold: 0.6,
     top: 2.55,
     cadence: 1.07,
+    ride() {
+      legs[0].rotation.x = legs[1].rotation.x = 0.65;
+      arms[0].sh.rotation.x = arms[1].sh.rotation.x = 1.05;
+    },
     update(t, p, w, holding) {
       const s = Math.sin(p);
       body.position.y = Math.abs(Math.cos(p)) * 0.05 * w;
@@ -801,6 +818,10 @@ function buoy(v: number): Rig {
     hold: 0,
     top: v === 1 ? 2.45 : 2.3,
     cadence: 1.13,
+    ride() {
+      hands[0].position.set(-0.4, 1, -0.55);
+      hands[1].position.set(0.4, 1, -0.55);
+    },
     update(t, p, w, holding) {
       const s = Math.sin(p);
       body.position.y = Math.abs(Math.cos(p)) * 0.07 * w + Math.sin(t * 1.8) * 0.01;

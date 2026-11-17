@@ -15,7 +15,8 @@
     "lint:fix": "biome check --write .",
     "fmt": "biome format --write .",
     "fmt:check": "biome format .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:bike": "node --import ./tests/register-typescript.mjs --test tests/bike.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
