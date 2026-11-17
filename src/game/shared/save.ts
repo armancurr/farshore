@@ -163,8 +163,10 @@ function player(v: unknown, relocate: boolean): SavedPlayer | null {
  * what they carry but wakes on the Harbor.
  * 3: the islands were reshaped (terraces, places, paths). Older saves load
  * the same way: everyone keeps their things and wakes on the Harbor.
+ * 4: the islands got their road networks and piers, cut into the ground. The
+ * same again: everyone keeps their things and wakes on the Harbor.
  */
-export const WORLD_SAVE_VERSION = 3;
+export const WORLD_SAVE_VERSION = 4;
 
 /* Someone who's been here: who they are, and where they left off. */
 export type SavedProfile = {
@@ -184,7 +186,8 @@ export type WorldSave = {
 
 /* A stored grand map, or null if it's missing or damaged. Bad entries are dropped, not fatal. */
 export function parseWorldSave(raw: unknown): WorldSave | null {
-  if (!isObj(raw) || (raw.v !== 1 && raw.v !== 2 && raw.v !== WORLD_SAVE_VERSION)) return null;
+  if (!isObj(raw) || (raw.v !== 1 && raw.v !== 2 && raw.v !== 3 && raw.v !== WORLD_SAVE_VERSION))
+    return null;
   if (!Array.isArray(raw.players) || !isObj(raw.ids)) return null;
   /* Every place on an old map may now be sea, a cliff, or somewhere else entirely. */
   const relocate = raw.v !== WORLD_SAVE_VERSION;
