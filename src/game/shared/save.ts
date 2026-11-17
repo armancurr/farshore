@@ -115,8 +115,10 @@ function player(v: unknown, relocate: boolean): SavedPlayer | null {
  * 2: the islands are authored, and nobody settles land of their own. A
  * version 1 save still loads: its islands are dropped, and everyone keeps
  * what they carry but wakes on the Harbor.
+ * 3: the islands were reshaped (terraces, places, paths). Older saves load
+ * the same way: everyone keeps their things and wakes on the Harbor.
  */
-export const WORLD_SAVE_VERSION = 2;
+export const WORLD_SAVE_VERSION = 3;
 
 /* Someone who's been here: who they are, and where they left off. */
 export type SavedProfile = {
@@ -136,10 +138,10 @@ export type WorldSave = {
 
 /* A stored grand map, or null if it's missing or damaged. Bad entries are dropped, not fatal. */
 export function parseWorldSave(raw: unknown): WorldSave | null {
-  if (!isObj(raw) || (raw.v !== 1 && raw.v !== WORLD_SAVE_VERSION)) return null;
+  if (!isObj(raw) || (raw.v !== 1 && raw.v !== 2 && raw.v !== WORLD_SAVE_VERSION)) return null;
   if (!Array.isArray(raw.players) || !isObj(raw.ids)) return null;
-  /* Every place on an old map may now be sea, or somewhere else entirely. */
-  const relocate = raw.v === 1;
+  /* Every place on an old map may now be sea, a cliff, or somewhere else entirely. */
+  const relocate = raw.v !== WORLD_SAVE_VERSION;
   const players: SavedProfile[] = [];
   for (const v of raw.players) {
     if (!isObj(v) || typeof v.token !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(v.token))

@@ -54,7 +54,7 @@ export function toneColor(tone: number) {
 export const shared = {
   uFog: { value: 0.00055 },
   uFogColor: { value: new THREE.Color(PALETTE.horizon) },
-  uSun: { value: new THREE.Vector3(-0.33, 0.82, -0.47).normalize() },
+  uSun: { value: new THREE.Vector3(-0.42, 0.66, -0.6).normalize() },
   uLight: { value: 1 },
   uTime: { value: 0 },
   /* The sun's shadow maps and the clouds' shade (scene/shadows.ts, scene/clouds.ts). */
