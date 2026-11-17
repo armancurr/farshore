@@ -132,7 +132,7 @@ export function Marketplace(props: {
                 onClick={() => setTab(t)}
                 className={cn(
                   "transition-colors",
-                  tab === t ? "text-white" : "text-white/40 hover:text-white/70",
+                  tab === t ? "text-white" : "text-white/80 hover:text-white/70",
                 )}
               >
                 {label}
@@ -171,7 +171,7 @@ export function Marketplace(props: {
               <h3 className="truncate font-sans text-3xl leading-none font-extrabold">{name}</h3>
               {tab === "weapons" && <WeaponStats def={weapon} />}
               {tab === "vehicles" && (
-                <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/55">
+                <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
                   {vehicle.hint}
                 </p>
               )}
@@ -183,7 +183,7 @@ export function Marketplace(props: {
                   Spawn
                 </Button>
                 {!canSpawn && (
-                  <span className="font-sans text-[12px] text-white/45">Go ashore first</span>
+                  <span className="font-sans text-[12px] text-white/80">Go ashore first</span>
                 )}
               </div>
             ) : tab === "skins" ? (
@@ -261,7 +261,7 @@ export function Marketplace(props: {
 function Price(props: { price: number }) {
   return (
     <div className="flex items-baseline gap-2 font-sans text-sm tabular-nums">
-      {props.price > 0 && <span className="text-white/35 line-through">◎ {props.price}</span>}
+      {props.price > 0 && <span className="text-white/80 line-through">◎ {props.price}</span>}
       <span className="text-white/70">Free</span>
     </div>
   );
@@ -289,7 +289,7 @@ function WeaponStats(props: { def: WeaponDef }) {
         <Stat label="Pace" value={pace(d.cooldown)} />
       </dl>
       {special && (
-        <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/55">
+        <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
           {special.charAt(0).toUpperCase() + special.slice(1)}
         </p>
       )}
@@ -300,7 +300,7 @@ function WeaponStats(props: { def: WeaponDef }) {
 function Stat(props: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <dt className="text-white/40">{props.label}</dt>
+      <dt className="text-white/80">{props.label}</dt>
       <dd className="font-bold text-white">{props.value}</dd>
     </div>
   );

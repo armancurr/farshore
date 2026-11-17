@@ -1,6 +1,6 @@
-import { GRID, ISLAND_RADIUS, STEP_HEIGHT, TILE_SIZE } from "./constants";
+import { BASE_TILE, ISLAND_RADIUS, STEP_HEIGHT } from "./constants";
 import { FEATURES } from "./features";
-import { islandHeights, type ShapeId } from "./islands";
+import { type BiomeId, gridOf, type IslandInfo, islandHeights, type ShapeId } from "./islands";
 import { angleTo, clamp, mulberry32, range, smoothstep } from "./math";
 import {
   type Block,
@@ -52,6 +52,16 @@ export type Spot = { x: number; y: number; z: number };
 export type Site = Spot & { rot: number };
 
 const BUCKET = 12;
+
+/* How thickly trees and rocks grow, by island: a share of the usual count for its size. */
+export const FLORA: Record<BiomeId | "harbor", { trees: number; rocks: number }> = {
+  harbor: { trees: 0.35, rocks: 0.2 },
+  meadow: { trees: 0.45, rocks: 0.3 },
+  pinewood: { trees: 1.8, rocks: 0.45 },
+  ridge: { trees: 0.7, rocks: 1.1 },
+  marsh: { trees: 1, rocks: 0.35 },
+  fells: { trees: 0.4, rocks: 1.2 },
+};
 const NO_SOLIDS: Solid[] = [];
 
 export function blockSolid(b: Block): Solid {
@@ -128,8 +138,14 @@ export class Terrain implements Ground {
   readonly seed: number;
   readonly shape: ShapeId;
   readonly heights: Float32Array;
-  readonly cell = TILE_SIZE / (GRID - 1);
-  readonly half = TILE_SIZE / 2;
+  /* The tile's side, samples a side, and the spacing between them, in metres. */
+  readonly size: number;
+  readonly grid: number;
+  readonly cell: number;
+  readonly half: number;
+  /* How far out the land reaches, roughly: the shape's radius stretched to this tile. */
+  readonly radius: number;
+  readonly biome: BiomeId | null;
   /* The centre of the island's tile on the grand map. */
   ox = 0;
   oz = 0;
@@ -142,34 +158,40 @@ export class Terrain implements Ground {
   lighthouse: Spot = { x: 0, y: 0, z: 0 };
   /* Where a new arrival wakes up: a flat, open patch near the middle of the island. */
   home: Spot & { yaw: number } = { x: 0, y: 0, z: 0, yaw: 0 };
-  /* The bounty board and the keeper's stall, either side of the lighthouse door. */
+  /* The Guild Board on the lantern deck, and the keeper's stall beside the lighthouse door. */
   board: Site = { x: 0, y: 0, z: 0, rot: 0 };
   shop: Site = { x: 0, y: 0, z: 0, rot: 0 };
   peak = 0;
   private taken: { x: number; z: number; r: number }[] = [];
   private buckets: Solid[][] = [];
-  private bucketsPerSide = Math.ceil(TILE_SIZE / BUCKET);
+  private bucketsPerSide: number;
   /* Solids added after generation (placed prefabs), by owner key. */
   private dynamic = new Map<number, { solids: Solid[]; cells: number[] }>();
 
-  /* The Harbor: a lighthouse and jetties, whatever the features say. */
+  /* The Harbor: the lighthouse at its centre, whatever the features say. */
   readonly harbor: boolean;
 
   constructor(
-    seed: number,
-    shape: ShapeId = "headland",
-    origin = { x: 0, z: 0 },
-    opts: { harbor?: boolean } = {},
+    info: Pick<IslandInfo, "seed" | "shape" | "x" | "z" | "size" | "cell" | "lift" | "harbor"> & {
+      biome?: BiomeId;
+    },
   ) {
-    this.seed = seed >>> 0;
-    this.shape = shape;
-    this.harbor = !!opts.harbor;
-    this.heights = islandHeights(shape, this.seed, GRID);
+    this.seed = info.seed >>> 0;
+    this.shape = info.shape;
+    this.harbor = !!info.harbor;
+    this.biome = info.biome ?? null;
+    this.size = info.size;
+    this.grid = gridOf(info);
+    this.cell = this.size / (this.grid - 1);
+    this.half = this.size / 2;
+    this.radius = ISLAND_RADIUS * (this.size / BASE_TILE);
+    this.bucketsPerSide = Math.ceil(this.size / BUCKET);
+    this.heights = islandHeights(info.shape, this.seed, this.grid, info.lift);
     this.raiseLighthouse();
     this.raiseStructures();
     this.scatterProps();
     this.findHome();
-    this.moveTo(origin.x, origin.z);
+    this.moveTo(info.x, info.z);
     this.indexSolids();
   }
 
@@ -216,13 +238,16 @@ export class Terrain implements Ground {
     at(this.shop);
   }
 
-  /* Find the summit and level a pad for the lighthouse. */
+  /* Level a pad for the lighthouse: at the Harbor's very centre, or on another island's summit. */
   private raiseLighthouse() {
+    const g = this.grid;
     let best = 0;
-    for (let k = 1; k < this.heights.length; k++)
-      if (this.heights[k] > this.heights[best]) best = k;
-    const x = this.ox - this.half + (best % GRID) * this.cell;
-    const z = this.oz - this.half + Math.floor(best / GRID) * this.cell;
+    if (this.harbor) best = Math.floor(g / 2) * g + Math.floor(g / 2);
+    else
+      for (let k = 1; k < this.heights.length; k++)
+        if (this.heights[k] > this.heights[best]) best = k;
+    const x = this.ox - this.half + (best % g) * this.cell;
+    const z = this.oz - this.half + Math.floor(best / g) * this.cell;
     const top = this.heights[best];
 
     if (FEATURES.lighthouse || this.harbor)
@@ -238,14 +263,14 @@ export class Terrain implements Ground {
     const x = wx - this.ox;
     const z = wz - this.oz;
     const j0 = Math.max(0, Math.floor((x - outer + this.half) / this.cell));
-    const j1 = Math.min(GRID - 1, Math.ceil((x + outer + this.half) / this.cell));
+    const j1 = Math.min(this.grid - 1, Math.ceil((x + outer + this.half) / this.cell));
     const i0 = Math.max(0, Math.floor((z - outer + this.half) / this.cell));
-    const i1 = Math.min(GRID - 1, Math.ceil((z + outer + this.half) / this.cell));
+    const i1 = Math.min(this.grid - 1, Math.ceil((z + outer + this.half) / this.cell));
     for (let i = i0; i <= i1; i++) {
       for (let j = j0; j <= j1; j++) {
         const d = Math.hypot(-this.half + j * this.cell - x, -this.half + i * this.cell - z);
         if (d > outer) continue;
-        const k = i * GRID + j;
+        const k = i * this.grid + j;
         const w = 1 - smoothstep(inner, outer, d);
         this.heights[k] += (y - this.heights[k]) * w;
       }
@@ -256,8 +281,7 @@ export class Terrain implements Ground {
   private raiseStructures() {
     const plan = planStructures(this, this.seed, {
       lighthouse: FEATURES.lighthouse || this.harbor,
-      landmarks: FEATURES.landmarks,
-      harbor: this.harbor,
+      landmarks: FEATURES.landmarks && !this.harbor,
     });
     this.structures.push(...plan.structures);
     this.perches = plan.perches;
@@ -271,8 +295,9 @@ export class Terrain implements Ground {
   }
 
   /*
-   * The board and the stall stand on the plinth either side of the door,
-   * facing out. Their front (local +z) points away from the tower.
+   * The Guild Board stands on the lantern deck at the very top, across from
+   * the ladder, facing whoever climbs up. The stall stands on the plinth
+   * beside the door, facing out. A site's front (local +z) faces its visitors.
    */
   private furnishPlinth(st: Structure) {
     const base = st.y + LIGHTHOUSE.plinthHeight;
@@ -282,7 +307,15 @@ export class Terrain implements Ground {
       z: st.z + Math.sin(a) * 5.05,
       rot: Math.PI / 2 - a,
     });
-    this.board = site(st.rot + 0.78);
+    const deck = base + LIGHTHOUSE.towerHeight;
+    const lad = st.ladders[st.ladders.length - 1];
+    const toLadder = lad ? Math.atan2(lad.z - st.z, lad.x - st.x) : st.rot;
+    this.board = {
+      x: st.x - Math.cos(toLadder) * 1.15,
+      y: deck,
+      z: st.z - Math.sin(toLadder) * 1.15,
+      rot: Math.atan2(Math.cos(toLadder), Math.sin(toLadder)),
+    };
     this.shop = site(st.rot - 0.78);
     const B = st.blocks;
     const block = (
@@ -303,25 +336,35 @@ export class Terrain implements Ground {
         z: p.z,
       };
     };
-    /* Only what's switched on is built: a bare plinth otherwise (the Harbor, for now). */
-    if (FEATURES.bounties) {
+    /* Only what's switched on is built. */
+    if (FEATURES.board) {
       /* Board: two posts, a planked face, notices pinned to it, a little roof. */
       const b = this.board;
+      const top = b.y;
       for (const side of [-1, 1])
         B.push(
           block(b, side * 0.85, 0, {
-            bottom: base,
-            top: base + 2.3,
+            bottom: top,
+            top: top + 2.3,
             hx: 0.06,
             hz: 0.06,
             tone: "dark",
+            solid: false,
           }),
         );
-      B.push(block(b, 0, 0, { bottom: base + 0.75, top: base + 2.05, hx: 0.82, hz: 0.05 }));
+      B.push(
+        block(b, 0, 0, {
+          bottom: top + 0.75,
+          top: top + 2.05,
+          hx: 0.82,
+          hz: 0.05,
+          solid: false,
+        }),
+      );
       B.push(
         block(b, 0, 0.02, {
-          bottom: base + 2.3,
-          top: base + 2.38,
+          bottom: top + 2.3,
+          top: top + 2.38,
           hx: 1.05,
           hz: 0.28,
           tone: "dark",
@@ -337,15 +380,15 @@ export class Terrain implements Ground {
       ])
         B.push(
           block(b, lx, 0.065, {
-            bottom: base + ly - h,
-            top: base + ly + h,
+            bottom: top + ly - h,
+            top: top + ly + h,
             hx: w,
             hz: 0.012,
             tone: "light",
             solid: false,
           }),
         );
-      st.lamps.push({ x: b.x, y: base + 2.2, z: b.z });
+      st.lamps.push({ x: b.x, y: top + 2.2, z: b.z });
     }
     if (FEATURES.shop) {
       /* Stall: a counter, two posts holding up an awning, a crate beside it. */
@@ -397,15 +440,18 @@ export class Terrain implements Ground {
     const free = (x: number, z: number, r: number) =>
       taken.every((t) => Math.hypot(t.x - x, t.z - z) > t.r + r);
 
+    /* Bigger islands get proportionally more of everything. */
+    const area = (this.size / BASE_TILE) ** 2;
     const scatter = (
-      count: number,
+      wanted: number,
       opts: { minH: number; maxH?: number; spacing: number; minNy: number },
       make: (x: number, y: number, z: number) => void,
     ) => {
+      const count = Math.round(wanted * area);
       let placed = 0;
       for (let attempt = 0; attempt < count * 40 && placed < count; attempt++) {
         const a = rng() * Math.PI * 2;
-        const d = Math.sqrt(rng()) * ISLAND_RADIUS * 1.05;
+        const d = Math.sqrt(rng()) * this.radius * 1.05;
         const x = Math.cos(a) * d;
         const z = Math.sin(a) * d;
         const y = this.heightAt(x, z);
@@ -479,8 +525,9 @@ export class Terrain implements Ground {
       }),
     );
 
+    const flora = FLORA[this.harbor ? "harbor" : (this.biome ?? "meadow")];
     keepIf(FEATURES.rocks, () =>
-      scatter(240, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
+      scatter(240 * flora.rocks, { minH: 0.4, spacing: 3.2, minNy: 0.55 }, (x, y, z) => {
         const scale = rng() < 0.15 ? range(rng, 2.2, 3.4) : range(rng, 0.6, 1.9);
         const sink = scale * 0.28;
         const height = scale * range(rng, 0.8, 1.15);
@@ -507,7 +554,7 @@ export class Terrain implements Ground {
     );
 
     keepIf(FEATURES.trees, () =>
-      scatter(140, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
+      scatter(140 * flora.trees, { minH: 2.5, spacing: 5, minNy: 0.7 }, (x, y, z) => {
         const scale = range(rng, 0.8, 1.35);
         this.props.push({
           id: id++,
@@ -534,7 +581,7 @@ export class Terrain implements Ground {
     keepIf(FEATURES.buoys, () => {
       for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {
         const a = rng() * Math.PI * 2;
-        const d = range(rng, ISLAND_RADIUS * 0.95, ISLAND_RADIUS * 1.15);
+        const d = range(rng, this.radius * 0.95, this.radius * 1.15);
         const x = Math.cos(a) * d;
         const z = Math.sin(a) * d;
         if (this.heightAt(x, z) > -3) continue;
@@ -634,7 +681,7 @@ export class Terrain implements Ground {
       return { lo, hi };
     };
     let best: { x: number; z: number } | null = null;
-    for (let d = 0; d < ISLAND_RADIUS * 0.8 && !best; d += 5) {
+    for (let d = 0; d < this.radius * 0.8 && !best; d += 5) {
       const steps = Math.max(1, Math.round((d * Math.PI * 2) / 5));
       for (let k = 0; k < steps; k++) {
         const a = (k / steps) * Math.PI * 2;
@@ -661,17 +708,18 @@ export class Terrain implements Ground {
   }
 
   heightAt(x: number, z: number) {
-    const gx = clamp((x - this.ox + this.half) / this.cell, 0, GRID - 1.001);
-    const gz = clamp((z - this.oz + this.half) / this.cell, 0, GRID - 1.001);
+    const g = this.grid;
+    const gx = clamp((x - this.ox + this.half) / this.cell, 0, g - 1.001);
+    const gz = clamp((z - this.oz + this.half) / this.cell, 0, g - 1.001);
     const j = Math.floor(gx);
     const i = Math.floor(gz);
     const fx = gx - j;
     const fz = gz - i;
-    const k = i * GRID + j;
+    const k = i * g + j;
     const h00 = this.heights[k];
     const h10 = this.heights[k + 1];
-    const h01 = this.heights[k + GRID];
-    const h11 = this.heights[k + GRID + 1];
+    const h01 = this.heights[k + g];
+    const h11 = this.heights[k + g + 1];
     return (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz;
   }
 

@@ -8,29 +8,26 @@ import {
   TICK_HZ,
 } from "../shared/constants";
 import { BOARD_REACH as BOAT_REACH, type BoatState, seatOf, stepBoat } from "../shared/boat";
-import { BOARD_REACH, type Bounty, bountyNote, bountyTitle, progress } from "../shared/bounties";
 import { FEATURES } from "../shared/features";
+import { clamp, lerp } from "../shared/math";
 import {
-  BITE_TEXT,
-  depthAt,
-  MIN_CAST_DEPTH,
-  type Strike,
-  WATERS_LABEL,
-  watersFor,
-} from "../shared/fishing";
-import { clamp, lerp, wrapAngle } from "../shared/math";
+  BOARD_REACH,
+  type BoardState,
+  type Contract,
+  contractTitle,
+  type Payout,
+  progress,
+} from "../shared/missions";
 import { type Body, createBody, FLOAT_DEPTH, stepBody, stepFly } from "../shared/physics";
 import {
   ANIMAL_STATE,
   FLAG,
   type HurtCause,
   type InteractKind,
-  type LineState,
   type PlayerSnap,
   type RosterEntry,
   type ServerMsg,
   type Spawn,
-  type TravelTarget,
   type WorldInfo,
 } from "../shared/protocol";
 import {
@@ -46,7 +43,8 @@ import { SHOP, SHOP_REACH } from "../shared/shop";
 import { canWear, type SkinId } from "../shared/skins";
 import type { VehicleKind } from "../shared/vehicles";
 import { Archipelago } from "../shared/archipelago";
-import { type IslandInfo, type ShapeId } from "../shared/islands";
+import type { IslandInfo } from "../shared/islands";
+import { type Role, SPECIES } from "../shared/species";
 import { blockSolid } from "../shared/terrain";
 import {
   emptyInventory,
@@ -57,7 +55,6 @@ import {
   KIT_IDS,
   type KitId,
   type ItemId,
-  type Rarity,
   TOOLS,
   type ToolKind,
 } from "../shared/items";
@@ -82,16 +79,15 @@ import {
   WsConnection,
 } from "./net";
 import { Avatar } from "./scene/avatars";
-import { FishingLines } from "./scene/fishing";
 import { BoatView } from "./scene/boats";
 import { HerdView } from "./scene/herd";
 import { PrefabView } from "./scene/prefabs";
 import { createLand, OpenSea } from "./scene/land";
-import { shared } from "./scene/materials";
+import { PALETTE, shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
 import { Sky } from "./scene/sky";
-import { type RodPose, ViewModel } from "./scene/weapons";
+import { ViewModel } from "./scene/weapons";
 
 /* The title screen, or the game: online, on the grand map. */
 export type Mode = "attract" | "online";
@@ -118,13 +114,45 @@ export type BuildView = {
   target: string | null;
 };
 
-export type BountyView = {
+export type ContractView = {
   id: number;
   title: string;
   note: string;
+  /* Where they're most often found. */
+  island: string | null;
+  role: Role;
   reward: number;
   have: number;
   need: number;
+};
+
+/* The Guild Board, as the panel and the HUD show it. Times are seconds from now. */
+export type GuildView = {
+  near: boolean;
+  mission: ContractView | null;
+  contracts: ContractView[];
+  alpha: {
+    name: string;
+    kind: string;
+    island: string;
+    reward: number;
+    left: number;
+    slainBy: string | null;
+  } | null;
+  cull: {
+    island: string;
+    kind: string;
+    need: number;
+    done: number;
+    pot: number;
+    left: number;
+    state: "active" | "cleared" | "failed";
+    hunters: { name: string; kills: number }[];
+  } | null;
+  nextAlpha: number | null;
+  nextCull: number | null;
+  payouts: Payout[];
+  owed: number;
 };
 
 export type ToolView = {
@@ -138,7 +166,7 @@ export type InventoryView = {
   slot: number;
   hotbar: (ToolView | null)[];
   pack: ToolView[];
-  items: { id: ItemId; name: string; count: number; kind: string; rarity?: Rarity }[];
+  items: { id: ItemId; name: string; count: number; kind: string }[];
 };
 
 /* Something you could press E on: in the room's world, or a panel to open here. */
@@ -147,12 +175,10 @@ type Focus = { kind: InteractKind | "board" | "shop" | "chest"; id: number; labe
 export type HudState = {
   mode: Mode;
   connecting: boolean;
-  /* Choosing where your own island goes on the grand map (asked for from the island menu). */
-  settling: { error: string | null; pending: boolean; islands: number } | null;
   /* Standing on the Harbor: common ground, where nobody can be hurt. */
   sheltered: boolean;
-  /* Online and on your feet: where fast travel can take you, and whether you can claim land. */
-  travel: { home: boolean; onHarbor: boolean; claimable: boolean } | null;
+  /* The island you're on (or nearest, out on the water), online. */
+  place: string | null;
   notice: string | null;
   humans: number;
   name: string;
@@ -175,16 +201,11 @@ export type HudState = {
   panel: PanelKind | null;
   /* What the held tool does. */
   hint: string | null;
-  /* Your line in the water; with a strike once something bites (`at` in performance seconds). */
-  fishing: { state: LineState; text: string; strike: Strike | null; at: number } | null;
-  /* A big line of news for a moment: a catch, a fish getting away, a payout. */
+  /* A big line of news for a moment: a payout, an alpha sighted, an island overrun. */
   banner: { title: string; sub: string | null; at: number } | null;
-  /* Bounties and coins are switched on. */
+  /* The Guild Board and coins are switched on. */
   economy: boolean;
-  /* The bounty you've taken, and the board's offers. */
-  bounty: BountyView | null;
-  board: BountyView[];
-  nearBoard: boolean;
+  guild: GuildView;
   shop: ShopView[];
   nearShop: boolean;
   /* The open chest's contents. */
@@ -231,9 +252,7 @@ type World = {
 const STEP = 1 / 60;
 
 /* What bought tools are good for, for the shop. */
-const TOOL_NOTES: Partial<Record<ToolKind, string>> = {
-  rod2: "Casts further, bites sooner, a wider strike, and better luck with rare fish.",
-};
+const TOOL_NOTES: Partial<Record<ToolKind, string>> = {};
 const BASE_FOV = 76;
 
 function disposeTree(root: THREE.Object3D) {
@@ -252,7 +271,7 @@ export class Game {
   private forced = false;
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.08, 3000);
+  private camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.08, 4500);
   private post = new PostPass();
   private sky = new Sky();
   private audio = new TideAudio();
@@ -266,12 +285,6 @@ export class Game {
 
   private myId = -1;
   private myName = "";
-  /* Your island on the grand map, once you have one. */
-  private mine: number | null = null;
-  /* Choosing where to claim an island of your own. */
-  private claiming = false;
-  private settleError: string | null = null;
-  private settlePending = false;
   /* A mace's blow slows you until then (performance seconds). */
   private dazeUntil = 0;
   private roster: RosterEntry[] = [];
@@ -283,7 +296,6 @@ export class Game {
   private inv: Inventory = emptyInventory();
   private panel: PanelKind | null = null;
   private focus: Focus | null = null;
-  private lines = new FishingLines();
   private herd = new HerdView();
   private built = new PrefabView();
   private boats = new BoatView();
@@ -299,11 +311,15 @@ export class Game {
     verdict: Verdict | null;
     target: Prefab | null;
   } | null = null;
-  private boarStates = new Map<number, number>();
-  private myLine: { state: LineState; depth: number } | null = null;
-  private bite: { strike: Strike; at: number } | null = null;
+  private animalStates = new Map<number, number>();
   private banner: HudState["banner"] = null;
-  private board: Bounty[] = [];
+  private board: BoardState = {
+    contracts: [],
+    alpha: null,
+    cull: null,
+    nextAlpha: null,
+    nextCull: null,
+  };
   private chargeStart: number | null = null;
   private blocking = false;
   private sentStance = { block: false, charge: false };
@@ -373,7 +389,16 @@ export class Game {
     this.touch = matchMedia("(pointer: coarse)").matches;
     this.input = new Input(canvas);
     this.scene.add(this.sky.group);
-    this.scene.add(this.lines.group);
+    /*
+     * The pack models (animals, trees, rocks) are lit like the rest of the
+     * world: one sun from where the sky draws it, a violet sky above and the
+     * land's colour bounced from below, and the same haze in the distance.
+     */
+    const sun = new THREE.DirectionalLight(0xffffff, 2.1);
+    sun.position.copy(shared.uSun.value).multiplyScalar(100);
+    this.scene.add(sun, sun.target);
+    this.scene.add(new THREE.HemisphereLight(0xd9d3ff, PALETTE.land, 1.25));
+    this.scene.fog = new THREE.FogExp2(PALETTE.horizon, shared.uFog.value);
     this.scene.add(this.herd.group);
     this.scene.add(this.built.group);
     this.scene.add(this.boats.group);
@@ -402,7 +427,7 @@ export class Game {
     this.conn?.setPaused(this.shouldPause());
   }
 
-  /* The weapon in hand (null for fists or a rod). */
+  /* The weapon in hand (null for fists). */
   private get weapon() {
     const tool = heldTool(this.inv);
     return tool ? TOOLS[tool.kind].weapon : null;
@@ -433,6 +458,7 @@ export class Game {
     };
 
     if (mode === "online") {
+      this.herd.preload();
       const base = serverBase();
       if (!base) {
         this.input.unlock();
@@ -459,7 +485,6 @@ export class Game {
     this.inv = emptyInventory();
     this.panel = null;
     this.focus = null;
-    this.lines.clear();
     this.herd.clear();
     this.built.reset([]);
     this.boats.clear();
@@ -469,56 +494,16 @@ export class Game {
     this.boat = null;
     this.build = null;
     this.chestId = null;
-    this.boarStates.clear();
-    this.myLine = null;
-    this.bite = null;
+    this.animalStates.clear();
     this.banner = null;
-    this.board = [];
+    this.board = { contracts: [], alpha: null, cull: null, nextAlpha: null, nextCull: null };
     this.chargeStart = null;
     this.blocking = false;
     this.feed = [];
     this.haveClock = false;
     this.myId = -1;
-    this.mine = null;
-    this.claiming = false;
-    this.settleError = null;
-    this.settlePending = false;
     this.dazeUntil = 0;
     this.input.clear();
-  }
-
-  /* Online, connected, without land of your own, and choosing where to claim some. */
-  get settling() {
-    return (
-      this.mode === "online" &&
-      this.claiming &&
-      this.myId >= 0 &&
-      !!this.world &&
-      this.mine === null
-    );
-  }
-
-  /* Open the grand map to claim an island of your own (free, for now). */
-  openClaim() {
-    if (this.mode !== "online" || this.mine !== null) return;
-    this.claiming = true;
-    this.settleError = null;
-    this.input.unlock();
-    this.emitHud();
-  }
-
-  /* Back to the Harbor without claiming anything. */
-  closeClaim() {
-    if (!this.claiming) return;
-    this.claiming = false;
-    this.settlePending = false;
-    this.emitHud();
-  }
-
-  /* Fast travel to the Harbor, or home to your own island, and back into the game. */
-  travel(to: TravelTarget) {
-    this.conn?.send({ t: "travel", to });
-    this.lock();
   }
 
   /* The weapon you carry: what's in your pack once you're out there, or what this browser chose. */
@@ -549,15 +534,6 @@ export class Game {
     if (this.canSpawn) this.conn?.send({ t: "spawn", kind });
   }
 
-  /* Ask for your island at (x, z) on the grand map. */
-  settle(shape: ShapeId, seed: number, x: number, z: number) {
-    if (!this.settling || this.settlePending) return;
-    this.settlePending = true;
-    this.settleError = null;
-    this.conn?.send({ t: "settle", shape, seed, x, z });
-    this.emitHud();
-  }
-
   /* Everything the grand map shows, as it is right now. */
   mapView(): MapView {
     const world = this.world;
@@ -565,7 +541,6 @@ export class Game {
       ? [...world.islands.values()].map((o) => ({
           info: o.info,
           image: o.image,
-          mine: o.info.id === this.mine,
         }))
       : [];
     const players: MapView["players"] = [];
@@ -641,7 +616,6 @@ export class Game {
     this.input.dispose();
     this.audio.close();
     this.viewmodel.dispose();
-    this.lines.dispose();
     this.herd.dispose();
     this.built.dispose();
     this.boats.dispose();
@@ -675,7 +649,7 @@ export class Game {
     this.world = null;
   }
 
-  /* An empty grand map: just the open sea, waiting for islands. */
+  /* An empty grand map: just the open sea, waiting for its islands. */
   private buildWorld() {
     this.dropWorld();
     const group = new THREE.Group();
@@ -705,7 +679,7 @@ export class Game {
       info,
       group,
       props,
-      image: islandImage(terrain.heights, Math.round(Math.sqrt(terrain.heights.length))),
+      image: islandImage(terrain.heights, terrain.grid),
     });
     world.seed ??= info.seed;
     world.sea.setTiles(world.ground.list());
@@ -748,16 +722,6 @@ export class Game {
         break;
       case "world":
         this.onWorld(msg);
-        break;
-      case "island":
-        /* The room announces it in the feed; here it just rises out of the sea. */
-        if (this.world && !this.world.islands.has(msg.island.id)) this.addIsland(msg.island);
-        break;
-      case "unsettled":
-        this.settlePending = false;
-        this.settleError = msg.reason;
-        this.input.unlock();
-        this.emitHud();
         break;
       case "roster":
         this.setRoster(msg.roster);
@@ -808,10 +772,8 @@ export class Game {
         this.boat = null;
         this.chargeStart = null;
         this.place(msg);
-        this.claiming = false;
         this.dazeUntil = 0;
         this.audio.splash(0.4);
-        this.pushFeed(this.onHarbor() ? "You arrive at the Harbor" : "You arrive home");
         break;
       case "daze":
         this.dazeUntil = performance.now() / 1000 + msg.seconds;
@@ -831,16 +793,8 @@ export class Game {
       case "inv":
         this.inv = msg.inv;
         break;
-      case "line":
-        this.onLine(msg);
-        break;
-      case "bite":
-        this.bite = { strike: msg, at: performance.now() / 1000 };
-        this.audio.bite();
-        navigator.vibrate?.(40);
-        break;
       case "board":
-        this.board = msg.offers;
+        this.board = msg.board;
         break;
       case "prefab": {
         const fresh = !this.built.get(msg.prefab.id);
@@ -858,33 +812,26 @@ export class Game {
         this.world?.ground.removeSolids(msg.id);
         if (this.chestId === msg.id && this.panel === "chest") this.closePanel();
         break;
-      case "paid":
+      case "paid": {
+        const total = msg.payouts.reduce((n, p) => n + p.reward, 0);
         this.audio.reward();
         this.banner = {
-          title: `+${msg.bounty.reward} coins`,
-          sub: `Bounty paid · ${bountyTitle(msg.bounty)}`,
+          title: `+${total} coins`,
+          sub:
+            msg.payouts.length === 1
+              ? msg.payouts[0].title
+              : `${msg.payouts.length} rewards collected`,
           at: performance.now() / 1000,
         };
-        this.pushFeed(`Bounty paid: ${msg.bounty.reward} coins`);
+        this.pushFeed(`Paid ${total} coins`);
+        break;
+      }
+      case "news":
+        this.audio.chime();
+        this.banner = { title: msg.title, sub: msg.sub, at: performance.now() / 1000 };
         break;
       case "ahit":
         this.onAnimalHit(msg);
-        break;
-      case "catch":
-        if (msg.by !== this.myId) break;
-        this.bite = null;
-        this.banner = {
-          title: msg.fish ? ITEMS[msg.fish].name : "It got away.",
-          sub: msg.fish ? (ITEMS[msg.fish].rarity ?? null) : null,
-          at: performance.now() / 1000,
-        };
-        if (msg.fish) {
-          this.audio.chime();
-          this.pushFeed(`You caught a ${ITEMS[msg.fish].name.toLowerCase()}`);
-        } else {
-          this.audio.slip();
-          this.pushFeed("It got away");
-        }
         break;
       case "feed":
         this.pushFeed(msg.text);
@@ -991,83 +938,14 @@ export class Game {
       this.audio.hit(this.weapon, false);
       if (msg.dead) {
         this.audio.chime();
-        this.pushFeed(`You brought down a ${msg.kind} · carcass in your pack`);
+        this.pushFeed(
+          `You brought down a ${SPECIES[msg.kind].name.toLowerCase()} · carcass in your pack`,
+        );
       }
     } else if (a) {
       const near = 1 - this.distanceTo(a.x, a.z) / 30;
       if (near > 0) this.audio.hit(null, false, near);
     }
-  }
-
-  private onLine(msg: Extract<ServerMsg, { t: "line" }>) {
-    const from = this.tmpV;
-    if (msg.by === this.myId) {
-      if (msg.state === "none") {
-        this.myLine = null;
-        this.bite = null;
-      } else {
-        const depth = this.world ? depthAt(this.world.ground.heightAt(msg.x, msg.z)) : 0;
-        if (msg.state === "cast") this.audio.splash(0.25);
-        this.myLine = { state: msg.state, depth };
-      }
-      this.rodTipWorld(from);
-    } else {
-      const r = this.remotes.get(msg.by);
-      if (r) from.copy(r.avatar.group.position).setY(r.avatar.group.position.y + 2);
-    }
-    this.lines.set(msg.by, msg.x, msg.z, msg.state, from);
-  }
-
-  /* The held rod's tip, placed in the world where it shows on screen. */
-  private rodTipWorld(out: THREE.Vector3) {
-    if (!this.viewmodel.rodTip(out)) {
-      out.copy(this.camera.position);
-      return false;
-    }
-    out.z = 0.5;
-    out.unproject(this.camera).sub(this.camera.position).normalize();
-    out.multiplyScalar(1.4).add(this.camera.position);
-    return true;
-  }
-
-  private tipOf = (by: number, out: THREE.Vector3) => {
-    if (by === this.myId) return !this.down && this.rodTipWorld(out);
-    const r = this.remotes.get(by);
-    if (!r?.avatar.group.visible) return false;
-    out.copy(r.avatar.group.position);
-    out.y += 2.1;
-    return true;
-  };
-
-  /* Cast where you're looking: onto the water, as far as the rod reaches. */
-  private castOrStrike() {
-    const tool = heldTool(this.inv);
-    const rod = tool && TOOLS[tool.kind].rod;
-    const b = this.body;
-    const world = this.world;
-    if (!rod || !b || !world) return;
-    const now = performance.now() / 1000;
-    if (this.myLine) {
-      this.conn?.send({ t: "reel", at: this.bite ? now - this.bite.at : -1 });
-      this.viewmodel.swing(false);
-      return;
-    }
-    if (now < this.attackReadyAt) return;
-    this.attackReadyAt = now + 0.6;
-    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    const flat = Math.hypot(dir.x, dir.z) || 1;
-    let reach = rod.cast;
-    if (dir.y < -0.02) reach = Math.min(rod.cast, ((this.camera.position.y - 0) / -dir.y) * flat);
-    reach = Math.max(3, reach);
-    const x = b.x + (dir.x / flat) * reach;
-    const z = b.z + (dir.z / flat) * reach;
-    this.viewmodel.swing(false);
-    this.audio.swing(null, false);
-    if (depthAt(world.ground.heightAt(x, z)) < MIN_CAST_DEPTH) {
-      this.say("Cast out over the water", 2);
-      return;
-    }
-    this.conn?.send({ t: "cast", x, z });
   }
 
   private place(s: Spawn) {
@@ -1083,11 +961,6 @@ export class Game {
     if (!this.sameWorld(info.islands)) this.buildWorld();
     const world = this.world!;
     for (const island of info.islands) this.addIsland(island);
-    this.mine = info.mine;
-    this.settlePending = false;
-    if (info.you) this.settleError = null;
-    /* Choosing where to settle needs the mouse. */
-    if (this.settling) this.input.unlock();
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
     this.board = info.board;
@@ -1154,14 +1027,15 @@ export class Game {
       }
       if (this.boat?.id !== id) this.boats.set(id, x, z, rot, speed);
     }
-    /* A boar squaring up nearby snorts before it charges. */
+    /* Anything squaring up to you nearby snorts or growls before it comes. */
     for (const [id, kind, x, , z, , state] of msg.a) {
-      if (kind !== 1) continue;
-      const was = this.boarStates.get(id);
-      if (state === ANIMAL_STATE.alert && was !== state && this.distanceTo(x, z) < 26)
+      const was = this.animalStates.get(id);
+      const fights = this.herd.roleOf(kind) !== "prey";
+      if (fights && state === ANIMAL_STATE.alert && was !== state && this.distanceTo(x, z) < 26)
         this.audio.snort(1 - this.distanceTo(x, z) / 26);
-      this.boarStates.set(id, state);
+      this.animalStates.set(id, state);
     }
+    if (this.animalStates.size > 400) this.animalStates.clear();
 
     if (msg.me) {
       this.health = msg.me.health;
@@ -1240,13 +1114,13 @@ export class Game {
     this.update(dt);
 
     if (this.world) {
-      for (const o of this.world.islands.values()) o.props.update(t);
+      for (const o of this.world.islands.values()) o.props.update(t, this.camera.position);
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
-    const holding = held && TOOLS[held.kind].rod ? "rod" : held ? TOOLS[held.kind].weapon : null;
+    const holding = held ? TOOLS[held.kind].weapon : null;
     this.viewmodel.set(holding);
-    const def = weaponDef(holding === "rod" ? null : holding);
+    const def = weaponDef(holding);
     this.viewmodel.update(dt, {
       aspect: this.camera.aspect,
       bob: this.bob,
@@ -1257,12 +1131,10 @@ export class Game {
           : null,
       blocking: this.blocking,
       kick: this.kick,
-      rod: this.rodPose(),
     });
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
-    this.lines.update(t, this.tipOf);
-    this.herd.update(dt);
+    this.herd.update(dt, this.camera.position);
     this.built.update(t);
     this.boats.update(t, dt);
     this.sky.follow(this.camera);
@@ -1372,9 +1244,7 @@ export class Game {
 
       /* Attack: instant swings on press; the warhammer and greatsword charge until release. */
       const now = performance.now() / 1000;
-      const fishing = !!(heldTool(this.inv) && TOOLS[heldTool(this.inv)!.kind].rod);
       if (this.build) this.buildInput(b);
-      else if (fishing && this.input.take("attack")) this.castOrStrike();
       else if (this.input.take("attack") && !this.blocking) {
         if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
@@ -1522,8 +1392,8 @@ export class Game {
     };
     if (this.boat) return { kind: "prefab", id: this.boat.id, label: "E · Get out" };
     const bd = world.ground.primary?.board;
-    if (FEATURES.bounties && bd)
-      consider(bd.x, bd.y, bd.z, 3.4, () => ({ kind: "board", id: 0, label: "E · Bounty board" }));
+    if (FEATURES.board && bd)
+      consider(bd.x, bd.y, bd.z, 3.6, () => ({ kind: "board", id: 0, label: "E · Guild Board" }));
     const sh = world.ground.primary?.shop;
     if (FEATURES.shop && sh)
       consider(sh.x, sh.y, sh.z, 3.4, () => ({
@@ -1554,11 +1424,6 @@ export class Game {
     return best;
   }
 
-  private rodHint() {
-    if (this.myLine) return "Click to reel in";
-    return "Click to cast · deeper water, rarer fish";
-  }
-
   /* ---------- building ---------- */
 
   private ownedKits() {
@@ -1583,7 +1448,6 @@ export class Game {
       );
       return;
     }
-    if (this.myLine) this.conn?.send({ t: "reel", at: -1 });
     this.build = { index: 0, turn: 0, aim: null, verdict: null, target: null };
   }
 
@@ -1773,7 +1637,7 @@ export class Game {
       .map(([id, count]) => ({ id, name: ITEMS[id].name, count }));
   }
 
-  acceptBounty(id: number) {
+  acceptContract(id: number) {
     this.conn?.send({ t: "accept", id });
   }
 
@@ -1781,18 +1645,70 @@ export class Game {
     this.conn?.send({ t: "turnin" });
   }
 
-  abandonBounty() {
+  abandonContract() {
     this.conn?.send({ t: "abandon" });
   }
 
-  private bountyView(b: Bounty): BountyView {
+  /* Take what the board owes you: alpha bounties and cull shares. */
+  collect() {
+    this.conn?.send({ t: "collect" });
+  }
+
+  private islandName(id: number | null) {
+    if (id === null) return null;
+    return this.world?.islands.get(id)?.info.name ?? null;
+  }
+
+  private contractView(c: Contract): ContractView {
+    const def = SPECIES[c.species];
     return {
-      id: b.id,
-      title: bountyTitle(b),
-      note: bountyNote(b),
-      reward: b.reward,
-      have: progress(this.inv, b),
-      need: b.count,
+      id: c.id,
+      title: contractTitle(c),
+      note: def.note,
+      island: this.islandName(c.island),
+      role: def.role,
+      reward: c.reward,
+      have: progress(this.inv, c),
+      need: c.count,
+    };
+  }
+
+  private guildView(now: number): GuildView {
+    const board = this.board;
+    const clock = this.haveClock ? now + this.offset : 0;
+    const left = (t: number) => Math.max(0, t - clock);
+    const a = board.alpha;
+    const c = board.cull;
+    return {
+      near: this.nearBoard(),
+      mission: this.inv.mission ? this.contractView(this.inv.mission) : null,
+      contracts: board.contracts.map((o) => this.contractView(o)),
+      alpha: a
+        ? {
+            name: a.name,
+            kind: SPECIES[a.species].name,
+            island: this.islandName(a.island) ?? "the wilds",
+            reward: a.reward,
+            left: left(a.endsAt),
+            slainBy: a.slainBy,
+          }
+        : null,
+      cull: c
+        ? {
+            island: this.islandName(c.island) ?? "the wilds",
+            kind: SPECIES[c.species].plural,
+            need: c.need,
+            done: c.done,
+            pot: c.pot,
+            left: left(c.endsAt),
+            state: c.state,
+            hunters: c.hunters,
+          }
+        : null,
+      nextAlpha: board.nextAlpha === null ? null : left(board.nextAlpha),
+      nextCull: board.nextCull === null ? null : left(board.nextCull),
+      payouts: this.inv.payouts,
+      owed: this.inv.payouts.reduce((n, p) => n + p.reward, 0),
     };
   }
 
@@ -1800,7 +1716,7 @@ export class Game {
     const b = this.body;
     const bd = this.world?.ground.primary?.board;
     return (
-      !!b && !!bd && Math.hypot(bd.x - b.x, bd.z - b.z) < BOARD_REACH && Math.abs(bd.y - b.y) < 3
+      !!b && !!bd && Math.hypot(bd.x - b.x, bd.z - b.z) < BOARD_REACH && Math.abs(bd.y - b.y) < 2.5
     );
   }
 
@@ -1828,7 +1744,7 @@ export class Game {
     for (const [id, n] of Object.entries(inv.items) as [ItemId, number][]) {
       if (!n) continue;
       const def = ITEMS[id];
-      items.push({ id, name: def.name, count: n, kind: def.kind, rarity: def.rarity });
+      items.push({ id, name: def.name, count: n, kind: def.kind });
     }
     return {
       coins: inv.coins,
@@ -1873,11 +1789,6 @@ export class Game {
     this.setFov(this.fov);
   }
 
-  private rodPose(): RodPose {
-    if (this.bite) return "bite";
-    return this.myLine ? "out" : "idle";
-  }
-
   /* Down: the view slumps to the ground and tips over. */
   private fallen(dt: number, b: Body) {
     const k = clamp((performance.now() / 1000 - this.downAt) / 1.1, 0, 1);
@@ -1898,9 +1809,9 @@ export class Game {
     const world = this.world;
     if (!world) return;
     const t = performance.now() / 1000;
-    /* Round the newest island (yours, once you've settled), or out over the open sea. */
+    /* Round the first island (the Harbor, in the game), or out over the open sea. */
     const islands = [...world.islands.values()];
-    const focus = world.islands.get(this.mine ?? -1) ?? islands[islands.length - 1];
+    const focus = islands[0];
     const lh = focus
       ? world.ground.islands.get(focus.info.id)!.terrain.lighthouse
       : { x: 0, y: 0, z: 0 };
@@ -1974,6 +1885,24 @@ export class Game {
     return false;
   }
 
+  /* The island you're on, or the nearest one out on the water. */
+  private whereAmI() {
+    const b = this.body;
+    const world = this.world;
+    if (!b || !world || this.mode !== "online") return null;
+    let best: string | null = null;
+    let bestD = Number.POSITIVE_INFINITY;
+    for (const o of world.islands.values()) {
+      const d = Math.hypot(o.info.x - b.x, o.info.z - b.z) - o.info.size / 2;
+      if (d < bestD) {
+        bestD = d;
+        best = o.info.name;
+      }
+    }
+    if (best === null) return null;
+    return bestD <= 0 ? best : `At sea, near ${best}`;
+  }
+
   /* ---------- HUD ---------- */
 
   private emitHud() {
@@ -2003,14 +1932,14 @@ export class Game {
       }
       for (const a of this.herd.list().values()) {
         if (a.state === ANIMAL_STATE.dead) continue;
-        const to = this.tmpV.set(a.x, a.y + (a.kind === "deer" ? 1.1 : 0.6), a.z);
+        const to = this.tmpV.set(a.x, a.y + this.herd.aimHeight(a), a.z);
         to.sub(this.camera.position);
         const d = to.length();
-        if (d > 12) continue;
+        if (d > 14) continue;
         const dot = to.normalize().dot(fwd);
         if (dot > best - 0.02) {
           best = dot;
-          target = { name: a.kind === "deer" ? "Deer" : "Boar", health: a.health };
+          target = { name: this.herd.nameOf(a), health: a.health };
         }
       }
     }
@@ -2020,18 +1949,8 @@ export class Game {
     this.onHud({
       mode: this.mode,
       connecting: this.connecting,
-      settling: this.settling
-        ? {
-            error: this.settleError,
-            pending: this.settlePending,
-            islands: this.world?.islands.size ?? 0,
-          }
-        : null,
       sheltered: playing && this.onHarbor(),
-      travel:
-        this.mode === "online" && playing
-          ? { home: this.mine !== null, onHarbor: this.onHarbor(), claimable: this.mine === null }
-          : null,
+      place: playing ? this.whereAmI() : null,
       notice: this.notice,
       humans: this.roster.length,
       name: this.myName,
@@ -2051,27 +1970,13 @@ export class Game {
       hint: this.flying
         ? "Space up · Shift down · double-tap W to rush · double-tap Space to drop"
         : this.boat
-          ? `W/S row · A/D turn · E get out${held && TOOLS[held.kind].rod ? ` · ${this.rodHint()}` : ""}`
-          : held && TOOLS[held.kind].rod
-            ? this.rodHint()
-            : held
-              ? def.hint
-              : null,
-      fishing: this.myLine
-        ? {
-            state: this.myLine.state,
-            text: this.bite
-              ? `${BITE_TEXT[this.bite.strike.rarity]} · click when the needle's in the mark`
-              : `${WATERS_LABEL[watersFor(this.myLine.depth)]} · ${this.myLine.depth.toFixed(1)} m · waiting for a bite`,
-            strike: this.bite?.strike ?? null,
-            at: this.bite?.at ?? 0,
-          }
-        : null,
-      banner: this.banner && now - this.banner.at < 2.8 ? this.banner : null,
-      economy: FEATURES.bounties,
-      bounty: this.inv.bounty ? this.bountyView(this.inv.bounty) : null,
-      board: this.board.map((b) => this.bountyView(b)),
-      nearBoard: this.nearBoard(),
+          ? "W/S row · A/D turn · E get out"
+          : held
+            ? def.hint
+            : null,
+      banner: this.banner && now - this.banner.at < 4 ? this.banner : null,
+      economy: FEATURES.board,
+      guild: this.guildView(now),
       shop: this.panel === "shop" ? this.shopView() : [],
       nearShop: this.nearShop(),
       chest: this.chestView(),

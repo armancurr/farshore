@@ -102,7 +102,7 @@ export function NameDialog(props: {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="absolute top-3 right-3 text-[#8a8a8a] hover:text-white"
+                className="absolute top-3 right-3 text-white/80 hover:text-white"
               />
             }
           >
@@ -112,7 +112,7 @@ export function NameDialog(props: {
           <DialogPrimitive.Title className="m-0 text-lg leading-tight font-bold text-white">
             You're in. Pick a name
           </DialogPrimitive.Title>
-          <DialogPrimitive.Description className="mt-1.5 text-[13px] leading-normal text-[#8a8a8a]">
+          <DialogPrimitive.Description className="mt-1.5 text-[13px] leading-normal text-white/80">
             It's how the island will know you, and it's yours for good: names can't be changed.
           </DialogPrimitive.Description>
 
@@ -157,7 +157,7 @@ export function NameDialog(props: {
               aria-live="polite"
               className={cn(
                 "mt-2.5 mb-0 flex items-center gap-1.5 text-xs",
-                check === "free" && !error ? "text-[#d6d6d6]" : "text-[#8a8a8a]",
+                check === "free" && !error ? "text-white/90" : "text-white/80",
               )}
             >
               {check === "free" && !error && <CheckIcon size={12} weight="bold" />}

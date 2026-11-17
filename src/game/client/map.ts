@@ -1,9 +1,9 @@
-import { GRAND_SIZE, TILE_SIZE } from "../shared/constants";
-import { type IslandInfo, islandHeights, type ShapeId } from "../shared/islands";
+import { GRAND_SIZE } from "../shared/constants";
+import type { IslandInfo } from "../shared/islands";
 
 /*
- * The grand map, drawn flat from above in the same survey style as the
- * island: dark sea, grey land, a contour every 5 m and a white coastline.
+ * The grand map, drawn flat from above in the world's colours: teal sea,
+ * slate-violet land, a lighter contour every 5 m and a pale coastline.
  */
 
 /* Pixels a side for one island's picture. */
@@ -63,10 +63,12 @@ export function islandImage(heights: Float32Array, n: number, size = IMAGE) {
         -1,
         Math.min(1, (h[k] - (px > 0 && py > 0 ? h[k - size - 1] : v)) * 0.25),
       );
-      let c = 74 + v * 1.4 + shade * 16;
-      if (contour) c = 196;
-      if (coast) c = 250;
-      img.data[o] = img.data[o + 1] = img.data[o + 2] = Math.max(0, Math.min(255, c));
+      /* The land's colour (#555879), lifted a little with height and light. */
+      const lift = Math.max(0.75, Math.min(1.35, 0.9 + v * 0.006 + shade * 0.1));
+      let rgb = [85 * lift, 88 * lift, 121 * lift];
+      if (contour) rgb = [129, 132, 171];
+      if (coast) rgb = [242, 251, 250];
+      for (let ch = 0; ch < 3; ch++) img.data[o + ch] = Math.max(0, Math.min(255, rgb[ch]));
       img.data[o + 3] = 255;
     }
   }
@@ -74,21 +76,7 @@ export function islandImage(heights: Float32Array, n: number, size = IMAGE) {
   return canvas;
 }
 
-const previews = new Map<string, HTMLCanvasElement>();
-
-/* A quick picture of what an island of this shape and seed would look like. */
-export function previewImage(shape: ShapeId, seed: number) {
-  const key = `${shape}:${seed}`;
-  let canvas = previews.get(key);
-  if (!canvas) {
-    canvas = islandImage(islandHeights(shape, seed, PREVIEW_GRID), PREVIEW_GRID);
-    if (previews.size > 64) previews.clear();
-    previews.set(key, canvas);
-  }
-  return canvas;
-}
-
-export type MapIsland = { info: IslandInfo; image: HTMLCanvasElement; mine: boolean };
+export type MapIsland = { info: IslandInfo; image: HTMLCanvasElement };
 export type MapPlayer = {
   id: number;
   name: string;
@@ -136,70 +124,31 @@ export function toWorld(f: MapFrame, px: number, py: number) {
 /* The same face and weight as the menu and the belt. */
 const LABEL = `700 13px Almarai, sans-serif`;
 
-export type Ghost = {
-  x: number;
-  z: number;
-  image: HTMLCanvasElement;
-  ok: boolean;
-  /* Just under the pointer, not yet picked. */
-  faint?: boolean;
-};
+const SEA = "#48b3af";
 
-/* An island picture washed red: somewhere it can't go. */
-const tinted = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
-function redden(image: HTMLCanvasElement) {
-  let out = tinted.get(image);
-  if (out) return out;
-  out = document.createElement("canvas");
-  out.width = image.width;
-  out.height = image.height;
-  const ctx = out.getContext("2d");
-  if (ctx) {
-    ctx.drawImage(image, 0, 0);
-    ctx.globalCompositeOperation = "source-atop";
-    ctx.fillStyle = "rgba(255,80,80,0.6)";
-    ctx.fillRect(0, 0, out.width, out.height);
-  }
-  tinted.set(image, out);
-  return out;
-}
-
-const SEA = "#0a0a0a";
-
-/* Draw the whole grand map: the sea, every island, everyone on it, and an island to place. */
-export function drawMap(
-  ctx: CanvasRenderingContext2D,
-  f: MapFrame,
-  view: MapView,
-  ghosts: readonly Ghost[],
-  dpr: number,
-) {
-  /* One sea, edge to edge: the map's bounds show only in where an island will go. */
+/* Draw the whole grand map: the sea, every island, and everyone on it. */
+export function drawMap(ctx: CanvasRenderingContext2D, f: MapFrame, view: MapView, dpr: number) {
+  /* One sea, edge to edge. */
   const { width, height } = ctx.canvas;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = SEA;
   ctx.fillRect(0, 0, width, height);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  const tile = (TILE_SIZE / GRAND_SIZE) * f.size;
-  const draw = (image: HTMLCanvasElement, x: number, z: number) => {
-    const p = toCanvas(f, x, z);
+  const tileOf = (o: IslandInfo) => (o.size / GRAND_SIZE) * f.size;
+  const draw = (image: HTMLCanvasElement, o: IslandInfo) => {
+    const p = toCanvas(f, o.x, o.z);
+    const tile = tileOf(o);
     ctx.drawImage(image, p.x - tile / 2, p.y - tile / 2, tile, tile);
   };
 
   /* Islands, with a faint glow off the coast; names go on last so nothing covers them. */
   ctx.imageSmoothingEnabled = true;
   ctx.save();
-  ctx.shadowColor = "rgba(255,255,255,0.12)";
-  ctx.shadowBlur = tile * 0.08;
-  for (const o of view.islands) draw(o.image, o.info.x, o.info.z);
+  ctx.shadowColor = "rgba(20,40,60,0.25)";
+  ctx.shadowBlur = (1000 / GRAND_SIZE) * f.size * 0.08;
+  for (const o of view.islands) draw(o.image, o.info);
   ctx.restore();
-
-  for (const ghost of ghosts) {
-    ctx.globalAlpha = ghost.faint ? 0.4 : 0.92;
-    draw(ghost.ok ? ghost.image : redden(ghost.image), ghost.x, ghost.z);
-    ctx.globalAlpha = 1;
-  }
 
   ctx.font = LABEL;
   ctx.textAlign = "center";
@@ -207,11 +156,11 @@ export function drawMap(
   ctx.lineJoin = "round";
   for (const o of view.islands) {
     const p = toCanvas(f, o.info.x, o.info.z);
-    const y = p.y + tile * 0.36;
+    const y = p.y + tileOf(o.info) * 0.36;
     ctx.lineWidth = 4;
     ctx.strokeStyle = "rgba(0,0,0,0.85)";
     ctx.strokeText(o.info.name, p.x, y);
-    ctx.fillStyle = o.mine ? "#ffffff" : "#9a9a9a";
+    ctx.fillStyle = o.info.harbor ? "#ffffff" : "#d8d8e6";
     ctx.fillText(o.info.name, p.x, y);
   }
 

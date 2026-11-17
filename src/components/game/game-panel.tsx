@@ -1,13 +1,10 @@
 import {
-  AnchorIcon,
   ArrowBendDownLeftIcon,
   ArrowClockwiseIcon,
   ArrowUpIcon,
   EnvelopeSimpleIcon,
   DeviceRotateIcon,
-  FlagIcon,
   HourglassMediumIcon,
-  HouseLineIcon,
   MapTrifoldIcon,
   PlayIcon,
   SignOutIcon,
@@ -26,14 +23,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
 import { enterLandscape, exitLandscape, usePortrait } from "@/lib/landscape";
 import type { Game, HudState, Mode } from "../../game/client/game";
-import type { TravelTarget } from "../../game/shared/protocol";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
 import { Marketplace } from "./marketplace";
 import { AccessCard, ControlsCard, MenuPointer, PendingCard, PlayerCard } from "./menu-cards";
 import { NameDialog } from "./name-dialog";
-import { BoardPanel, ChestPanel, InventoryPanel, ShopPanel } from "./panels";
-import { SettleScreen } from "./settle-screen";
+import { ChestPanel, GuildBoardPanel, InventoryPanel, ShopPanel } from "./panels";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
@@ -161,8 +156,7 @@ export function GamePanel(props: { onPress?: () => void }) {
         return;
       }
       if (e.code === "KeyM" && latest.current.playing) toggleMute();
-      if (e.code === "KeyN" && !e.repeat && latest.current.playing && !latest.current.hud?.settling)
-        setMapOpen((open) => !open);
+      if (e.code === "KeyN" && !e.repeat && latest.current.playing) setMapOpen((open) => !open);
       if (e.code === "Escape") setAccountOpen(false);
       /* C toggles the Controls card, anywhere but a text field. */
       const typing =
@@ -171,8 +165,8 @@ export function GamePanel(props: { onPress?: () => void }) {
         setAccountOpen(false);
         setControlsOpen((open) => !open);
       }
-      /* K opens or closes the marketplace, but not over another panel or the settle screen. */
-      const blocked = !!latest.current.hud?.panel || !!latest.current.hud?.settling;
+      /* K opens or closes the marketplace, but not over another panel. */
+      const blocked = !!latest.current.hud?.panel;
       if (e.code === "KeyK" && !e.repeat && !typing && latest.current.ready && !blocked) {
         e.preventDefault();
         if (latest.current.marketOpen) latest.current.closeMarket(true);
@@ -351,7 +345,6 @@ export function GamePanel(props: { onPress?: () => void }) {
     !touch &&
     !hud.locked &&
     !hud.panel &&
-    !hud.settling &&
     !marketOpen &&
     (!!reloadKey || performance.now() - startedAt.current > 500);
 
@@ -368,7 +361,7 @@ export function GamePanel(props: { onPress?: () => void }) {
 
       {status !== "ready" && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="font-mono text-[11px] tracking-[0.3em] text-white/50 uppercase">
+          <div className="font-mono text-[11px] tracking-[0.3em] text-white/80 uppercase">
             {status === "failed"
               ? "This browser can't draw the island (WebGL is off)"
               : "Charting the island…"}
@@ -376,23 +369,12 @@ export function GamePanel(props: { onPress?: () => void }) {
         </div>
       )}
 
-      {playing && hud && !hud.settling && (
-        <Hud hud={hud} touch={touch} onSelect={(i) => game?.selectSlot(i)} />
-      )}
+      {playing && hud && <Hud hud={hud} touch={touch} onSelect={(i) => game?.selectSlot(i)} />}
 
       {playing && hud?.connecting && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="font-sans text-xs font-bold text-white/60">Reaching the grand map…</div>
+          <div className="font-sans text-xs font-bold text-white/80">Reaching the grand map…</div>
         </div>
-      )}
-
-      {playing && hud?.settling && game && (
-        <SettleScreen
-          game={game}
-          settling={hud.settling}
-          touch={touch}
-          onLeave={() => game.closeClaim()}
-        />
       )}
 
       {playing && mapOpen && hud?.player && game && (
@@ -404,7 +386,7 @@ export function GamePanel(props: { onPress?: () => void }) {
       {playing && hud && game && (
         <>
           {hud.panel === "inventory" && <InventoryPanel hud={hud} game={game} />}
-          {hud.panel === "board" && <BoardPanel hud={hud} game={game} />}
+          {hud.panel === "board" && <GuildBoardPanel hud={hud} game={game} />}
           {hud.panel === "shop" && <ShopPanel hud={hud} game={game} />}
           {hud.panel === "chest" && <ChestPanel hud={hud} game={game} />}
         </>
@@ -502,12 +484,7 @@ export function GamePanel(props: { onPress?: () => void }) {
       {menuOpen && (
         <IslandMenu
           reloadKey={reloadKey}
-          travel={hud.travel}
-          onTravel={(to) => game?.travel(to)}
-          onClaim={() => {
-            setMapOpen(false);
-            game?.openClaim();
-          }}
+          sheltered={hud.sheltered}
           onBack={() => {
             setReloadKey(null);
             game?.lock();
@@ -535,29 +512,16 @@ export function GamePanel(props: { onPress?: () => void }) {
             <span
               className={cn(
                 menuText,
-                "text-white/45",
+                "text-white/80",
                 /* Phones: only where it fits beside the belt. */
-                touch && !hud.settling && "hidden min-[760px]:inline",
+                touch && "hidden min-[760px]:inline",
               )}
             >
               {hud.humans} online
             </span>
           )}
-          {hud?.settling ? (
-            <Button variant="menu" size="inline" onClick={() => game?.closeClaim()}>
-              Back
-              {!touch && <Kbd className={menuKbd}>Esc</Kbd>}
-            </Button>
-          ) : touch ? (
+          {touch ? (
             <>
-              {hud?.travel && (
-                <TravelLinks
-                  compact
-                  travel={hud.travel}
-                  onTravel={(to) => game?.travel(to)}
-                  onClaim={() => game?.openClaim()}
-                />
-              )}
               {mode === "online" && hud?.player && (
                 <Button
                   variant="menu"
@@ -624,15 +588,12 @@ export function GamePanel(props: { onPress?: () => void }) {
  */
 function IslandMenu(props: {
   reloadKey: string | null;
-  travel: HudState["travel"];
-  onTravel: (to: TravelTarget) => void;
-  onClaim: () => void;
+  sheltered: boolean;
   onBack: () => void;
   onLeave: () => void;
   onReload: () => void;
 }) {
   const reload = props.reloadKey;
-  const travel = props.travel;
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-black/45 px-4 backdrop-blur-[6px]">
       <div
@@ -645,21 +606,18 @@ function IslandMenu(props: {
           <h2 id="island-menu-title" className="font-sans text-2xl leading-none font-extrabold">
             {reload ? "Reload the page?" : "Still on the island"}
           </h2>
-          <p className="font-sans text-sm leading-snug text-white/60">
+          <p className="font-sans text-sm leading-snug text-white/80">
             {reload
-              ? "You'll wake up right where you are, with everything you carry. A boat seat or a line in the water won't come with you."
+              ? "You'll wake up right where you are, with everything you carry. A boat seat won't come with you."
               : "Farshore doesn't pause. The tide and everyone else keep going while you're here."}
           </p>
         </div>
-        {!reload && travel && (
-          <div className="flex flex-col items-start gap-3">
-            <TravelLinks travel={travel} onTravel={props.onTravel} onClaim={props.onClaim} />
-            <p className="font-sans text-xs leading-snug text-white/40">
-              {travel.onHarbor
-                ? "The Harbor is common ground: nobody can be hurt here."
-                : "Out here, weapons hurt. The Harbor is safe ground."}
-            </p>
-          </div>
+        {!reload && (
+          <p className="font-sans text-xs leading-snug text-white/80">
+            {props.sheltered
+              ? "The Harbor is common ground: nobody can be hurt here. Row out to the hunting islands; the Guild Board is atop the lighthouse."
+              : "Out here, weapons and animals hurt. The Harbor is safe ground: row back to it."}
+          </p>
         )}
         <div className="flex items-center gap-6">
           <Button variant="menu" size="inline" autoFocus onClick={props.onBack}>
@@ -689,57 +647,9 @@ function TurnPhone() {
     <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-5 bg-black px-8 text-center text-white select-none">
       <DeviceRotateIcon size={56} weight="light" className="animate-pulse" />
       <div className="text-lg font-bold">Turn your phone sideways</div>
-      <div className="max-w-64 text-[13px] leading-normal text-[#8a8a8a]">
+      <div className="max-w-64 text-[13px] leading-normal text-white/80">
         farshore plays in landscape. Unlock rotation if it doesn't turn.
       </div>
-    </div>
-  );
-}
-
-/*
- * Getting about: claim land of your own (free, for now), or fast travel
- * between it and the Harbor. The room refuses mid-fight, and says so.
- */
-function TravelLinks(props: {
-  travel: NonNullable<HudState["travel"]>;
-  onTravel: (to: TravelTarget) => void;
-  onClaim: () => void;
-  /* Phones: icons only, so the bar fits beside the belt in landscape. */
-  compact?: boolean;
-}) {
-  const t = props.travel;
-  const c = !!props.compact;
-  const size = c ? 18 : 14;
-  return (
-    <div className={cn("flex flex-wrap items-center", c ? "gap-4" : "gap-x-6 gap-y-3")}>
-      {t.claimable && (
-        <Button variant="menu" size="inline" aria-label="Claim an island" onClick={props.onClaim}>
-          {!c && "Claim an island"}
-          <FlagIcon size={size} weight="fill" />
-        </Button>
-      )}
-      {t.home && t.onHarbor && (
-        <Button
-          variant="menu"
-          size="inline"
-          aria-label="Travel home"
-          onClick={() => props.onTravel("home")}
-        >
-          {!c && "Travel home"}
-          <HouseLineIcon size={size} weight="fill" />
-        </Button>
-      )}
-      {!t.onHarbor && (
-        <Button
-          variant="menu"
-          size="inline"
-          aria-label="To the Harbor"
-          onClick={() => props.onTravel("harbor")}
-        >
-          {!c && "To the Harbor"}
-          <AnchorIcon size={size} weight="fill" />
-        </Button>
-      )}
     </div>
   );
 }
@@ -800,7 +710,7 @@ function PlayButton(props: { touch: boolean; lockedReason: string | null; onClic
       <TooltipTrigger render={button} />
       <TooltipContent
         {...menuCardPlacement}
-        className="w-[16rem] px-4 py-3 text-[13px] leading-normal text-[#d6d6d6]"
+        className="w-[16rem] px-4 py-3 text-[13px] leading-normal text-white/90"
       >
         <MenuPointer />
         {props.lockedReason}

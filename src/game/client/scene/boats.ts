@@ -3,7 +3,7 @@ import { ROW_SPEED } from "../../shared/boat";
 import { SEA_LEVEL } from "../../shared/constants";
 import { wrapAngle } from "../../shared/math";
 import { Batch, compose } from "./batch";
-import { inkMaterial, lineMaterial } from "./materials";
+import { inkMaterial, lineMaterial, PALETTE } from "./materials";
 
 /* The hull's outline from above, bow toward -z. */
 const OUTLINE: [number, number][] = [
@@ -59,7 +59,7 @@ let showMaterials: [THREE.Material, THREE.Material] | null = null;
  * geometry is its own to dispose of; the materials are shared and stay.
  */
 export function buildRowboat(): THREE.Group {
-  showMaterials ??= [inkMaterial(0.11), lineMaterial(0.85)];
+  showMaterials ??= [inkMaterial(0.11, { color: PALETTE.plank }), lineMaterial(0.85)];
   const [fill, line] = showMaterials;
   const h = new Batch();
   hull(h);
@@ -93,7 +93,7 @@ type Shown = {
 export class BoatView {
   readonly group = new THREE.Group();
   private boats = new Map<number, Shown>();
-  private fill = inkMaterial(0.11);
+  private fill = inkMaterial(0.11, { color: PALETTE.plank });
   private line = lineMaterial(0.85);
   private hullGeo: THREE.Group;
   private oarGeo: THREE.Group;
@@ -163,7 +163,7 @@ export class BoatView {
       const targetRowing = Math.min(1, Math.abs(b.speed) / 1.5);
       b.rowing += (targetRowing - b.rowing) * (1 - Math.exp(-dt * 2));
       if (b.rowing > 0.01)
-        b.phase = (b.phase + dt * (0.32 + Math.min(1, Math.abs(b.speed) / ROW_SPEED) * 0.1)) % 1;
+        b.phase = (b.phase + dt * (0.38 + Math.min(1, Math.abs(b.speed) / ROW_SPEED) * 0.32)) % 1;
       const drive = b.phase < 0.42;
       const progress = drive ? b.phase / 0.42 : (b.phase - 0.42) / 0.58;
       const eased = progress * progress * (3 - 2 * progress);

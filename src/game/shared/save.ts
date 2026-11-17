@@ -1,6 +1,4 @@
-import type { Bounty, BountyTarget } from "./bounties";
-import { BOUNDARY, HEALTH_MAX, MAX_ISLANDS } from "./constants";
-import { HARBOR, type IslandInfo, isShapeId, PLACE_LIMIT, tilesOverlap } from "./islands";
+import { BOUNDARY, HEALTH_MAX } from "./constants";
 import {
   HOTBAR,
   type Inventory,
@@ -8,17 +6,16 @@ import {
   isToolKind,
   type ItemId,
   MAX_TOOLS,
-  RARITIES,
-  type Rarity,
   type Tool,
   TOOLS,
 } from "./items";
+import { parseMission, parsePayouts } from "./missions";
 import { isSkinId, type SkinId } from "./skins";
 
 /*
- * What an online host stores: the grand map, and everyone who's been on it.
- * Anything that doesn't parse as the current version is treated as nothing
- * saved, and the map starts empty.
+ * What an online host stores: everyone who's been on the grand map, and what
+ * they carry. The islands themselves are authored (see WORLD), so they aren't
+ * stored. Anything that doesn't parse is treated as nothing saved.
  */
 
 export type SavedPlayer = {
@@ -30,6 +27,8 @@ export type SavedPlayer = {
   inv: Inventory;
   /* The rowboat you were sitting in. */
   boat: number | null;
+  /* Saved on a map that has since changed: wake on the Harbor, with everything you had. */
+  relocate?: boolean;
 };
 
 type Obj = Record<string, unknown>;
@@ -41,28 +40,15 @@ const int = (v: unknown, lo: number, hi: number): v is number =>
   num(v, lo, hi) && Number.isInteger(v);
 const id = (v: unknown): v is number => int(v, 0, 2 ** 31);
 
+/* Things that no longer exist (fish, say) are simply dropped. */
 function items(v: unknown): Partial<Record<ItemId, number>> | null {
   if (!isObj(v)) return null;
   const out: Partial<Record<ItemId, number>> = {};
   for (const [k, n] of Object.entries(v)) {
-    if (!isItemId(k) || !int(n, 0, 1e6)) return null;
+    if (!isItemId(k) || !int(n, 0, 1e6)) continue;
     if (n > 0) out[k] = n;
   }
   return out;
-}
-
-function target(v: unknown): BountyTarget | null {
-  if (!isObj(v)) return null;
-  if (v.kind === "item" && isItemId(v.item)) return { kind: "item", item: v.item };
-  if (v.kind === "rarity" && RARITIES.includes(v.rarity as Rarity))
-    return { kind: "rarity", rarity: v.rarity as Rarity };
-  return null;
-}
-
-function bounty(v: unknown): Bounty | null {
-  if (!isObj(v) || !id(v.id) || !int(v.count, 1, 20) || !int(v.reward, 0, 1e5)) return null;
-  const t = target(v.target);
-  return t ? { id: v.id, target: t, count: v.count, reward: v.reward } : null;
 }
 
 function inventory(v: unknown): Inventory | null {
@@ -88,13 +74,22 @@ function inventory(v: unknown): Inventory | null {
     seen.add(h);
     return h;
   });
-  const b = v.bounty === null || v.bounty === undefined ? null : bounty(v.bounty);
-  if (v.bounty && !b) return null;
+  /* A mission from an older board (a fishing bounty, say) is quietly let go. */
+  const mission = parseMission(v.mission);
   const bed = id(v.bed) ? v.bed : null;
-  return { coins: v.coins, items: its, tools, hotbar, slot: v.slot, bounty: b, bed };
+  return {
+    coins: v.coins,
+    items: its,
+    tools,
+    hotbar,
+    slot: v.slot,
+    mission,
+    payouts: parsePayouts(v.payouts),
+    bed,
+  };
 }
 
-function player(v: unknown): SavedPlayer | null {
+function player(v: unknown, relocate: boolean): SavedPlayer | null {
   if (!isObj(v)) return null;
   const lim = BOUNDARY + 10;
   if (!num(v.x, -lim, lim) || !num(v.y, -60, 200) || !num(v.z, -lim, lim) || !num(v.yaw, -100, 100))
@@ -109,82 +104,60 @@ function player(v: unknown): SavedPlayer | null {
     yaw: v.yaw,
     health: Math.max(1, v.health),
     inv,
-    boat: id(v.boat) ? v.boat : null,
+    boat: relocate ? null : id(v.boat) ? v.boat : null,
+    relocate: relocate || v.relocate === true,
   };
 }
 
 /* ---------- the online grand map ---------- */
 
-export const WORLD_SAVE_VERSION = 1;
+/*
+ * 2: the islands are authored, and nobody settles land of their own. A
+ * version 1 save still loads: its islands are dropped, and everyone keeps
+ * what they carry but wakes on the Harbor.
+ */
+export const WORLD_SAVE_VERSION = 2;
 
-/* Someone who's been here: who they are, their island (null: still on the Harbor), and where they left off. */
+/* Someone who's been here: who they are, and where they left off. */
 export type SavedProfile = {
   token: string;
   name: string;
-  island: number | null;
   saved: SavedPlayer | null;
   /* What they wear; older saves have none and get the default. */
   skin?: SkinId;
 };
 
-/*
- * The shared grand map, as an online host stores it: the islands, who owns
- * each, and every player's things. Built pieces aren't kept yet.
- */
+/* Everyone who's been on the grand map, and their things. Built pieces aren't kept yet. */
 export type WorldSave = {
   v: typeof WORLD_SAVE_VERSION;
-  islands: IslandInfo[];
   players: SavedProfile[];
-  ids: { island: number; tool: number };
+  ids: { tool: number };
 };
-
-function island(v: unknown): IslandInfo | null {
-  if (!isObj(v) || !id(v.id) || !isShapeId(v.shape) || !int(v.seed, 0, 2 ** 32 - 1)) return null;
-  if (!num(v.x, -PLACE_LIMIT - 1, PLACE_LIMIT + 1) || !num(v.z, -PLACE_LIMIT - 1, PLACE_LIMIT + 1))
-    return null;
-  if (typeof v.name !== "string" || v.name.length > 40) return null;
-  return { id: v.id, shape: v.shape, seed: v.seed, x: v.x, z: v.z, name: v.name };
-}
 
 /* A stored grand map, or null if it's missing or damaged. Bad entries are dropped, not fatal. */
 export function parseWorldSave(raw: unknown): WorldSave | null {
-  if (!isObj(raw) || raw.v !== WORLD_SAVE_VERSION || !Array.isArray(raw.islands)) return null;
+  if (!isObj(raw) || (raw.v !== 1 && raw.v !== WORLD_SAVE_VERSION)) return null;
   if (!Array.isArray(raw.players) || !isObj(raw.ids)) return null;
-  const islands: IslandInfo[] = [];
-  for (const v of raw.islands) {
-    const o = island(v);
-    if (!o || o.id === HARBOR.id || islands.length >= MAX_ISLANDS) continue;
-    /* The Harbor took the middle of the map: anything settled there before is gone. */
-    if (tilesOverlap(HARBOR.x, HARBOR.z, o.x, o.z)) continue;
-    if (islands.some((p) => p.id === o.id || tilesOverlap(p.x, p.z, o.x, o.z))) continue;
-    islands.push(o);
-  }
+  /* Every place on an old map may now be sea, or somewhere else entirely. */
+  const relocate = raw.v === 1;
   const players: SavedProfile[] = [];
   for (const v of raw.players) {
     if (!isObj(v) || typeof v.token !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(v.token))
       continue;
     if (typeof v.name !== "string" || v.name.length > 40) continue;
     if (players.some((p) => p.token === v.token)) continue;
-    const isl = id(v.island) && islands.some((o) => o.id === v.island) ? v.island : null;
-    const saved = v.saved === null || v.saved === undefined ? null : player(v.saved);
-    /* Lost your island (it stood where the Harbor is now)? You start over on the Harbor. */
-    const evicted = id(v.island) && isl === null;
+    const saved = v.saved === null || v.saved === undefined ? null : player(v.saved, relocate);
     players.push({
       token: v.token,
       name: v.name,
-      island: isl,
-      saved: evicted ? null : saved,
+      saved,
       skin: isSkinId(v.skin) ? v.skin : undefined,
     });
   }
   const tools = players.flatMap((p) => p.saved?.inv.tools.map((t) => t.id + 1) ?? []);
   return {
     v: WORLD_SAVE_VERSION,
-    islands,
     players,
-    ids: {
-      island: Math.max(id(raw.ids.island) ? raw.ids.island : 1, ...islands.map((o) => o.id + 1), 1),
-      tool: Math.max(id(raw.ids.tool) ? raw.ids.tool : 1, ...tools, 1),
-    },
+    ids: { tool: Math.max(id(raw.ids.tool) ? raw.ids.tool : 1, ...tools, 1) },
   };
 }

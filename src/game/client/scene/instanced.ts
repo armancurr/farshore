@@ -1,6 +1,14 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { edges, flatten, INK_FRAGMENT, LINE_FRAGMENT, shared } from "./materials";
+import {
+  edges,
+  flatten,
+  INK_FRAGMENT,
+  LINE_FRAGMENT,
+  lineColor,
+  shared,
+  toneColor,
+} from "./materials";
 
 /*
  * One model drawn many times in two draw calls (fill and ink lines), whatever
@@ -98,7 +106,14 @@ export class InstancedModel {
   constructor(
     parts: Part[],
     readonly max: number,
-    o: { tone: number; lineTone: number; animated?: boolean; lit?: number; side?: THREE.Side },
+    o: {
+      tone: number;
+      lineTone: number;
+      animated?: boolean;
+      lit?: number;
+      side?: THREE.Side;
+      color?: THREE.ColorRepresentation;
+    },
   ) {
     const animated = !!o.animated;
     const fills: THREE.BufferGeometry[] = [];
@@ -129,7 +144,7 @@ export class InstancedModel {
     const fillMat = new THREE.ShaderMaterial({
       uniforms: {
         ...shared,
-        uTone: { value: o.tone },
+        uColor: { value: o.color !== undefined ? new THREE.Color(o.color) : toneColor(o.tone) },
         uLit: { value: o.lit ?? 0 },
         uOpacity: { value: 1 },
       },
@@ -139,7 +154,7 @@ export class InstancedModel {
       side: o.side ?? THREE.FrontSide,
     });
     const lineMat = new THREE.ShaderMaterial({
-      uniforms: { ...shared, uTone: { value: o.lineTone }, uOpacity: { value: 1 } },
+      uniforms: { ...shared, uColor: { value: lineColor(o.lineTone) }, uOpacity: { value: 1 } },
       defines,
       vertexShader: VERTEX,
       fragmentShader: LINE_FRAGMENT,
