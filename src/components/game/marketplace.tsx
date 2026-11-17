@@ -6,15 +6,23 @@ import { Kbd } from "@/components/ui/kbd";
 import type { Game } from "../../game/client/game";
 import type { Showcase } from "../../game/client/scene/showcase";
 import { SKINS, type SkinId, skinDef } from "../../game/shared/skins";
+import { VEHICLE_KINDS, VEHICLES, type VehicleKind } from "../../game/shared/vehicles";
 import { WEAPON_KINDS, WEAPONS, type WeaponDef, type WeaponKind } from "../../game/shared/weapons";
 
-type Tab = "skins" | "weapons";
+type Tab = "skins" | "weapons" | "vehicles";
+
+const TABS: readonly [Tab, string][] = [
+  ["skins", "Skins"],
+  ["weapons", "Weapons"],
+  ["vehicles", "Vehicles"],
+];
 
 /*
  * The marketplace: whatever you're looking at stands large on the left; the
- * right is everything on offer. Two shelves: skins (one row per character)
- * and weapons (you carry one at a time). Everything is free for now; prices
- * show what each will cost once the market takes coins.
+ * right is everything on offer. Three shelves: skins (one row per character),
+ * weapons (you carry one at a time) and vehicles (spawned into the water
+ * near you, one at a time). Everything is free for now; prices show what
+ * each will cost once the market takes coins.
  */
 export function Marketplace(props: {
   game: Game;
@@ -27,13 +35,15 @@ export function Marketplace(props: {
   const [picked, setPicked] = useState<SkinId>(worn);
   const [held, setHeld] = useState<WeaponKind | null>(() => props.game.armedWith);
   const [eyed, setEyed] = useState<WeaponKind>(() => held ?? WEAPON_KINDS[0]);
+  const [ride, setRide] = useState<VehicleKind>(VEHICLE_KINDS[0]);
   const [portraits, setPortraits] = useState<Map<SkinId, string> | null>(null);
   const [weaponPortraits, setWeaponPortraits] = useState<Map<WeaponKind, string> | null>(null);
+  const [vehiclePortraits, setVehiclePortraits] = useState<Map<VehicleKind, string> | null>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const showcase = useRef<Showcase | null>(null);
   const drag = useRef<number | null>(null);
-  const latest = useRef({ tab, picked, eyed });
-  latest.current = { tab, picked, eyed };
+  const latest = useRef({ tab, picked, eyed, ride });
+  latest.current = { tab, picked, eyed, ride };
   const { onClose } = props;
 
   /* The preview and the grid's portraits share three.js with the game. */
@@ -44,9 +54,11 @@ export function Marketplace(props: {
       showcase.current = new mod.Showcase(canvas.current);
       const now = latest.current;
       if (now.tab === "skins") showcase.current.show(now.picked);
-      else showcase.current.showWeapon(now.eyed);
+      else if (now.tab === "weapons") showcase.current.showWeapon(now.eyed);
+      else showcase.current.showVehicle(now.ride);
       setPortraits(mod.portraitsOf(SKINS.map((s) => s.id)));
       setWeaponPortraits(mod.weaponPortraitsOf(WEAPON_KINDS));
+      setVehiclePortraits(mod.vehiclePortraitsOf(VEHICLE_KINDS));
     });
     return () => {
       disposed = true;
@@ -57,8 +69,9 @@ export function Marketplace(props: {
 
   useEffect(() => {
     if (tab === "skins") showcase.current?.show(picked);
-    else showcase.current?.showWeapon(eyed);
-  }, [tab, picked, eyed]);
+    else if (tab === "weapons") showcase.current?.showWeapon(eyed);
+    else showcase.current?.showVehicle(ride);
+  }, [tab, picked, eyed, ride]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -80,11 +93,21 @@ export function Marketplace(props: {
     setHeld(kind);
   };
 
+  /* Out it goes, and the market closes so you can see it land. */
+  const spawn = (kind: VehicleKind) => {
+    if (!props.game.canSpawn) return;
+    props.game.spawnVehicle(kind);
+    onClose(true);
+  };
+
   const skin = skinDef(picked);
   const weapon = WEAPONS[eyed];
+  const vehicle = VEHICLES[ride];
   const wearing = picked === worn;
   const holding = eyed === held;
-  const name = tab === "skins" ? skin.name : weapon.name;
+  const canSpawn = props.game.canSpawn;
+  const name = tab === "skins" ? skin.name : tab === "weapons" ? weapon.name : vehicle.name;
+  const price = tab === "skins" ? skin.price : tab === "weapons" ? weapon.price : vehicle.price;
 
   return (
     <div
@@ -99,7 +122,7 @@ export function Marketplace(props: {
             Marketplace
           </h2>
           <div role="tablist" aria-label="Shelves" className="flex items-baseline gap-4 sm:gap-5">
-            {(["skins", "weapons"] as const).map((t) => (
+            {TABS.map(([t, label]) => (
               <Button
                 key={t}
                 role="tab"
@@ -112,7 +135,7 @@ export function Marketplace(props: {
                   tab === t ? "text-white" : "text-white/40 hover:text-white/70",
                 )}
               >
-                {t === "skins" ? "Skins" : "Weapons"}
+                {label}
               </Button>
             ))}
           </div>
@@ -147,9 +170,23 @@ export function Marketplace(props: {
             <div className="flex min-w-0 flex-col gap-2">
               <h3 className="truncate font-sans text-3xl leading-none font-extrabold">{name}</h3>
               {tab === "weapons" && <WeaponStats def={weapon} />}
-              <Price price={tab === "skins" ? skin.price : weapon.price} />
+              {tab === "vehicles" && (
+                <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/55">
+                  {vehicle.hint}
+                </p>
+              )}
+              <Price price={price} />
             </div>
-            {tab === "skins" ? (
+            {tab === "vehicles" ? (
+              <div className="flex shrink-0 flex-col items-end gap-1.5">
+                <Button disabled={!canSpawn} onClick={() => spawn(ride)}>
+                  Spawn
+                </Button>
+                {!canSpawn && (
+                  <span className="font-sans text-[12px] text-white/45">Go ashore first</span>
+                )}
+              </div>
+            ) : tab === "skins" ? (
               <Button disabled={wearing} onClick={() => wear(picked)}>
                 {wearing ? "Wearing" : "Wear"}
                 {wearing && <CheckIcon size={14} weight="bold" />}
@@ -170,7 +207,7 @@ export function Marketplace(props: {
           </div>
         </section>
 
-        {/* Everything on the shelf: skins one row per character, weapons light to heavy. */}
+        {/* Everything on the shelf: skins one row per character, weapons light to heavy, then vehicles. */}
         <ul className="grid shrink-0 grid-cols-3 content-start gap-2 px-5 pb-5 sm:px-6 sm:pb-6 @3xl:w-[min(30rem,44%)] @3xl:overflow-y-auto @3xl:pt-1 @3xl:pl-1">
           {tab === "skins"
             ? SKINS.map((s) => (
@@ -186,20 +223,35 @@ export function Marketplace(props: {
                   />
                 </li>
               ))
-            : WEAPON_KINDS.map((k) => (
-                <li key={k}>
-                  <Tile
-                    name={WEAPONS[k].name}
-                    caption
-                    portrait={weaponPortraits?.get(k) ?? null}
-                    picked={eyed === k}
-                    chosen={held === k}
-                    chosenLabel="holding"
-                    onPick={() => setEyed(k)}
-                    onChoose={() => hold(k)}
-                  />
-                </li>
-              ))}
+            : tab === "weapons"
+              ? WEAPON_KINDS.map((k) => (
+                  <li key={k}>
+                    <Tile
+                      name={WEAPONS[k].name}
+                      caption
+                      portrait={weaponPortraits?.get(k) ?? null}
+                      picked={eyed === k}
+                      chosen={held === k}
+                      chosenLabel="holding"
+                      onPick={() => setEyed(k)}
+                      onChoose={() => hold(k)}
+                    />
+                  </li>
+                ))
+              : VEHICLE_KINDS.map((k) => (
+                  <li key={k}>
+                    <Tile
+                      name={VEHICLES[k].name}
+                      caption
+                      portrait={vehiclePortraits?.get(k) ?? null}
+                      picked={ride === k}
+                      chosen={false}
+                      chosenLabel=""
+                      onPick={() => setRide(k)}
+                      onChoose={() => spawn(k)}
+                    />
+                  </li>
+                ))}
         </ul>
       </div>
     </div>
@@ -254,7 +306,7 @@ function Stat(props: { label: string; value: string }) {
   );
 }
 
-/* One thing on offer: click to look at it, double-click to wear or hold it. */
+/* One thing on offer: click to look at it, double-click to wear, hold or spawn it. */
 function Tile(props: {
   name: string;
   /* Print the name on the tile: weapons look alike at a glance, skins don't. */

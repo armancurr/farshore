@@ -1,13 +1,15 @@
 import * as THREE from "three";
 import type { SkinId } from "../../shared/skins";
+import type { VehicleKind } from "../../shared/vehicles";
 import type { WeaponKind } from "../../shared/weapons";
+import { buildRowboat } from "./boats";
 import { edges, flatten, inkMaterial, lineMaterial } from "./materials";
 import { buildRig, disposeRig, type Rig } from "./skins";
 import { buildWeapon, WEAPON_SPAN } from "./weapons";
 
 /*
  * The marketplace's fitting room: one skin on a plinth, turning slowly and
- * walking on the spot, or one weapon standing over it. Drag to turn either.
+ * walking on the spot, or one weapon or vehicle over it. Drag to turn any.
  */
 
 /* Steps per second when a showcase skin walks on the spot. */
@@ -51,7 +53,29 @@ function displayWeapon(kind: WeaponKind) {
   return root;
 }
 
-/* A weapon's geometry is its own; its materials are shared and stay. */
+/* A vehicle on display: shrunk to sit on the plinth, a little above it as if afloat. */
+function displayVehicle(kind: VehicleKind) {
+  const root = new THREE.Group();
+  switch (kind) {
+    case "rowboat": {
+      const boat = buildRowboat();
+      /* Oar tip to oar tip it's nearly six metres; the plinth is two across. */
+      boat.scale.setScalar(0.42);
+      boat.position.y = 0.32;
+      root.add(boat);
+      break;
+    }
+  }
+  return root;
+}
+
+/* Look down on a vehicle from three-quarters up, `dist` metres off. */
+function frameVehicle(camera: THREE.PerspectiveCamera, dist: number) {
+  camera.position.set(0, dist * 0.42, -dist);
+  camera.lookAt(0, 0.45, 0);
+}
+
+/* A weapon's or vehicle's geometry is its own; its materials are shared and stay. */
 function disposeWeapon(root: THREE.Object3D) {
   root.traverse((o) => {
     if ((o as THREE.Mesh).geometry) (o as THREE.Mesh).geometry.dispose();
@@ -63,6 +87,7 @@ export class Showcase {
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
   private rig: Rig | null = null;
+  /* A weapon or a vehicle: something that stands still and turns. */
   private weapon: THREE.Group | null = null;
   private yaw = 0.55;
   private spinning = true;
@@ -97,6 +122,13 @@ export class Showcase {
     this.weapon = displayWeapon(kind);
     this.scene.add(this.weapon);
     frame(this.camera, 2.3);
+  }
+
+  showVehicle(kind: VehicleKind) {
+    this.clear();
+    this.weapon = displayVehicle(kind);
+    this.scene.add(this.weapon);
+    frameVehicle(this.camera, 6);
   }
 
   private clear() {
@@ -228,4 +260,36 @@ export function weaponPortraitsOf(
     renderer.forceContextLoss();
   }
   return new Map(kinds.map((k) => [k, weaponPortraits.get(k) as string]));
+}
+
+/* And the vehicles, seen from three-quarters up. */
+const vehiclePortraits = new Map<VehicleKind, string>();
+
+export function vehiclePortraitsOf(
+  kinds: readonly VehicleKind[],
+  width = 224,
+): Map<VehicleKind, string> {
+  const missing = kinds.filter((k) => !vehiclePortraits.has(k));
+  if (missing.length) {
+    const canvas = document.createElement("canvas");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(1);
+    renderer.setSize(width, Math.round(width * 1.25), false);
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(28, 0.8, 0.1, 50);
+    frameVehicle(camera, 7.5);
+    for (const kind of missing) {
+      const root = displayVehicle(kind);
+      root.rotation.y = 0.7;
+      scene.add(root);
+      renderer.render(scene, camera);
+      vehiclePortraits.set(kind, canvas.toDataURL("image/png"));
+      scene.remove(root);
+      disposeWeapon(root);
+    }
+    renderer.dispose();
+    renderer.forceContextLoss();
+  }
+  return new Map(kinds.map((k) => [k, vehiclePortraits.get(k) as string]));
 }

@@ -52,6 +52,29 @@ function oar() {
   return b;
 }
 
+let showMaterials: [THREE.Material, THREE.Material] | null = null;
+
+/*
+ * One rowboat on its own, oars at rest, for the marketplace to show. Its
+ * geometry is its own to dispose of; the materials are shared and stay.
+ */
+export function buildRowboat(): THREE.Group {
+  showMaterials ??= [inkMaterial(0.11), lineMaterial(0.85)];
+  const [fill, line] = showMaterials;
+  const h = new Batch();
+  hull(h);
+  const group = new THREE.Group();
+  group.add(h.build(fill, line));
+  for (const side of [1, -1]) {
+    const o = oar().build(fill, line);
+    o.scale.x = side;
+    o.position.set(0.66 * side, 0.42, 0.25);
+    o.rotation.set(0, 0, -0.25 * side);
+    group.add(o);
+  }
+  return group;
+}
+
 type Shown = {
   group: THREE.Group;
   oars: [THREE.Group, THREE.Group];

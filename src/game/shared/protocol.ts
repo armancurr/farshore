@@ -14,6 +14,7 @@ import {
 } from "./items";
 import type { Prefab } from "./prefabs";
 import { isSkinId, type SkinId } from "./skins";
+import { isVehicleKind, type VehicleKind } from "./vehicles";
 import { isWeaponKind, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string; skin: SkinId };
@@ -155,6 +156,8 @@ export type ClientMsg =
   | { t: "skin"; skin: SkinId }
   /* Take up a weapon from the marketplace, in place of the one you carry (null: put it away). */
   | { t: "arm"; kind: WeaponKind | null }
+  /* Put a vehicle from the marketplace in the water nearby, in place of the last one you spawned. */
+  | { t: "spawn"; kind: VehicleKind }
   | { t: "travel"; to: TravelTarget }
   /* Put your island on the grand map, centred at (x, z). */
   | { t: "settle"; shape: ShapeId; seed: number; x: number; z: number }
@@ -239,6 +242,8 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "arm":
       if (m.kind !== null && !isWeaponKind(m.kind)) return null;
       return { t: "arm", kind: m.kind };
+    case "spawn":
+      return isVehicleKind(m.kind) ? { t: "spawn", kind: m.kind } : null;
     case "travel":
       return m.to === "harbor" || m.to === "home" ? { t: "travel", to: m.to } : null;
     case "settle":
