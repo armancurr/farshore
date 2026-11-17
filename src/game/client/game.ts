@@ -1169,10 +1169,29 @@ export class Game {
 
     this.bikes.update(dt, this.world?.ground);
     this.update(dt);
+    if (this.devCamera) {
+      const v = this.devCamera;
+      this.camera.position.set(v.x, v.y, v.z);
+      this.camera.rotation.set(v.pitch, v.yaw, 0, "YXZ");
+    }
     this.audio.motor(this.bike === null ? null : (this.bikes.pose(this.bike)?.speed ?? 0));
 
     if (this.world) {
-      for (const o of this.world.islands.values()) o.props.update(t, this.camera.position);
+      for (const o of this.world.islands.values()) {
+        o.props.update(t, this.camera.position);
+        /* Far islands draw a coarser ground. */
+        const ground = o.group.getObjectByName("terrain") as THREE.Mesh | undefined;
+        const lod = ground?.userData.lod as
+          | { near: THREE.BufferGeometry; far: THREE.BufferGeometry }
+          | undefined;
+        if (ground && lod) {
+          const d = Math.max(
+            Math.abs(this.camera.position.x - o.info.x),
+            Math.abs(this.camera.position.z - o.info.z),
+          );
+          ground.geometry = d > o.info.size * 0.75 ? lod.far : lod.near;
+        }
+      }
     }
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
@@ -1195,11 +1214,6 @@ export class Game {
     this.herd.update(dt, this.camera.position);
     this.built.update(t);
     this.boats.update(t, dt);
-    if (this.devCamera) {
-      const v = this.devCamera;
-      this.camera.position.set(v.x, v.y, v.z);
-      this.camera.rotation.set(v.pitch, v.yaw, 0, "YXZ");
-    }
     this.sky.follow(this.camera);
     this.clouds.update(this.worldTime(), this.camera.position);
     this.camera.updateMatrixWorld();

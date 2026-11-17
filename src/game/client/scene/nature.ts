@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { mulberry32, range } from "../../shared/math";
-import type { ModelId } from "../../shared/models.gen";
+import { MODEL_BOUNDS, type ModelId } from "../../shared/models.gen";
 import { LEAF_PALETTE, SPECIES_TREES } from "../../shared/nature";
 import type { Terrain } from "../../shared/terrain";
 import { bakeModel, packMaterial, packOf, paletteUrl } from "./packs";
@@ -36,26 +36,21 @@ const tmpC = new THREE.Color();
 const UP = new THREE.Vector3(0, 1, 0);
 
 /* The little things come in patches this wide, each drawn only near you. */
-const PATCH = 90;
+const PATCH = 120;
+/* Trees and rocks are chunked this wide; past FAR a chunk draws its simplified models. */
+const CHUNK = 140;
+const FAR = 230;
 
 const GRASS: ModelId[] = [
-  "forest/grass-1-a",
   "forest/grass-1-b",
   "forest/grass-1-c",
-  "forest/grass-1-d",
-  "forest/grass-2-b",
   "forest/grass-2-c",
   "forest/grass-2-d",
 ];
 const SHRUBS: ModelId[] = [
-  "forest/bush-1-b",
   "forest/bush-1-c",
-  "forest/bush-1-e",
   "forest/bush-1-f",
-  "forest/bush-1-g",
-  "forest/bush-3-a",
   "forest/bush-3-b",
-  "forest/bush-4-d",
   "forest/bush-4-e",
 ];
 const PEBBLES: ModelId[] = [
@@ -68,6 +63,12 @@ const PEBBLES: ModelId[] = [
 export class Nature {
   readonly group = new THREE.Group();
   private patches: { mesh: THREE.InstancedMesh; x: number; z: number; range: number }[] = [];
+  private chunks: {
+    near: THREE.InstancedMesh;
+    far: THREE.InstancedMesh | null;
+    x: number;
+    z: number;
+  }[] = [];
   private disposed = false;
 
   constructor(private terrain: Terrain) {
@@ -76,19 +77,42 @@ export class Nature {
     this.plantDecor();
   }
 
-  /* Trees, rocks and palms, each sized to what the room collides with. */
+  /*
+   * Trees, rocks and palms, each sized to what the room collides with. They're
+   * split into chunks, so the camera (and the sun) can skip the ones out of
+   * view, and a chunk far from you swaps to the simplified models.
+   */
   private plantProps() {
-    const batches = new Map<
-      string,
-      { model: ModelId; palette: string; fit: "height" | "scale"; list: Place[] }
-    >();
+    type Batch = {
+      model: ModelId;
+      palette: string;
+      fit: "height" | "scale";
+      list: Place[];
+      cx: number;
+      cz: number;
+    };
+    const batches = new Map<string, Batch>();
+    const t = this.terrain;
     const add = (model: ModelId, palette: string, fit: "height" | "scale", p: Place) => {
-      const key = `${model}|${palette}`;
+      const i = Math.floor((p.x - t.ox + t.half) / CHUNK);
+      const j = Math.floor((p.z - t.oz + t.half) / CHUNK);
+      const key = `${model}|${palette}|${i},${j}`;
       let b = batches.get(key);
-      if (!b) batches.set(key, (b = { model, palette, fit, list: [] }));
+      if (!b)
+        batches.set(
+          key,
+          (b = {
+            model,
+            palette,
+            fit,
+            list: [],
+            cx: t.ox - t.half + (i + 0.5) * CHUNK,
+            cz: t.oz - t.half + (j + 0.5) * CHUNK,
+          }),
+        );
       b.list.push(p);
     };
-    for (const p of this.terrain.props) {
+    for (const p of t.props) {
       if (!p.model) continue;
       if (p.kind === "tree" && p.species) {
         const leaf = SPECIES_TREES[p.species].leaf;
@@ -112,15 +136,24 @@ export class Nature {
       }
     }
     for (const b of batches.values()) {
-      void bakeModel(b.model).then((baked) => {
+      const far = `${b.model}-far` as ModelId;
+      const hasFar = far in MODEL_BOUNDS;
+      void Promise.all([bakeModel(b.model), hasFar ? bakeModel(far) : null]).then(([baked, lo]) => {
         if (this.disposed) return;
         /* Trees are sized to their height; everything else is drawn at its scale. */
         const top = baked.min.y + baked.size.y;
         const places =
           b.fit === "height" ? b.list.map((p) => ({ ...p, s: p.s / Math.max(top, 0.01) })) : b.list;
-        this.group.add(
-          this.instance(baked.geo, packMaterial(b.palette), places, b.fit === "height"),
-        );
+        /* Leaves stir in the wind; rocks don't. */
+        const mat = packMaterial(b.palette, b.fit === "height" ? { sway: 0.05 } : {});
+        const near = this.instance(baked.geo, mat, places, b.fit === "height");
+        this.group.add(near);
+        const farMesh = lo ? this.instance(lo.geo, mat, places, b.fit === "height") : null;
+        if (farMesh) {
+          farMesh.visible = false;
+          this.group.add(farMesh);
+        }
+        this.chunks.push({ near, far: farMesh, x: b.cx, z: b.cz });
       });
     }
   }
@@ -170,22 +203,11 @@ export class Nature {
         models: GRASS,
         palette: teal,
         want: (x, z) => f.meadow(x, z) * (1 - 0.7 * f.forest(x, z)),
-        per: f.def.grass * 0.55,
+        per: f.def.grass * 0.3,
         clump: [5, 12, 3.2],
-        scale: [1.3, 2.3],
-        range: 170,
+        scale: [1.4, 2.4],
+        range: 140,
         clear: 1.8,
-      },
-      /* Grass grows thick along the verges, where the trail's edge stops the walkers. */
-      {
-        models: GRASS,
-        palette: teal,
-        want: (_x, _z, path) => (path > 2.2 && path < 4.5 ? 1 : 0),
-        per: 60,
-        clump: [3, 7, 1.4],
-        scale: [1.2, 2],
-        range: 150,
-        clear: 2.2,
       },
       /* Shrubs at the rims of the groves. */
       {
@@ -211,17 +233,6 @@ export class Nature {
         scale: [1.5, 2.6],
         range: 260,
         clear: 2.8,
-      },
-      /* Stones kicked to the side of the trails. */
-      {
-        models: PEBBLES,
-        palette: paletteUrl("forest"),
-        want: (_x, _z, path) => (path > 1.9 && path < 3.2 ? 1 : 0),
-        per: 9,
-        clump: [1, 3, 1],
-        scale: [0.35, 0.8],
-        range: 130,
-        clear: 1.9,
       },
     ];
 
@@ -275,6 +286,63 @@ export class Nature {
         }
       }
     }
+    /*
+     * The trails' edges, walked rather than scattered: tufts of grass along
+     * both verges where walkers don't tread, and the odd stone kicked aside.
+     */
+    const put = (model: ModelId, palette: string, range: number, p: Place) => {
+      const key = `${range}:${palette}:${Math.floor((p.x - t.ox + t.half) / PATCH)},${Math.floor((p.z - t.oz + t.half) / PATCH)}`;
+      let patch = patches.get(key);
+      if (!patch) patches.set(key, (patch = { range, palette, models: new Map() }));
+      let list = patch.models.get(model);
+      if (!list) patch.models.set(model, (list = []));
+      list.push(p);
+    };
+    const halfWidth = t.harbor ? 2.1 : 1.4;
+    for (const line of t.paths) {
+      for (let k = 1; k < line.length - 1; k++) {
+        const a = line[k - 1];
+        const b = line[k + 1];
+        const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+        /* Across the path: left and right of its direction. */
+        const nx = -(b.z - a.z) / len;
+        const nz = (b.x - a.x) / len;
+        for (const side of [-1, 1]) {
+          const r = rng();
+          if (r > 0.55) continue;
+          const stone = r < 0.06;
+          const off = halfWidth + (stone ? range(rng, 0.2, 0.7) : range(rng, 0.8, 2.6));
+          const x = line[k].x + nx * side * off + range(rng, -0.6, 0.6);
+          const z = line[k].z + nz * side * off + range(rng, -0.6, 0.6);
+          const y = t.heightAt(x, z);
+          if (y < 2.2 || t.normalAt(x, z)[1] < 0.8) continue;
+          if (t.places.some((p) => Math.hypot(p.x - x, p.z - z) < p.r)) continue;
+          if (t.solidsNear(x, z).some((so) => Math.hypot(so.x - x, so.z - z) < so.r + 0.3))
+            continue;
+          if (stone)
+            put(PEBBLES[Math.floor(rng() * PEBBLES.length)], paletteUrl("forest"), 130, {
+              x,
+              y: y - 0.05,
+              z,
+              rot: rng() * 6.28,
+              s: range(rng, 0.35, 0.8),
+            });
+          else {
+            const s = range(rng, 1.1, 2);
+            put(GRASS[Math.floor(rng() * GRASS.length)], teal, 150, {
+              x,
+              y: y - 0.04,
+              z,
+              rot: rng() * 6.28,
+              s,
+              sy: s * range(rng, 0.8, 1.25),
+              tint: rng(),
+            });
+          }
+        }
+      }
+    }
+
     for (const [key, patch] of patches) {
       const [i, j] = key.split(":")[2].split(",").map(Number);
       const cx = t.ox - t.half + (i + 0.5) * PATCH;
@@ -282,7 +350,12 @@ export class Nature {
       for (const [model, places] of patch.models) {
         void bakeModel(model).then((baked) => {
           if (this.disposed) return;
-          const mesh = this.instance(baked.geo, packMaterial(patch.palette), places, true);
+          const mesh = this.instance(
+            baked.geo,
+            packMaterial(patch.palette, { sway: 0.12 }),
+            places,
+            true,
+          );
           /* Grass and pebbles are too small to throw a shadow worth its cost. */
           mesh.userData.noCast = true;
           mesh.visible = false;
@@ -318,6 +391,12 @@ export class Nature {
 
   /* Only the patches of small things near you are drawn. */
   update(eye: THREE.Vector3) {
+    for (const c of this.chunks) {
+      if (!c.far) continue;
+      const far = Math.hypot(c.x - eye.x, c.z - eye.z) > FAR + CHUNK * 0.71;
+      c.near.visible = !far;
+      c.far.visible = far;
+    }
     const half = PATCH * 0.71;
     for (const p of this.patches)
       p.mesh.visible = Math.hypot(p.x - eye.x, p.z - eye.z) < p.range + half;
@@ -329,5 +408,6 @@ export class Nature {
     for (const o of this.group.children) (o as THREE.InstancedMesh).dispose?.();
     this.group.clear();
     this.patches = [];
+    this.chunks = [];
   }
 }

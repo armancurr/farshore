@@ -52,7 +52,7 @@ export function worldShade<M extends THREE.Material>(m: M): M {
     for (const h of hooks) h(shader);
   };
   /* Every pack material compiles the same hooks: one program per material kind. */
-  m.customProgramCacheKey = () => `world:${hooks.length}`;
+  m.customProgramCacheKey = () => `world:${hooks.length}:${m.defines?.SWAY_AMP ?? ""}`;
   return m;
 }
 
@@ -64,9 +64,9 @@ const materials = new Map<string, THREE.MeshLambertMaterial>();
  */
 export function packMaterial(
   texture: string,
-  opts: { side?: THREE.Side; alphaTest?: number } = {},
+  opts: { side?: THREE.Side; alphaTest?: number; sway?: number } = {},
 ) {
-  const key = `${texture}|${opts.side ?? THREE.FrontSide}|${opts.alphaTest ?? 0}`;
+  const key = `${texture}|${opts.side ?? THREE.FrontSide}|${opts.alphaTest ?? 0}|${opts.sway ?? 0}`;
   let m = materials.get(key);
   if (!m) {
     m = worldShade(
@@ -77,6 +77,11 @@ export function packMaterial(
       }),
     );
     m.name = texture;
+    /* Swaying things bend in the wind, more the higher up they are (see the sway hook). */
+    if (opts.sway) {
+      m.defines = { SWAY: "", SWAY_AMP: opts.sway.toFixed(4) };
+      m.userData.sway = opts.sway;
+    }
     materials.set(key, m);
   }
   return m;

@@ -14,8 +14,16 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { NodeIO } from "@gltf-transform/core";
 import { ALL_EXTENSIONS, EXTMeshoptCompression } from "@gltf-transform/extensions";
-import { dedup, getBounds, meshopt, prune, quantize, reorder } from "@gltf-transform/functions";
-import { MeshoptEncoder } from "meshoptimizer";
+import {
+  dedup,
+  getBounds,
+  prune,
+  quantize,
+  reorder,
+  simplify,
+  weld,
+} from "@gltf-transform/functions";
+import { MeshoptEncoder, MeshoptSimplifier } from "meshoptimizer";
 import sharp from "sharp";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -23,6 +31,7 @@ const SRC = join(ROOT, "assets-src");
 const OUT = join(ROOT, "public/models");
 
 await MeshoptEncoder.ready;
+await MeshoptSimplifier.ready;
 const io = new NodeIO()
   .registerExtensions(ALL_EXTENSIONS)
   .registerDependencies({ "meshopt.encoder": MeshoptEncoder });
@@ -135,6 +144,12 @@ async function model(src, pack, id, opts = {}) {
   }
   /* Their names are what the game looks pieces up by; one material per pack is plenty. */
   for (const m of root.listMaterials()) m.setName(opts.material ?? pack);
+  /* A far-off copy: the same shape with a fraction of the triangles. */
+  if (opts.lod)
+    await doc.transform(
+      weld(),
+      simplify({ simplifier: MeshoptSimplifier, ratio: opts.lod, error: 0.006, lockBorder: false }),
+    );
   await doc.transform(
     dedup(),
     prune({ keepLeaves: true, keepAttributes: true }),
@@ -197,6 +212,13 @@ const fresh = (pack) => {
     "forest",
     (n) => n.endsWith("_Color1") && !n.includes("Singlesided"),
   );
+  /* Trees and rocks seen from afar: simplified copies, "<id>-far". */
+  for (const f of gltfs(join(dir, "Assets/gltf")).filter((f) =>
+    /^(Tree|Rock|Bush)_.*_Color1\.gltf$/.test(f),
+  ))
+    await model(join(dir, "Assets/gltf", f), "forest", `${kebab(f.replace(".gltf", ""))}-far`, {
+      lod: 0.5,
+    });
   for (const [name, leaf] of [
     ["palette", "foliage"],
     ["palette-teal", "teal"],

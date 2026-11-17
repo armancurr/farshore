@@ -506,18 +506,21 @@ export function createLand(terrain: Terrain) {
     uGrid: { value: terrain.grid },
   };
 
-  const geo = new THREE.PlaneGeometry(
-    terrain.size,
-    terrain.size,
-    terrain.grid - 1,
-    terrain.grid - 1,
-  );
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position as THREE.BufferAttribute;
-  for (let k = 0; k < pos.count; k++) pos.setY(k, terrain.heights[k]);
-  geo.deleteAttribute("uv");
-  geo.deleteAttribute("normal");
-  geo.computeBoundingSphere();
+  /* The ground at full detail, and a quarter of it for when the island is far off. */
+  const grid = (step: number) => {
+    const n = Math.floor((terrain.grid - 1) / step);
+    const g = new THREE.PlaneGeometry(terrain.size, terrain.size, n, n);
+    g.rotateX(-Math.PI / 2);
+    const pos = g.attributes.position as THREE.BufferAttribute;
+    for (let k = 0; k < pos.count; k++)
+      pos.setY(k, terrain.heightAt(terrain.ox + pos.getX(k), terrain.oz + pos.getZ(k)));
+    g.deleteAttribute("uv");
+    g.deleteAttribute("normal");
+    g.computeBoundingSphere();
+    return g;
+  };
+  const geo = grid(1);
+  const far = grid(4);
   const groundMat = new THREE.ShaderMaterial({
     uniforms: {
       ...shared,
@@ -533,6 +536,9 @@ export function createLand(terrain: Terrain) {
   });
   const ground = new THREE.Mesh(geo, groundMat);
   ground.name = "terrain";
+  /* The shadows come from what stands on the ground; the ground's own relief is shaded by the sun. */
+  ground.userData.noCast = true;
+  ground.userData.lod = { near: geo, far };
   ground.position.set(terrain.ox, 0, terrain.oz);
 
   /* A touch wider than the tile, so it overlaps the open sea rather than leaving a crack. */
@@ -564,6 +570,7 @@ export function createLand(terrain: Terrain) {
     shore.tex.dispose();
     flora.dispose();
     zones.dispose();
+    far.dispose();
   });
 
   return [ground, sea] as const;

@@ -153,8 +153,32 @@ addShadeHook((shader) => {
     uCloudArea: shared.uCloudArea,
     uSun: shared.uSun,
   });
+  shader.uniforms.uTime = shared.uTime;
   shader.vertexShader = shader.vertexShader
-    .replace("#include <common>", "#include <common>\nvarying vec3 vShadowWorld;")
+    .replace(
+      "#include <common>",
+      "#include <common>\nvarying vec3 vShadowWorld;\nuniform float uTime;",
+    )
+    .replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+      #ifdef SWAY
+      {
+        /* A slow push from the wind with a quicker flutter on top, growing toward the tip. */
+        vec3 anchor = vec3(0.0);
+        #ifdef USE_INSTANCING
+          anchor = instanceMatrix[3].xyz;
+        #endif
+        float tip = max(position.y, 0.0);
+        float bend = tip * tip * SWAY_AMP;
+        float t = uTime;
+        float gust = sin(t * 0.9 + anchor.x * 0.05 + anchor.z * 0.04) * 0.6 + 0.4;
+        float flutter = sin(t * 3.1 + anchor.x * 0.7 + anchor.z * 0.9 + position.y * 2.0);
+        transformed.x += bend * (gust + flutter * 0.25);
+        transformed.z += bend * (gust * 0.6 + flutter * 0.2);
+      }
+      #endif`,
+    )
     .replace(
       "#include <project_vertex>",
       `#include <project_vertex>
