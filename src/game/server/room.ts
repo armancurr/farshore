@@ -41,6 +41,7 @@ import {
   createVehicle,
   distanceTo,
   exitSpot,
+  eyeOf,
   IDLE,
   packVehicle,
   placeAt,
@@ -155,6 +156,9 @@ type Member = {
   lastHurtAt: number;
   /* Falling speed from the last airborne report, for landing damage. */
   airVy: number;
+  /* Sat in a car under the sea since then (null: breathing); the next mouthful of water. */
+  underSince: number | null;
+  drownAt: number;
   /* While down: when you get back up. */
   respawnAt: number | null;
   attackReadyAt: number;
@@ -233,6 +237,9 @@ const PROBES = [
 
 /* How far from you a vehicle from the marketplace may be put down, in metres (more for big ships). */
 const LAUNCH_RANGE = 32;
+/* Under water in a car: seconds of breath, then this much health a second. */
+const DROWN_BREATH = 3;
+const DROWN_DAMAGE = 12;
 /* A helmsman who stops reporting for this long has let go of the wheel. */
 const REPORT_TIMEOUT = 0.6;
 /* Vehicles out at once: one each, and a few more with passengers still aboard. */
@@ -482,6 +489,8 @@ export class Room {
       health: HEALTH_MAX,
       lastHurtAt: -1e9,
       airVy: 0,
+      underSince: null,
+      drownAt: 0,
       respawnAt: null,
       attackReadyAt: 0,
       shoveFlagUntil: 0,
@@ -1081,9 +1090,11 @@ export class Room {
     if (Math.abs(x) > BOUNDARY || Math.abs(z) > BOUNDARY) return false;
     const h = this.world.heightAt(x, z);
     if (afloat(kind)) return h < SEA_LEVEL - 0.1 && Math.abs(y - SEA_LEVEL) < 0.6;
-    if (h < SEA_LEVEL - 1.5) return false;
+    /* Cars can end up on the bottom of the sea; mounts stay near the shore. */
+    if (h < SEA_LEVEL - 1.5 && VEHICLES[kind].class !== "car") return false;
     const g = this.world.groundAt(x, z, y + 1).ground;
-    return y > g - 1 && y < g + 4;
+    /* A car can be well up in the air, coming down off a cliff. */
+    return y > g - 1 && y < g + (VEHICLES[kind].class === "car" ? 120 : 4);
   }
 
   /* Vehicles nobody is steering coast to a stop; everyone aboard goes where their seat does. */
@@ -1523,6 +1534,7 @@ export class Room {
       }
 
       this.tickBleed(m, now);
+      this.tickDrown(m, now);
 
       /* Stagger wears off a few seconds after the last hit. */
       if (now - m.lastHitAt > STAGGER_GRACE)
@@ -1614,6 +1626,29 @@ export class Room {
     m.bleed = null;
     m.peer.send({ t: "died", cause, by: by?.name ?? null });
     if (by) this.feed(`${m.name} was knocked out by ${by.name}`);
+  }
+
+  /*
+   * Sat in a car gone under the sea: a few seconds' breath, then it hurts
+   * each second until you get out, or black out.
+   */
+  private tickDrown(m: Member, now: number) {
+    const r = m.ride ? this.rides.get(m.ride.id) : null;
+    const under =
+      !!r && VEHICLES[r.kind].class === "car" && eyeOf(r.kind, r.state, m.ride!.seat).y < SEA_LEVEL;
+    if (!under) {
+      m.underSince = null;
+      return;
+    }
+    if (m.underSince === null) {
+      m.underSince = now;
+      m.drownAt = now + DROWN_BREATH;
+      m.peer.send({ t: "feed", text: "Your car is going under: get out (E) and swim for it" });
+      return;
+    }
+    if (now < m.drownAt) return;
+    m.drownAt = now + 1;
+    this.hurt(m, DROWN_DAMAGE, "drown");
   }
 
   /* Hitting the ground hard hurts; landing in water doesn't. */

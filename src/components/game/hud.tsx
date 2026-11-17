@@ -8,6 +8,7 @@ const DOWN_TEXT: Record<string, string> = {
   fall: "You fell too far",
   animal: "The wilds got the better of you",
   hit: "You were struck down",
+  drown: "You went down with your car",
 };
 
 /* The contract you've taken, and what's afoot on the islands. */
