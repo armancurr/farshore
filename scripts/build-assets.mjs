@@ -138,7 +138,7 @@ const bounds = {};
 /*
  * Write one model. `strip` drops its textures (the pack's palette replaces
  * them); `anims` keeps only the named clips; `meshless` keeps only the
- * skeleton and its clips (an animation library).
+ * skeleton and its clips (an animation library); `drop` removes the named nodes.
  */
 async function model(src, pack, id, opts = {}) {
   const doc = await io.read(src);
@@ -151,6 +151,8 @@ async function model(src, pack, id, opts = {}) {
     for (const m of root.listMeshes()) m.dispose();
     for (const s of root.listSkins()) s.dispose();
   }
+  /* Pieces the game supplies itself (a kart's built-in driver, say). */
+  for (const n of root.listNodes()) if (opts.drop?.includes(n.getName())) n.dispose();
   if (opts.strip !== false) {
     for (const t of root.listTextures()) t.dispose();
   }
@@ -377,6 +379,7 @@ const fresh = (pack) => {
     "boat-house-d",
     "ship-small",
     "ship-large",
+    "ship-ocean-liner",
     "ship-small-ghost",
     "buoy",
     "buoy-flag",
@@ -429,9 +432,12 @@ const fresh = (pack) => {
     "race-future",
     "delivery",
     "delivery-flat",
+    "kart-oozi",
   ];
   counts.cars = await each(KENNEY("k-car-kit"), "cars", (n) => CARS.includes(n), {
     material: "cars",
+    /* The karts come with a driver at the wheel; the rider takes that seat. */
+    drop: ["character"],
   });
   await palette(
     join(KENNEY("k-car-kit"), "Textures/colormap.png"),

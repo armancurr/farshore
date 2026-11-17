@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { mulberry32, range } from "../../shared/math";
 import { MODEL_BOUNDS, type ModelId } from "../../shared/models.gen";
+import { ROAD_HALF } from "../../shared/paths";
 import { LEAF_PALETTE, SPECIES_TREES } from "../../shared/nature";
 import type { Terrain } from "../../shared/terrain";
 import { bakeModel, packMaterial, packOf, paletteUrl } from "./packs";
@@ -207,7 +208,7 @@ export class Nature {
         clump: [5, 12, 3.2],
         scale: [1.4, 2.4],
         range: 140,
-        clear: 1.8,
+        clear: ROAD_HALF + 0.6,
       },
       /* Shrubs at the rims of the groves. */
       {
@@ -221,7 +222,7 @@ export class Nature {
         clump: [2, 5, 3],
         scale: [1.4, 2.6],
         range: 300,
-        clear: 2.8,
+        clear: ROAD_HALF + 1.6,
       },
       /* Flowering shrubs out in the open grass. */
       {
@@ -233,7 +234,7 @@ export class Nature {
         clump: [2, 4, 2.5],
         scale: [1.5, 2.6],
         range: 260,
-        clear: 2.8,
+        clear: ROAD_HALF + 1.6,
       },
     ];
 
@@ -288,7 +289,7 @@ export class Nature {
       }
     }
     /*
-     * The trails' edges, walked rather than scattered: tufts of grass along
+     * The roads' edges, walked rather than scattered: tufts of grass along
      * both verges where walkers don't tread, and the odd stone kicked aside.
      */
     const put = (model: ModelId, palette: string, range: number, p: Place) => {
@@ -299,7 +300,7 @@ export class Nature {
       if (!list) patch.models.set(model, (list = []));
       list.push(p);
     };
-    const halfWidth = t.harbor ? 2.1 : 1.4;
+    const halfWidth = ROAD_HALF + 0.2;
     for (const line of t.paths) {
       for (let k = 1; k < line.length - 1; k++) {
         const a = line[k - 1];

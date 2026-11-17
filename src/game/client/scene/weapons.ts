@@ -11,7 +11,9 @@ import { packModel } from "./packs";
  * Every weapon keeps the packs' hand-slot frame, so it drops straight onto a
  * KayKit hand bone: the grip at the origin, the blade or haft running up +Y,
  * and the cutting edge (or the knuckles, or a hammer's face) toward -X. A
- * shield's face looks down +Z. Each is scaled to true metres.
+ * shield's face looks down +Z. A bow lies across it instead, its limbs along
+ * X and its string toward -Z, and an arrow points down +Z. Each is scaled to
+ * true metres.
  */
 
 type Spec = {
@@ -27,9 +29,16 @@ type Spec = {
 const SPECS: Record<WeaponKind, Spec> = {
   /* A leaf-bladed fighting knife, one in each hand: 0.37 m. */
   daggers: { id: "weapons/dagger-a", scale: 0.29 },
+  "dagger-b": { id: "weapons/dagger-b", scale: 0.29 },
   knuckles: { id: "weapons/fistweapon-a", scale: 0.36 },
+  "fistweapon-b": { id: "weapons/fistweapon-b", scale: 0.36 },
   /* A curved, single-edged sailor's blade: 0.9 m. */
   cutlass: { id: "weapons/sword-c", scale: 0.42 },
+  /* Arming swords, 0.9 m; a hand axe, 0.6 m; a hammer, 0.7 m. */
+  "sword-a": { id: "weapons/sword-a", scale: 0.5 },
+  "sword-b": { id: "weapons/sword-b", scale: 0.5 },
+  "axe-a": { id: "weapons/axe-a", scale: 0.52 },
+  "hammer-c": { id: "weapons/hammer-c", scale: 0.5 },
   /* A long-bearded head on a short haft: 0.74 m. */
   beardaxe: { id: "weapons/axe-c", scale: 0.55 },
   /* The cooper's wooden mallet, from the tool bench: 0.6 m. */
@@ -38,19 +47,28 @@ const SPECS: Record<WeaponKind, Spec> = {
   /* Polearms are gripped a third of the way up, where the leading hand goes: 2.2 m and 2.3 m. */
   spear: { id: "weapons/spear-a", scale: 0.7 },
   halberd: { id: "weapons/halberd", scale: 0.84 },
+  /* A plain quarterstaff, 1.8 m, held in the middle. */
+  "staff-a": { id: "weapons/staff-a", scale: 0.84 },
   /* A double-bitted axe, 1.1 m; a long-bladed greatsword, 1.55 m; a square-headed hammer, 1 m. */
   axe: { id: "weapons/axe-b", scale: 0.66 },
+  "sword-d": { id: "weapons/sword-d", scale: 0.6 },
   greatsword: { id: "weapons/sword-e", scale: 0.48 },
   hammer: { id: "weapons/hammer-a", scale: 0.9 },
+  /* Bows, strung, 1.2 m tip to tip; a wand, 0.35 m; a mage's staff, 1.6 m. */
+  "bow-a": { id: "weapons/bow-a-with-string", scale: 0.6 },
+  "bow-b": { id: "weapons/bow-b-with-string", scale: 0.65 },
+  "wand-a": { id: "weapons/wand-a", scale: 0.3 },
+  "staff-b": { id: "weapons/staff-b", scale: 0.7 },
   /* Shields: a painted round one 0.6 m across, a kite 0.9 m tall, a studded tower with spikes. */
   shield: { id: "gear/shield-round-color", texture: "/models/gear/knight.png", scale: 0.68 },
+  /* A buckler, half a metre. */
+  "shield-a": { id: "weapons/shield-a", scale: 0.55 },
   kite: { id: "weapons/shield-b", scale: 0.68 },
   spiked: { id: "weapons/shield-c", scale: 0.64 },
   /* A pitch torch, 0.6 m, alight at its head; a pail held by its handle, hanging under the hand. */
   torch: { id: "tools/torch", scale: 0.52 },
   bucket: { id: "tools/bucket-metal", scale: 0.3, grip: 1.1 },
-  /* A ranger's longbow, 1.5 m tip to tip, and a stocked crossbow; the fire bow has a lit arrow nocked. */
-  bow: { id: "gear/bow-with-string", texture: "/models/gear/ranger.png", scale: 0.76 },
+  /* A stocked crossbow, and the rogue's longbow, 1.5 m tip to tip, with a lit arrow nocked. */
   crossbow: { id: "gear/crossbow-2handed", texture: "/models/gear/ranger.png", scale: 0.62 },
   firebow: { id: "gear/bow-with-string", texture: "/models/gear/rogue.png", scale: 0.76 },
   /* A powder keg, half a metre tall; a smoke bomb fits in the hand. */
@@ -173,22 +191,6 @@ export async function weaponsReady(kinds: readonly WeaponKind[]) {
     await new Promise((r) => setTimeout(r, 50));
 }
 
-/*
- * How long each weapon is, grip to tip (metres up its length), for framing
- * it in a picture. Bows and crossbows lie along their own z: `lies` says
- * so, and the span is measured that way.
- */
-export const WEAPON_SPAN = Object.fromEntries(
-  (Object.keys(SPECS) as WeaponKind[]).map((k) => {
-    const b = boundsOf(k);
-    const lies = !!WEAPONS[k].ranged;
-    return [
-      k,
-      lies ? { from: b.min[2], to: b.max[2], lies } : { from: b.min[1], to: b.max[1], lies },
-    ];
-  }),
-) as Record<WeaponKind, { from: number; to: number; lies: boolean }>;
-
 /* ---------- first person ---------- */
 
 /*
@@ -221,6 +223,8 @@ type Stance = {
    * blades lead with the edge (-π/2), heads show a little of their flat.
    */
   turn: number;
+  /* Turned whole instead (radians, X, Y, Z), for a model not built like a blade: a bow. */
+  tilt?: readonly [number, number, number];
   rest: Pose;
   /* Swings in turn (forehand, backhand, …); `heavy` is the combo finisher. */
   moves: Move[];
@@ -308,12 +312,73 @@ const STANCES: Record<WeaponKind, Stance> = {
       recover: 0.3,
     },
   },
+  "dagger-b": {
+    scale: 0.95,
+    turn: EDGE,
+    rest: P(0.22, -0.22, -0.42, -0.7, 0.05, 0.25),
+    moves: [
+      {
+        wind: P(0.25, -0.26, -0.34, -0.85, 0.05, 0.2),
+        via: P(0.13, -0.19, -0.58, -1.25, 0, 0.1),
+        end: P(0.06, -0.16, -0.7, -1.45, 0, 0.05),
+        strike: 0.07,
+        recover: 0.2,
+      },
+    ],
+  },
+  "fistweapon-b": {
+    scale: 1,
+    turn: EDGE,
+    dual: true,
+    rest: P(0.19, -0.19, -0.42, 0.25, 0, -0.1),
+    moves: [
+      {
+        wind: P(0.23, -0.25, -0.32, 0.3, 0.1, -0.2),
+        via: P(0.11, -0.17, -0.56, 0.15, -0.1, 0.3),
+        end: P(0.04, -0.13, -0.68, 0.1, -0.2, 0.6),
+        strike: 0.07,
+        recover: 0.2,
+      },
+    ],
+    heavy: {
+      wind: P(0.4, -0.2, -0.28, 0.2, 0.5, -0.4),
+      via: P(0.2, -0.12, -0.62, 0.1, 0, 0.6),
+      end: P(-0.16, -0.15, -0.56, 0.0, -0.6, 1.2),
+      strike: 0.12,
+      recover: 0.3,
+    },
+  },
   cutlass: {
     scale: 0.62,
     turn: -0.6,
     rest: P(0.3, -0.3, -0.46, -0.85, -0.1, 0.4),
     moves: [forehand(), backhand],
   },
+  "sword-a": {
+    scale: 0.62,
+    turn: -0.6,
+    rest: P(0.3, -0.3, -0.46, -0.85, -0.1, 0.4),
+    moves: [forehand(), backhand],
+  },
+  "sword-b": {
+    scale: 0.62,
+    turn: -0.6,
+    rest: P(0.3, -0.3, -0.46, -0.85, -0.1, 0.4),
+    moves: [forehand(0.14, 0.34), backhand],
+  },
+  "axe-a": {
+    scale: 0.6,
+    turn: -0.2,
+    rest: P(0.27, -0.3, -0.48, -0.5, -0.2, 0.4),
+    moves: [overhead(0.12, 0.38, -0.28)],
+  },
+  "hammer-c": {
+    scale: 0.6,
+    turn: -0.4,
+    rest: P(0.3, -0.33, -0.48, -0.45, -0.1, 0.32),
+    moves: [overhead(0.14, 0.4, -0.3)],
+  },
+
   beardaxe: {
     scale: 0.55,
     turn: -0.2,
@@ -363,9 +428,31 @@ const STANCES: Record<WeaponKind, Stance> = {
       },
     ],
   },
+  "staff-a": {
+    scale: 0.5,
+    turn: 0,
+    rest: P(0.24, -0.36, -0.42, -0.9, -0.1, 0.5),
+    /* A sweep from the right, right across the view. */
+    moves: [
+      {
+        wind: P(0.38, -0.28, -0.42, -1.0, -0.8, -0.1),
+        via: P(0.14, -0.28, -0.6, -1.2, 0.1, 0.8),
+        end: P(-0.2, -0.34, -0.52, -1.1, 0.8, 1.2),
+        strike: 0.13,
+        recover: 0.36,
+      },
+    ],
+  },
+  "sword-d": {
+    scale: 0.5,
+    turn: -0.5,
+    rest: P(0.28, -0.38, -0.46, -0.45, -0.1, 0.5),
+    moves: [overhead(0.16, 0.5, -0.42)],
+  },
   axe: {
     scale: 0.45,
     turn: -0.15,
+
     rest: P(0.3, -0.38, -0.48, -0.45, -0.2, 0.55),
     moves: [overhead(0.17, 0.55, -0.38)],
   },
@@ -400,8 +487,44 @@ const STANCES: Record<WeaponKind, Stance> = {
       },
     ],
   },
+  "bow-a": bowStance(0.5),
+  "bow-b": bowStance(0.48),
+  "wand-a": {
+    scale: 0.95,
+    turn: 0,
+    /* Pointed out ahead, low on the right. */
+    rest: P(0.2, -0.22, -0.44, -0.75, 0, 0.12),
+    /* A flick at the crosshair. */
+    moves: [
+      {
+        wind: P(0.23, -0.19, -0.38, -0.3, 0, 0.12),
+        via: P(0.17, -0.19, -0.54, -1.0, 0, 0.05),
+        end: P(0.13, -0.19, -0.62, -1.3, 0, 0),
+        strike: 0.06,
+        recover: 0.26,
+      },
+    ],
+  },
+  "staff-b": {
+    scale: 0.45,
+    turn: 0,
+    rest: P(0.3, -0.44, -0.5, -0.15, 0, 0.15),
+    /* Gathering the bolt: the head brought up toward the crosshair. */
+    raised: P(0.22, -0.32, -0.55, -0.5, 0, 0.05),
+    moves: [
+      {
+        wind: P(0.22, -0.32, -0.55, -0.5, 0, 0.05),
+        via: P(0.2, -0.31, -0.66, -0.8, 0, 0),
+        end: P(0.18, -0.32, -0.72, -0.9, 0, 0),
+        strike: 0.08,
+        recover: 0.4,
+      },
+    ],
+  },
   shield: shieldStance(0.62),
+  "shield-a": shieldStance(0.75),
   kite: shieldStance(0.55),
+
   spiked: shieldStance(0.55),
   /* Held up and out ahead, its flame in sight; a blow is a quick jab down at what's in front. */
   torch: {
@@ -419,8 +542,7 @@ const STANCES: Record<WeaponKind, Stance> = {
     ],
   },
   /* Low on the left, drawn up square in front of you; a loose snaps it forward a touch. */
-  bow: bowStance(),
-  firebow: bowStance(),
+  firebow: longbowStance(),
   /* Shouldered, the bolt under the crosshair; it bucks as it shoots. */
   crossbow: {
     scale: 0.7,
@@ -457,10 +579,11 @@ const STANCES: Record<WeaponKind, Stance> = {
 };
 
 /*
- * A bow, in the left hand, upright with its string toward you (as an archer
- * sees it): held low and canted, then drawn up just left of the crosshair.
+ * The adventurer's longbow (it lies along its own z), in the left hand,
+ * upright with its string toward you (as an archer sees it): held low and
+ * canted, then drawn up just left of the crosshair.
  */
-function bowStance(): Stance {
+function longbowStance(): Stance {
   const Q = Math.PI / 2;
   const drawn = P(-0.1, -0.13, -0.62, Q, 0.05, -Q);
   return {
@@ -518,6 +641,31 @@ function shieldStance(scale: number): Stance {
         end: P(-0.1, -0.19, -0.8, -0.05, 0.08, 0.0),
         strike: 0.09,
         recover: 0.3,
+      },
+    ],
+  };
+}
+
+/*
+ * Held upright in the left hand, string toward you, and brought up to the eye
+ * as it's drawn. It's turned whole, since a bow lies across its hand slot.
+ */
+function bowStance(scale: number): Stance {
+  return {
+    scale,
+    turn: 0,
+    tilt: [Math.PI, 0, -Math.PI / 2],
+    left: true,
+    rest: P(-0.2, -0.24, -0.55, -0.1, 0.2, 0.3),
+    raised: P(-0.05, -0.08, -0.5, 0, 0.04, 0.12),
+    /* Loosed: the bow hand kicks forward a touch, then settles. */
+    moves: [
+      {
+        wind: P(-0.05, -0.08, -0.5, 0, 0.04, 0.12),
+        via: P(-0.05, -0.085, -0.54, 0.04, 0.04, 0.12),
+        end: P(-0.06, -0.1, -0.53, 0.06, 0.06, 0.14),
+        strike: 0.05,
+        recover: 0.35,
       },
     ],
   };
@@ -626,7 +774,8 @@ export class ViewModel {
     const place = (hand: 0 | 1) => {
       const model = buildWeapon(kind);
       model.scale.setScalar(st.scale);
-      model.rotation.y = st.turn;
+      if (st.tilt) model.rotation.set(...st.tilt);
+      else model.rotation.y = st.turn;
       this.hands[hand].add(model);
     };
     if (st.left) place(1);

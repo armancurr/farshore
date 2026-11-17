@@ -1,18 +1,26 @@
 import { CheckIcon, CoinsIcon, FireIcon, MountainsIcon, PlusIcon } from "@phosphor-icons/react";
 import { cn } from "cn";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
+import { getArsenal, getWeapon, subscribeArsenal } from "../../game/client/arsenal";
 import type { BuildView, Game } from "../../game/client/game";
 import { islandImage, span } from "../../game/client/map";
 import { CREATIVE } from "../../game/client/modes";
-import type { Showcase } from "../../game/client/scene/showcase";
 import {
   CATALOGUE,
   CATALOGUE_IDS,
   type CatalogueId,
   SHELF_IDS,
-  SHELVES,
+  SHELVES as BUILD_SHELVES,
   type ShelfId,
 } from "../../game/shared/catalogue";
 import { CREW_PRICE, type CrewView } from "../../game/shared/crew";
@@ -31,80 +39,186 @@ import {
   plotTeam,
   upgradesOf,
 } from "../../game/shared/plots";
+import { SHOTS, SMOKE } from "../../game/shared/shots";
 import { SKINS, type SkinId, skinDef } from "../../game/shared/skins";
 import {
-  controlsOf,
+  gunsOf,
+  hullOf,
+  TIER_NAMES,
   VEHICLE_KINDS,
-  VEHICLE_SECTIONS,
+  VEHICLE_TIERS,
   VEHICLES,
   type VehicleKind,
+  type VehicleTier,
 } from "../../game/shared/vehicles";
 import {
   type Grip,
   gripOf,
   isThrown,
+  STACK,
   WEAPON_KINDS,
   WEAPONS,
   type WeaponDef,
   type WeaponKind,
 } from "../../game/shared/weapons";
-import { SHOTS, SMOKE } from "../../game/shared/shots";
 
-type Tab = "skins" | "weapons" | "vehicles" | "land" | "build" | "crew";
+export type Shelf = "weapons" | "vehicles" | "skins" | "land" | "build" | "crew";
 
-const TABS: readonly [Tab, string][] = [
-  ["skins", "Skins"],
+const SHELVES: readonly [Shelf, string][] = [
   ["weapons", "Weapons"],
   ["vehicles", "Vehicles"],
+  ["skins", "Skins"],
   ["land", "Land"],
   ["build", "Build"],
   ["crew", "Crew"],
 ];
 
+/* How it's held, in words. */
+export const HELD: Record<Grip, string> = {
+  unarmed: "Bare hands",
+  "1h": "One hand",
+  "2h": "Two hands",
+  dual: "A pair",
+  polearm: "Two hands",
+  shield: "Left arm",
+  bow: "Bow",
+  crossbow: "Shouldered",
+  magic: "Spell",
+};
+
+/* What each tier of vehicles means, under its heading. */
+const TIER_NOTES: Record<VehicleTier, string> = {
+  free: "Everyone's from the start",
+  cheap: "A few contracts from the Guild Board",
+  premium: "Worth saving up for",
+};
+
+/* Coins, the way the rest of the game writes them. */
+const coins = (n: number) => `◎ ${n.toLocaleString("en")}`;
+
+/* A vehicle's best pace, in knots afloat or km/h ashore. */
+export function topSpeed(kind: VehicleKind) {
+  const d = VEHICLES[kind];
+  const top = d.hull?.speed ?? d.car?.speed ?? d.mount?.gallop ?? 0;
+  return d.hull ? `${Math.round(top * 1.944)} knots` : `${Math.round(top * 3.6)} km/h`;
+}
+
+/* How quickly it comes round again, in words. */
+function pace(cooldown: number) {
+  if (cooldown < 0.3) return "very fast";
+  if (cooldown < 0.5) return "fast";
+  if (cooldown < 0.9) return "steady";
+  if (cooldown < 1.25) return "slow";
+  return "very slow";
+}
+
+/* How well it batters buildings: what a full blow (or shot) takes off a wooden wall. */
+function siegeOf(d: WeaponDef) {
+  const blow = (d.ranged?.damage[1] ?? d.charged ?? d.damage) * d.siege;
+  return blow >= 20 ? "heavy" : blow >= 8 ? "fair" : blow >= 2 ? "light" : "no";
+}
+
+/* One short line about a weapon: how it's held, what it does, and what makes it different. */
+function weaponSummary(kind: WeaponKind) {
+  const d = WEAPONS[kind];
+  const special = d.hint.split(" · ").slice(1).join(" · ");
+  if (d.throws) {
+    const s = SHOTS[d.throws.shot];
+    const what = s.blast
+      ? `Thrown · a ${s.blast.radius} m blast after ${s.fuse ?? 0} s · breaks stone`
+      : `Thrown · a ${SMOKE.radius * 2} m cloud for ${SMOKE.time} s`;
+    return `${what} · up to ${STACK} on your belt`;
+  }
+  const r = d.ranged;
+  const [lo, hi] = r ? r.damage : [d.damage, d.charged ?? d.damage];
+  const damage = lo === hi ? `${lo}` : `${lo}–${hi}`;
+  const reach = r ? `about ${d.reach} m range` : `${d.reach} m reach`;
+  const parts = [
+    HELD[gripOf(kind)],
+    `${damage} ${d.guard ? "bash" : "damage"}`,
+    reach,
+    pace(d.cooldown),
+    `${siegeOf(d)} siege`,
+  ];
+  return `${parts.join(" · ")}${special ? ` · ${special}` : ""}`;
+}
+
+/* One short line about a vehicle. */
+function vehicleSummary(kind: VehicleKind) {
+  const seats = VEHICLES[kind].seats.length;
+  const guns = gunsOf(kind);
+  return [
+    topSpeed(kind),
+    `${seats} ${seats === 1 ? "seat" : "seats"}`,
+    ...(guns ? [`${guns} guns a side`] : []),
+    `${hullOf(kind).toLocaleString("en")} hull`,
+    VEHICLES[kind].blurb,
+  ].join(" · ");
+}
+
 /*
- * The marketplace: whatever you're looking at stands large on the left; the
- * right is everything on offer. Four shelves: skins (one row per character),
- * weapons (you carry one at a time), vehicles (spawned on suitable terrain
- * near you, one at a time) and land (a plot of your own, set down on the
- * grand map), then build: ready-made houses, walls, towers and the rest,
- * shelf by shelf, to set down on your land; and crew: men hired to live on
- * it, each armed with a weapon you buy him. Skins, weapons and vehicles are
- * free for now, their prices showing what each will cost once the market
- * takes coins; land, what you build on it and your crew are paid for from
- * your purse.
+ * The marketplace: where weapons and vehicles are got (once, and kept on your
+ * Arsenal wheel, Q), skins are worn, and land, what's built on it and the
+ * crew who live there are bought. A pop-up over the island, shelves of
+ * pictures; pick one and the bar along the bottom says what it is and what
+ * you can do with it.
+ *
+ * Vehicles cost coins from the Guild Board, by tier: the free ones are
+ * everyone's, the rest are bought once and kept (a wreck only sends it back
+ * to the yard: spawn it again). Land, the things you build on it, your crew
+ * and their weapons, and kegs and smoke bombs (one at a time) are paid for
+ * too. The room does the selling (and says what's short); your purse sits in
+ * the header. Weapons and skins are still free; their prices show what
+ * they'll cost once those take coins too.
  */
 export function Marketplace(props: {
   game: Game;
   touch: boolean;
+  /* The shelf it opens on. */
+  shelf?: Shelf;
   /* `byClick` when a button closed it, so the island can take the mouse back. */
   onClose: (byClick: boolean) => void;
   /* A plot was chosen: go and pick a spot for it on the grand map. */
   onPlace: (size: PlotSizeId, shape: PlotShapeId) => void;
 }) {
-  const [tab, setTab] = useState<Tab>("skins");
-  const [worn, setWorn] = useState<SkinId>(() => props.game.skin);
-  const [picked, setPicked] = useState<SkinId>(worn);
-  const [held, setHeld] = useState<WeaponKind | null>(() => props.game.armedWith);
-  const [eyed, setEyed] = useState<WeaponKind>(() => held ?? WEAPON_KINDS[0]);
-  const [ride, setRide] = useState<VehicleKind>(VEHICLE_KINDS[0]);
-  const [shelf, setShelf] = useState<ShelfId>("homes");
+  const { game, onClose } = props;
+  const owned = useSyncExternalStore(subscribeArsenal, getArsenal);
+  const [shelf, setShelf] = useState<Shelf>(props.shelf ?? "weapons");
+  /* A purchase on its way to the room: its button waits until the room answers. */
+  const [buying, setBuying] = useState<VehicleKind | null>(null);
+  const [worn, setWorn] = useState<SkinId>(() => game.skin);
+  const [held, setHeld] = useState<WeaponKind | null>(() => game.armedWith);
+  const [picked, setPicked] = useState<Record<"weapons" | "vehicles" | "skins", string>>(() => ({
+    weapons: game.armedWith ?? WEAPON_KINDS[0],
+    vehicles: VEHICLE_KINDS[0],
+    skins: game.skin,
+  }));
+  const [art, setArt] = useState<
+    Record<"weapons" | "vehicles" | "skins", Map<string, string> | null>
+  >({
+    weapons: null,
+    vehicles: null,
+    skins: null,
+  });
+  const [itemArt, setItemArt] = useState<Map<CatalogueId, string> | null>(null);
+
+  /* The build shelves, and the thing picked on them. */
+  const [bench, setBench] = useState<ShelfId>("homes");
   const [thing, setThing] = useState<CatalogueId>("cottage");
   /* Your land as it stands, refreshed every so often (coins come in, things go up). */
-  const [build, setBuild] = useState(() => props.game.buildView());
+  const [build, setBuild] = useState(() => game.buildView());
   /* Your crew, likewise; the man you're looking at ("hire": the next one), and the weapon eyed for him. */
-  const [crew, setCrew] = useState(() => props.game.crew);
-  const [man, setMan] = useState<number | "hire">(() => props.game.crew.men[0]?.id ?? "hire");
-  const [kit, setKit] = useState<WeaponKind | null>(
-    () => props.game.crew.men[0]?.weapon ?? "cutlass",
-  );
+  const [crew, setCrew] = useState(() => game.crew);
+  const [man, setMan] = useState<number | "hire">(() => game.crew.men[0]?.id ?? "hire");
+  const [kit, setKit] = useState<WeaponKind | null>(() => game.crew.men[0]?.weapon ?? "cutlass");
   /* Your land, if you have some: then the shelf offers to grow it instead. */
-  const [mine] = useState(() => props.game.myPlot);
+  const [mine] = useState(() => game.myPlot);
   const owns = mine?.plot?.size ?? null;
   const growTo = owns ? upgradesOf(owns) : [];
   /* Your own land as the map charts it. */
   const [minePicture] = useState(() =>
     mine
-      ? (props.game
+      ? (game
           .mapView()
           .islands.find((o) => o.info.id === mine.id)
           ?.image.toDataURL() ?? null)
@@ -116,70 +230,35 @@ export function Marketplace(props: {
   }));
   /* Looking at the land you already have, rather than something on offer. */
   const ownsThis = owns !== null && plot.size === owns;
-  const [portraits, setPortraits] = useState<Map<SkinId, string> | null>(null);
-  const [weaponPortraits, setWeaponPortraits] = useState<Map<WeaponKind, string> | null>(null);
-  const [vehiclePortraits, setVehiclePortraits] = useState<Map<VehicleKind, string> | null>(null);
-  const [itemPortraits, setItemPortraits] = useState<Map<CatalogueId, string> | null>(null);
   /* Built things wear your land's colours (blue until you have some). */
   const team = mine ? plotTeam(mine.id) : "blue";
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const showcase = useRef<Showcase | null>(null);
-  const drag = useRef<number | null>(null);
-  /* The man in the preview: the one you're looking at, or a likely-looking hand to hire. */
-  const hand = crew.men.find((c) => c.id === man) ?? null;
-  const handSkin: SkinId =
-    hand?.skin ?? (props.game.skin === "bear-chief" ? "cutpurse" : "bear-chief");
-  const latest = useRef({ tab, picked, eyed, ride, thing, team, handSkin });
-  latest.current = { tab, picked, eyed, ride, thing, team, handSkin };
-  const { onClose } = props;
 
-  /* The preview and the grid's portraits share three.js with the game. */
+  /* Portraits share three.js with the game; each is drawn once and kept. */
   useEffect(() => {
-    let disposed = false;
+    let gone = false;
     void import("../../game/client/scene/showcase").then((mod) => {
-      if (disposed || !canvas.current) return;
-      showcase.current = new mod.Showcase(canvas.current);
-      const now = latest.current;
-      if (now.tab === "skins") showcase.current.show(now.picked);
-      else if (now.tab === "weapons") showcase.current.showWeapon(now.eyed);
-      else if (now.tab === "build") showcase.current.showItem(now.thing, now.team);
-      else if (now.tab === "crew") showcase.current.show(now.handSkin);
-      else showcase.current.showVehicle(now.ride);
-      void mod.portraitsOf(SKINS.map((s) => s.id)).then((p) => {
-        if (!disposed) setPortraits(p);
-      });
-      void mod.weaponPortraitsOf(WEAPON_KINDS).then((p) => {
-        if (!disposed) setWeaponPortraits(p);
-      });
-      void mod.vehiclePortraitsOf(VEHICLE_KINDS).then((p) => {
-        if (!disposed) setVehiclePortraits(p);
-      });
-      void mod.itemPortraitsOf(CATALOGUE_IDS, latest.current.team).then((p) => {
-        if (!disposed) setItemPortraits(p);
+      const keep = (s: "weapons" | "vehicles" | "skins") => (m: Map<string, string>) => {
+        if (!gone) setArt((a) => ({ ...a, [s]: m }));
+      };
+      void mod.weaponPortraitsOf(WEAPON_KINDS).then(keep("weapons"));
+      void mod.vehiclePortraitsOf(VEHICLE_KINDS).then(keep("vehicles"));
+      void mod.portraitsOf(SKINS.map((s) => s.id)).then(keep("skins"));
+      void mod.itemPortraitsOf(CATALOGUE_IDS, team).then((m) => {
+        if (!gone) setItemArt(m);
       });
     });
     return () => {
-      disposed = true;
-      showcase.current?.dispose();
-      showcase.current = null;
+      gone = true;
     };
-  }, []);
-
-  useEffect(() => {
-    if (tab === "skins") showcase.current?.show(picked);
-    else if (tab === "weapons") showcase.current?.showWeapon(eyed);
-    else if (tab === "vehicles") showcase.current?.showVehicle(ride);
-    else if (tab === "build") showcase.current?.showItem(thing, team);
-    else if (tab === "crew") showcase.current?.show(handSkin);
-  }, [tab, picked, eyed, ride, thing, team, handSkin]);
+  }, [team]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setBuild(props.game.buildView());
-      setCrew(props.game.crew);
+      setBuild(game.buildView());
+      setCrew(game.crew);
     }, 500);
     return () => clearInterval(timer);
-  }, [props.game]);
+  }, [game]);
 
   /* A man just hired is the one you look at next; one let go takes you back to hiring. */
   const known = useRef(crew.men.map((c) => c.id));
@@ -194,8 +273,19 @@ export function Marketplace(props: {
 
   /* The land's pictures (a chart of each shape at each size) are drawn when the shelf is first opened. */
   const [landOpened, setLandOpened] = useState(false);
-  if (tab === "land" && !landOpened) setLandOpened(true);
+  if (shelf === "land" && !landOpened) setLandOpened(true);
   const lands = useMemo(() => (landOpened ? chartLands() : null), [landOpened]);
+
+  /* The room's answer is a new inventory (bought) or a line in the feed (not): stop waiting either way. */
+  useEffect(() => {
+    if (!buying) return;
+    if (owned.vehicles.includes(buying)) {
+      setBuying(null);
+      return;
+    }
+    const t = window.setTimeout(() => setBuying(null), 2500);
+    return () => window.clearTimeout(t);
+  }, [buying, owned]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -208,246 +298,424 @@ export function Marketplace(props: {
   }, [onClose]);
 
   const wear = (skin: SkinId) => {
-    props.game.wear(skin);
+    game.wear(skin);
     setWorn(skin);
   };
-
   const hold = (kind: WeaponKind | null) => {
-    props.game.arm(kind);
+    game.arm(kind);
     setHeld(kind);
   };
-
+  /* Kegs and smoke bombs are bought, one at a time, onto the belt (the room takes the coins). */
+  const buyThrown = (kind: WeaponKind) => {
+    if (game.canBuy && owned.coins >= WEAPONS[kind].price) game.arm(kind);
+  };
   /* Out it goes, and the market closes so you can see it land. */
   const spawn = (kind: VehicleKind) => {
-    if (!props.game.canSpawn) return;
-    props.game.spawnVehicle(kind);
+    if (!game.canSpawn) return;
+    game.spawnVehicle(kind);
     onClose(true);
   };
-
+  const buy = (kind: VehicleKind) => {
+    if (!game.canBuy || buying || owned.coins < VEHICLES[kind].price) return;
+    setBuying(kind);
+    game.buyVehicle(kind);
+  };
   /* Off to set it down: the market closes and the ghost follows your crosshair. */
   const placeThing = (kind: CatalogueId) => {
-    if (props.game.startPlacing(kind)) onClose(true);
+    if (game.startPlacing(kind)) onClose(true);
   };
 
-  const skin = skinDef(picked);
-  const weapon = WEAPONS[eyed];
-  const vehicle = VEHICLES[ride];
-  const wearing = picked === worn;
-  const holding = eyed === held;
-  const canSpawn = props.game.canSpawn;
-  const land = PLOT_SIZES[plot.size];
-  const landName = mine
-    ? ownsThis
-      ? mine.name
-      : `Grow to a ${land.name.toLowerCase()}`
-    : `${PLOT_SHAPES[plot.shape].name} ${land.name.toLowerCase()}`;
-  const name =
-    tab === "skins"
-      ? skin.name
-      : tab === "weapons"
-        ? weapon.name
-        : tab === "vehicles"
-          ? vehicle.name
-          : tab === "build"
-            ? CATALOGUE[thing].name
-            : tab === "crew"
-              ? (hand?.name ?? "Hire a man")
-              : landName;
-  const price = tab === "skins" ? skin.price : tab === "weapons" ? weapon.price : vehicle.price;
-  const landPicture =
-    tab !== "land"
-      ? null
-      : ownsThis && minePicture
-        ? minePicture
-        : (lands?.get(landKey(plot.size, plot.shape))?.url ?? null);
+  /*
+   * Double-click (or the bar's first button): get it, or use it if it's yours.
+   * Coins are only spent from the button, never by a double-click.
+   */
+  const primary = (target: string, byButton = false) => {
+    if (shelf === "skins") return wear(target as SkinId);
+    if (shelf === "weapons") {
+      const kind = target as WeaponKind;
+      if (isThrown(kind)) {
+        if (byButton) buyThrown(kind);
+      } else if (!owned.weapons.includes(kind)) getWeapon(kind);
+      else hold(kind);
+      return;
+    }
+    const kind = target as VehicleKind;
+    if (owned.vehicles.includes(kind)) spawn(kind);
+    else if (byButton) buy(kind);
+  };
+
+  const tile = (
+    s: "weapons" | "vehicles" | "skins",
+    key: string,
+    label: string,
+    badge: TileBadge,
+  ) => (
+    <li key={key}>
+      <Tile
+        name={label}
+        portrait={art[s]?.get(key) || null}
+        caption={s !== "skins"}
+        picked={picked[s] === key}
+        badge={badge}
+        onPick={() => setPicked((p) => ({ ...p, [s]: key }))}
+        onChoose={() => primary(key)}
+      />
+    </li>
+  );
+
+  /* The bar along the bottom: what's picked, a line about it, and what you can do. */
+  let footer: { name: string; tag: ReactNode; about: ReactNode; actions: ReactNode };
+  if (shelf === "weapons" || shelf === "vehicles" || shelf === "skins") {
+    const id = picked[shelf];
+    const ownsIt =
+      shelf === "weapons"
+        ? owned.weapons.includes(id as WeaponKind)
+        : shelf === "vehicles"
+          ? owned.vehicles.includes(id as VehicleKind)
+          : true;
+    const thrown = shelf === "weapons" && isThrown(id as WeaponKind);
+    footer = {
+      name:
+        shelf === "weapons"
+          ? WEAPONS[id as WeaponKind].name
+          : shelf === "vehicles"
+            ? VEHICLES[id as VehicleKind].name
+            : skinDef(id as SkinId).name,
+      tag:
+        shelf === "vehicles" ? (
+          <VehiclePrice kind={id as VehicleKind} owned={ownsIt} />
+        ) : thrown ? (
+          <span className="font-sans text-[12px] font-bold text-white/85 tabular-nums">
+            {coins(WEAPONS[id as WeaponKind].price)} each
+          </span>
+        ) : (
+          !ownsIt && (
+            <Price
+              price={
+                shelf === "weapons" ? WEAPONS[id as WeaponKind].price : skinDef(id as SkinId).price
+              }
+            />
+          )
+        ),
+      about:
+        shelf === "weapons"
+          ? weaponSummary(id as WeaponKind)
+          : shelf === "vehicles"
+            ? vehicleSummary(id as VehicleKind)
+            : "Everyone sees you in it, out on the islands.",
+      actions: (
+        <Actions
+          shelf={shelf}
+          id={id}
+          owned={ownsIt}
+          held={held}
+          worn={worn}
+          canSpawn={game.canSpawn}
+          canBuy={game.canBuy}
+          coins={owned.coins}
+          buying={buying === id}
+          touch={props.touch}
+          onPrimary={() => primary(id, true)}
+          onPutAway={() => hold(null)}
+        />
+      ),
+    };
+  } else if (shelf === "land") {
+    const land = PLOT_SIZES[plot.size];
+    const area = lands?.get(landKey(plot.size, plot.shape))?.area ?? null;
+    const shield = ownsThis && mine ? game.shieldLeft(mine.id) : null;
+    footer = {
+      name: mine
+        ? ownsThis
+          ? mine.name
+          : `Grow to a ${land.name.toLowerCase()}`
+        : `${PLOT_SHAPES[plot.shape].name} ${land.name.toLowerCase()}`,
+      tag: (
+        <span className="font-sans text-[12px] font-bold text-white/85 tabular-nums">
+          {ownsThis ? "Yours" : coins(landCost(plot.size, owns ?? undefined))}
+        </span>
+      ),
+      about: (
+        <>
+          {ownsThis
+            ? growTo.length
+              ? "Your land: you wake at its Hearth. Pick a bigger size to grow it where it stands."
+              : "Your land, as big as land grows. You wake at its Hearth."
+            : `${PLOT_SHAPES[plot.shape].note} A sandy shore all round, and a Hearth at its middle where you'll wake.`}{" "}
+          {land.size} m across{area !== null && ` · ${areaText(area)} of land`}
+          {shield !== null &&
+            ` · ${shield > 0 ? `shielded, ${span(shield)} left` : "unshielded: it can be raided"}`}
+        </>
+      ),
+      actions: (
+        <LandAction
+          game={game}
+          mine={mine}
+          size={plot.size}
+          shape={plot.shape}
+          coins={owned.coins}
+          onPlace={props.onPlace}
+          onClose={onClose}
+        />
+      ),
+    };
+  } else if (shelf === "build") {
+    footer = {
+      name: CATALOGUE[thing].name,
+      tag: (
+        <span className="font-sans text-[12px] font-bold text-white/85 tabular-nums">
+          {coins(CATALOGUE[thing].price)}
+        </span>
+      ),
+      about: <ThingAbout kind={thing} build={build} />,
+      actions: <ThingAction game={game} kind={thing} build={build} onPlace={placeThing} />,
+    };
+  } else {
+    const hand = crew.men.find((c) => c.id === man) ?? null;
+    footer = {
+      name: hand?.name ?? "Hire a man",
+      tag: !hand && (
+        <span className="font-sans text-[12px] font-bold text-white/85 tabular-nums">
+          {coins(CREW_PRICE)}
+        </span>
+      ),
+      about: <CrewAbout hand={hand} order={crew.order} />,
+      actions: (
+        <CrewAction
+          game={game}
+          hand={hand}
+          kit={kit}
+          men={crew.men.length}
+          cap={build.plot?.crew ?? null}
+          ashore={build.ashore}
+          coins={owned.coins}
+        />
+      ),
+    };
+  }
+
+  const heading = (key: string, left: ReactNode, right?: ReactNode) => (
+    <li
+      key={key}
+      className="col-span-full flex items-baseline gap-2.5 pt-3 pb-0.5 first:pt-0 font-sans text-[11px]"
+    >
+      {left}
+      {right && <span className="ml-auto text-white/40 tabular-nums">{right}</span>}
+    </li>
+  );
+  const label = (text: string) => (
+    <span className="font-bold tracking-wide text-white/60 uppercase">{text}</span>
+  );
 
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="market-title"
-      className="@container absolute inset-0 z-40 flex flex-col bg-black/85 text-white backdrop-blur-md select-none"
+      className="absolute inset-0 z-40 flex items-center justify-center bg-black/45 p-3 backdrop-blur-[6px] select-none sm:p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose(true);
+      }}
     >
-      <header className="flex items-center justify-between gap-6 px-5 pt-5 sm:px-6 sm:pt-6">
-        <div className="flex min-w-0 items-baseline gap-5 sm:gap-7">
-          <h2 id="market-title" className="font-sans text-2xl leading-none font-extrabold">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="market-title"
+        className="flex h-[min(40rem,100%)] w-[min(60rem,100%)] flex-col overflow-hidden rounded-2xl border border-[#242424] bg-[#0e0e0e]/95 text-white shadow-[0_30px_80px_-20px_rgba(0,0,0,0.8)] duration-200 animate-in fade-in-0 zoom-in-[0.98]"
+      >
+        <header className="flex items-center gap-5 border-b border-[#242424] px-4 py-3 sm:gap-7 sm:px-5">
+          <h2
+            id="market-title"
+            className="hidden font-sans text-xl leading-none font-extrabold md:block"
+          >
             Marketplace
           </h2>
-          <div role="tablist" aria-label="Shelves" className="flex items-baseline gap-4 sm:gap-5">
-            {TABS.map(([t, label]) => (
-              <Button
-                key={t}
+          <div
+            role="tablist"
+            aria-label="Shelves"
+            className="flex min-w-0 items-center gap-4 overflow-x-auto [scrollbar-width:none] sm:gap-5"
+          >
+            {SHELVES.map(([s, text]) => (
+              <button
+                key={s}
+                type="button"
                 role="tab"
-                aria-selected={tab === t}
-                variant="menu"
-                size="inline"
-                onClick={() => setTab(t)}
+                aria-selected={shelf === s}
+                onClick={() => setShelf(s)}
                 className={cn(
-                  "transition-colors",
-                  tab === t ? "text-white" : "text-white/80 hover:text-white/70",
+                  "shrink-0 border-b-2 py-1 font-sans text-sm font-extrabold transition-colors outline-none focus-visible:text-white",
+                  shelf === s
+                    ? "border-[#f2665e] text-white"
+                    : "border-transparent text-white/45 hover:text-white/75",
                 )}
               >
-                {label}
-              </Button>
+                {text}
+              </button>
             ))}
           </div>
-        </div>
-        <Button variant="menu" size="inline" onClick={() => onClose(true)}>
-          Close
-          {!props.touch && <Kbd className="h-5 min-w-5 px-1.5 text-[10px]">Esc</Kbd>}
-        </Button>
-      </header>
+          <span className="flex-1" />
+          <span
+            className="flex shrink-0 items-center rounded-md bg-white/[0.06] px-2.5 py-1 font-sans text-[13px] font-bold tabular-nums"
+            title="Your coins, from the Guild Board"
+          >
+            <span className="mr-1.5 text-white/60">◎</span>
+            {owned.coins.toLocaleString("en")}
+          </span>
+          <Button variant="menu" size="inline" onClick={() => onClose(true)}>
+            Close
+            {!props.touch && <Kbd className="h-5 min-w-5 px-1.5 text-[10px]">Esc</Kbd>}
+          </Button>
+        </header>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto @3xl:flex-row @3xl:overflow-hidden">
-        {/* The preview: no frame, it stands over the dimmed island. */}
-        <section className="relative flex h-[min(26rem,60vh)] shrink-0 flex-col @3xl:h-auto @3xl:min-w-0 @3xl:flex-1">
-          <canvas
-            ref={canvas}
-            aria-label={`${name}, drag to turn`}
-            aria-hidden={tab === "land"}
-            className={cn(
-              "block min-h-0 w-full flex-1 cursor-grab touch-pan-y active:cursor-grabbing",
-              tab === "land" && "invisible",
+        <ul className="grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] content-start gap-2 overflow-y-auto p-3 [scrollbar-width:none] sm:p-4">
+          {shelf === "weapons" &&
+            WEAPON_KINDS.map((k) =>
+              tile(
+                "weapons",
+                k,
+                WEAPONS[k].name,
+                isThrown(k)
+                  ? { price: WEAPONS[k].price, short: owned.coins < WEAPONS[k].price }
+                  : held === k
+                    ? "holding"
+                    : owned.weapons.includes(k)
+                      ? "owned"
+                      : { price: WEAPONS[k].price },
+              ),
             )}
-            onPointerDown={(e) => {
-              drag.current = e.clientX;
-              e.currentTarget.setPointerCapture(e.pointerId);
-            }}
-            onPointerMove={(e) => {
-              if (drag.current === null) return;
-              showcase.current?.turn(e.clientX - drag.current);
-              drag.current = e.clientX;
-            }}
-            onPointerUp={() => {
-              drag.current = null;
-            }}
-          />
-          {/* Land is shown as it would be charted on the grand map. */}
-          {tab === "land" && landPicture && (
-            <img
-              src={landPicture}
-              alt=""
-              draggable={false}
-              className="pointer-events-none absolute inset-x-0 top-0 h-[calc(100%-10rem)] w-full object-contain p-6"
-            />
-          )}
-          <div className="flex items-end justify-between gap-4 px-5 pb-5 sm:px-6 sm:pb-6">
-            <div className="flex min-w-0 flex-col gap-2">
-              <h3 className="truncate font-sans text-3xl leading-none font-extrabold">{name}</h3>
-              {tab === "weapons" && <WeaponStats def={weapon} grip={gripOf(eyed)} />}
-              {tab === "vehicles" && <VehicleStats kind={ride} />}
-              {tab === "crew" ? (
-                <CrewStats
-                  hand={hand}
-                  kit={kit}
-                  order={crew.order}
-                  men={crew.men.length}
-                  cap={build.plot?.crew ?? null}
-                  coins={props.game.coins}
-                />
-              ) : tab === "build" ? (
-                <ThingStats kind={thing} build={build} />
-              ) : tab === "land" ? (
-                <LandStats
-                  size={plot.size}
-                  shape={plot.shape}
-                  area={lands?.get(landKey(plot.size, plot.shape))?.area ?? null}
-                  coins={props.game.coins}
-                  owned={ownsThis ? (growTo.length ? "growable" : "full") : null}
-                  shield={ownsThis && mine ? props.game.shieldLeft(mine.id) : null}
-                />
-              ) : tab === "weapons" && isThrown(eyed) ? (
-                <div className="font-sans text-sm tabular-nums text-white/80">
-                  ◎ {price} each · up to five on your belt
-                </div>
-              ) : (
-                <Price price={price} />
-              )}
-            </div>
-            {tab === "crew" ? (
-              <CrewAction
-                game={props.game}
-                hand={hand}
-                kit={kit}
-                men={crew.men.length}
-                cap={build.plot?.crew ?? null}
-                ashore={build.ashore}
-              />
-            ) : tab === "build" ? (
-              <ThingAction game={props.game} kind={thing} build={build} onPlace={placeThing} />
-            ) : tab === "land" ? (
-              <LandAction
-                game={props.game}
-                mine={mine}
-                size={plot.size}
-                shape={plot.shape}
-                onPlace={props.onPlace}
-                onClose={onClose}
-              />
-            ) : tab === "vehicles" ? (
-              <div className="flex shrink-0 flex-col items-end gap-1.5">
-                <Button disabled={!canSpawn} onClick={() => spawn(ride)}>
-                  Spawn
-                </Button>
-                {!canSpawn && (
-                  <span className="font-sans text-[12px] text-white/80">Go ashore first</span>
+          {shelf === "vehicles" &&
+            VEHICLE_TIERS.map((tier) => (
+              <Fragment key={tier}>
+                {heading(
+                  tier,
+                  <>
+                    <span className={cn("font-bold tracking-wide uppercase", TIER_TEXT[tier])}>
+                      {TIER_NAMES[tier]}
+                    </span>
+                    <span className="text-white/40">{TIER_NOTES[tier]}</span>
+                  </>,
                 )}
-              </div>
-            ) : tab === "skins" ? (
-              <Button disabled={wearing} onClick={() => wear(picked)}>
-                {wearing ? "Wearing" : "Wear"}
-                {wearing && <CheckIcon size={14} weight="bold" />}
-              </Button>
-            ) : isThrown(eyed) ? (
-              /* Kegs and smoke bombs are bought, one at a time, onto the belt. */
-              <div className="flex shrink-0 flex-col items-end gap-1.5">
-                <Button
-                  disabled={!canSpawn || props.game.coins < weapon.price}
-                  onClick={() => props.game.arm(eyed)}
-                >
-                  Buy one · ◎ {weapon.price}
-                </Button>
-                {!canSpawn && (
-                  <span className="font-sans text-[12px] text-white/80">Go ashore first</span>
+                {VEHICLE_KINDS.filter((k) => VEHICLES[k].tier === tier).map((k) =>
+                  tile(
+                    "vehicles",
+                    k,
+                    VEHICLES[k].name,
+                    owned.vehicles.includes(k)
+                      ? "owned"
+                      : { price: VEHICLES[k].price, short: owned.coins < VEHICLES[k].price },
+                  ),
                 )}
-              </div>
-            ) : holding ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <Button variant="secondary" onClick={() => hold(null)}>
-                  Put away
-                </Button>
-                <Button disabled>
-                  Holding
-                  <CheckIcon size={14} weight="bold" />
-                </Button>
-              </div>
-            ) : (
-              <Button onClick={() => hold(eyed)}>Hold</Button>
-            )}
-          </div>
-        </section>
+              </Fragment>
+            ))}
+          {shelf === "skins" &&
+            SKINS.map((s) => tile("skins", s.id, s.name, worn === s.id ? "wearing" : null))}
 
-        {/* Everything on the shelf: skins one row per character, weapons light to heavy, then vehicles. */}
-        <ul className="grid shrink-0 grid-cols-3 content-start gap-2 px-5 pb-5 sm:px-6 sm:pb-6 @3xl:w-[min(30rem,44%)] @3xl:overflow-y-auto @3xl:pt-1 @3xl:pl-1">
-          {tab === "crew" ? (
+          {shelf === "land" &&
+            (owns ? [owns, ...growTo] : PLOT_SIZE_IDS).map((size) => (
+              <Fragment key={size}>
+                {heading(
+                  size,
+                  <>
+                    {label(PLOT_SIZES[size].name)}
+                    <span className="text-white/40">{PLOT_SIZES[size].size} m across</span>
+                  </>,
+                  owns === size ? "yours" : coins(landCost(size, owns ?? undefined)),
+                )}
+                {/* Grown land keeps its shape; bought land comes in any. */}
+                {(mine ? [plot.shape] : PLOT_SHAPE_IDS).map((shape) => (
+                  <li key={shape}>
+                    <Tile
+                      name={`${PLOT_SHAPES[shape].name} ${PLOT_SIZES[size].name.toLowerCase()}`}
+                      caption
+                      portrait={
+                        owns === size && minePicture
+                          ? minePicture
+                          : (lands?.get(landKey(size, shape))?.url ?? null)
+                      }
+                      picked={plot.size === size && plot.shape === shape}
+                      badge={
+                        owns === size
+                          ? "owned"
+                          : {
+                              price: landCost(size, owns ?? undefined),
+                              short: owned.coins < landCost(size, owns ?? undefined),
+                            }
+                      }
+                      onPick={() => setPlot({ size, shape })}
+                      onChoose={() => {
+                        if (!mine && game.canBuyLand) props.onPlace(size, shape);
+                      }}
+                    />
+                  </li>
+                ))}
+              </Fragment>
+            ))}
+
+          {shelf === "build" && (
             <>
-              <li className="col-span-3 flex items-baseline justify-between pb-0.5 font-sans text-[11px] font-bold tracking-wide text-white/60 uppercase">
-                <span>Your crew</span>
-                <span className="tabular-nums">
-                  {build.plot ? `${crew.men.length} of ${build.plot.crew}` : "no land yet"}
+              <li className="col-span-full flex flex-wrap items-baseline gap-x-4 gap-y-2 pb-1">
+                <div role="tablist" aria-label="Build shelves" className="contents">
+                  {SHELF_IDS.map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={bench === id}
+                      onClick={() => {
+                        setBench(id);
+                        setThing(CATALOGUE_IDS.find((k) => CATALOGUE[k].shelf === id) ?? thing);
+                      }}
+                      className={cn(
+                        "rounded-md px-2 py-0.5 font-sans text-[12px] font-bold transition-colors outline-none focus-visible:ring-2 focus-visible:ring-white/60",
+                        bench === id
+                          ? "bg-white/[0.1] text-white"
+                          : "text-white/45 hover:text-white/75",
+                      )}
+                    >
+                      {BUILD_SHELVES[id]}
+                    </button>
+                  ))}
+                </div>
+                <span className="ml-auto font-sans text-[11px] text-white/40 tabular-nums">
+                  {build.plot
+                    ? `${build.plot.name}: ${build.plot.items} of ${build.plot.cap} things`
+                    : "Buy land first: what you build stands on it"}
                 </span>
               </li>
+              {CATALOGUE_IDS.filter((k) => CATALOGUE[k].shelf === bench).map((k) => (
+                <li key={k}>
+                  <Tile
+                    name={CATALOGUE[k].name}
+                    caption
+                    portrait={itemArt?.get(k) || null}
+                    picked={thing === k}
+                    dim={game.buildBlock(k) !== null}
+                    badge={{
+                      price: CATALOGUE[k].price,
+                      short: owned.coins < CATALOGUE[k].price,
+                    }}
+                    onPick={() => setThing(k)}
+                    onChoose={() => placeThing(k)}
+                  />
+                </li>
+              ))}
+            </>
+          )}
+
+          {shelf === "crew" && (
+            <>
+              {heading(
+                "men",
+                label("Your crew"),
+                build.plot ? `${crew.men.length} of ${build.plot.crew}` : "no land yet",
+              )}
               {crew.men.map((c) => (
                 <li key={c.id}>
                   <Tile
                     name={c.name}
                     caption
                     note={c.down ? "Knocked out" : c.weapon ? WEAPONS[c.weapon].name : "Fists"}
-                    portrait={portraits?.get(c.skin) ?? null}
+                    portrait={art.skins?.get(c.skin) || null}
                     picked={man === c.id}
-                    chosen={false}
-                    chosenLabel=""
                     dim={c.down}
+                    badge={null}
                     onPick={() => {
                       setMan(c.id);
                       setKit(c.weapon ?? kit);
@@ -461,175 +729,194 @@ export function Marketplace(props: {
                   type="button"
                   aria-pressed={man === "hire"}
                   onClick={() => setMan("hire")}
-                  onDoubleClick={() => props.game.hireCrew()}
+                  onDoubleClick={() => game.hireCrew()}
                   className={cn(
-                    "relative flex aspect-[4/5] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-white/25 bg-white/[0.02] font-sans text-[11px] font-bold text-white/70 transition-colors outline-none hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/60",
-                    man === "hire" && "border-solid bg-white/[0.08] ring-2 ring-white",
+                    "relative flex aspect-[4/5] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/20 bg-[#1a1a1a] font-sans text-[11px] font-bold text-white/70 transition-[background-color,transform] outline-none hover:-translate-y-px hover:bg-[#222] focus-visible:ring-2 focus-visible:ring-white/60",
+                    man === "hire" && "border-solid bg-[#232323] ring-2 ring-white",
                   )}
                 >
                   <PlusIcon size={22} weight="bold" />
-                  <span>Hire · ◎ {CREW_PRICE}</span>
+                  <span className="tabular-nums">Hire · {coins(CREW_PRICE)}</span>
                 </button>
               </li>
-              {hand && (
-                <>
-                  <li className="col-span-3 pt-3 pb-0.5 font-sans text-[11px] font-bold tracking-wide text-white/60 uppercase">
-                    Arm {hand.name}
-                  </li>
-                  {WEAPON_KINDS.filter((k) => !isThrown(k)).map((k) => (
-                    <li key={k}>
-                      <Tile
-                        name={WEAPONS[k].name}
-                        caption
-                        price={WEAPONS[k].price}
-                        portrait={weaponPortraits?.get(k) ?? null}
-                        picked={kit === k}
-                        chosen={hand.weapon === k}
-                        chosenLabel="carrying"
-                        onPick={() => setKit(k)}
-                        onChoose={() => props.game.armCrew(hand.id, k)}
-                      />
-                    </li>
-                  ))}
-                </>
-              )}
+              {man !== "hire" &&
+                (() => {
+                  const hand = crew.men.find((c) => c.id === man);
+                  if (!hand) return null;
+                  return (
+                    <>
+                      {heading("arm", label(`Arm ${hand.name}`), "he fights as you would with it")}
+                      {WEAPON_KINDS.filter((k) => !isThrown(k)).map((k) => (
+                        <li key={k}>
+                          <Tile
+                            name={WEAPONS[k].name}
+                            caption
+                            portrait={art.weapons?.get(k) || null}
+                            picked={kit === k}
+                            badge={
+                              hand.weapon === k
+                                ? "holding"
+                                : { price: WEAPONS[k].price, short: owned.coins < WEAPONS[k].price }
+                            }
+                            onPick={() => setKit(k)}
+                            onChoose={() => game.armCrew(hand.id, k)}
+                          />
+                        </li>
+                      ))}
+                    </>
+                  );
+                })()}
             </>
-          ) : tab === "build" ? (
-            <>
-              <li className="col-span-3 flex flex-wrap items-baseline gap-x-4 gap-y-2 pb-1">
-                <div role="tablist" aria-label="Build shelves" className="contents">
-                  {SHELF_IDS.map((id) => (
-                    <Button
-                      key={id}
-                      role="tab"
-                      aria-selected={shelf === id}
-                      variant="menu"
-                      size="inline"
-                      onClick={() => {
-                        setShelf(id);
-                        setThing(CATALOGUE_IDS.find((k) => CATALOGUE[k].shelf === id) ?? thing);
-                      }}
-                      className={cn(
-                        "text-[13px] transition-colors",
-                        shelf === id ? "text-white" : "text-white/60 hover:text-white/80",
-                      )}
-                    >
-                      {SHELVES[id]}
-                    </Button>
-                  ))}
-                </div>
-              </li>
-              {CATALOGUE_IDS.filter((k) => CATALOGUE[k].shelf === shelf).map((k) => {
-                const why = props.game.buildBlock(k);
-                return (
-                  <li key={k}>
-                    <Tile
-                      name={CATALOGUE[k].name}
-                      caption
-                      price={CATALOGUE[k].price}
-                      dim={why !== null}
-                      portrait={itemPortraits?.get(k) || null}
-                      picked={thing === k}
-                      chosen={false}
-                      chosenLabel=""
-                      onPick={() => setThing(k)}
-                      onChoose={() => placeThing(k)}
-                    />
-                  </li>
-                );
-              })}
-            </>
-          ) : tab === "skins" ? (
-            SKINS.map((s) => (
-              <li key={s.id}>
-                <Tile
-                  name={s.name}
-                  portrait={portraits?.get(s.id) ?? null}
-                  picked={picked === s.id}
-                  chosen={worn === s.id}
-                  chosenLabel="wearing"
-                  onPick={() => setPicked(s.id)}
-                  onChoose={() => wear(s.id)}
-                />
-              </li>
-            ))
-          ) : tab === "weapons" ? (
-            WEAPON_KINDS.map((k) => (
-              <li key={k}>
-                <Tile
-                  name={WEAPONS[k].name}
-                  caption
-                  portrait={weaponPortraits?.get(k) ?? null}
-                  picked={eyed === k}
-                  chosen={held === k}
-                  chosenLabel="holding"
-                  onPick={() => setEyed(k)}
-                  onChoose={() => hold(k)}
-                />
-              </li>
-            ))
-          ) : tab === "land" ? (
-            (owns ? [owns, ...growTo] : PLOT_SIZE_IDS).map((size) => (
-              <Fragment key={size}>
-                <li className="col-span-3 flex items-baseline justify-between pt-3 pb-0.5 font-sans text-[11px] font-bold tracking-wide text-white/60 uppercase first:pt-0">
-                  <span>
-                    {PLOT_SIZES[size].name} · {PLOT_SIZES[size].size} m
-                  </span>
-                  <span className="tabular-nums">
-                    {owns === size
-                      ? "yours"
-                      : `◎ ${landCost(size, owns ?? undefined).toLocaleString("en-US")}`}
-                  </span>
-                </li>
-                {/* Grown land keeps its shape; bought land comes in any. */}
-                {(mine ? [plot.shape] : PLOT_SHAPE_IDS).map((shape) => (
-                  <li key={shape}>
-                    <Tile
-                      name={`${PLOT_SHAPES[shape].name} ${PLOT_SIZES[size].name.toLowerCase()}`}
-                      caption
-                      portrait={
-                        owns === size && minePicture
-                          ? minePicture
-                          : (lands?.get(landKey(size, shape))?.url ?? null)
-                      }
-                      picked={plot.size === size && plot.shape === shape}
-                      chosen={owns === size}
-                      chosenLabel="yours"
-                      onPick={() => setPlot({ size, shape })}
-                      onChoose={() => {
-                        if (!mine && props.game.canBuyLand) props.onPlace(size, shape);
-                      }}
-                    />
-                  </li>
-                ))}
-              </Fragment>
-            ))
-          ) : (
-            VEHICLE_SECTIONS.map((section) => (
-              <Fragment key={section}>
-                <li className="col-span-3 pt-3 pb-0.5 font-sans text-[11px] font-bold tracking-wide text-white/60 uppercase first:pt-0">
-                  {section}
-                </li>
-                {VEHICLE_KINDS.filter((k) => VEHICLES[k].section === section).map((k) => (
-                  <li key={k}>
-                    <Tile
-                      name={VEHICLES[k].name}
-                      caption
-                      portrait={vehiclePortraits?.get(k) || null}
-                      picked={ride === k}
-                      chosen={false}
-                      chosenLabel=""
-                      onPick={() => setRide(k)}
-                      onChoose={() => spawn(k)}
-                    />
-                  </li>
-                ))}
-              </Fragment>
-            ))
           )}
         </ul>
+
+        {/* What's picked, and what you can do with it. */}
+        <footer className="flex items-center gap-4 border-t border-[#242424] px-4 py-3 sm:px-5">
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <div className="flex items-baseline gap-3">
+              <h3 className="truncate font-sans text-lg leading-none font-extrabold">
+                {footer.name}
+              </h3>
+              {footer.tag}
+            </div>
+            <div className="line-clamp-2 font-sans text-[12px] leading-snug text-white/65">
+              {footer.about}
+            </div>
+          </div>
+          {footer.actions}
+        </footer>
       </div>
     </div>
+  );
+}
+
+/* The buttons along the bottom, for whatever's picked on the weapons, vehicles or skins shelves. */
+function Actions(props: {
+  shelf: "weapons" | "vehicles" | "skins";
+  id: string;
+  owned: boolean;
+  held: WeaponKind | null;
+  worn: SkinId;
+  canSpawn: boolean;
+  canBuy: boolean;
+  coins: number;
+  /* This one's purchase is on its way to the room. */
+  buying: boolean;
+  touch: boolean;
+  onPrimary: () => void;
+  onPutAway: () => void;
+}) {
+  const wheel = !props.touch && (
+    <span className="hidden items-center gap-1.5 font-sans text-[12px] text-white/60 sm:flex">
+      On your wheel <Kbd className="h-5 min-w-5 px-1.5 text-[10px]">Q</Kbd>
+    </span>
+  );
+  if (props.shelf === "skins") {
+    const wearing = props.worn === props.id;
+    return (
+      <Button disabled={wearing} onClick={props.onPrimary}>
+        {wearing ? "Wearing" : "Wear"}
+        {wearing && <CheckIcon size={14} weight="bold" />}
+      </Button>
+    );
+  }
+  if (props.shelf === "weapons" && isThrown(props.id as WeaponKind)) {
+    const price = WEAPONS[props.id as WeaponKind].price;
+    const short = price - props.coins;
+    return (
+      <div className="flex shrink-0 items-center gap-3">
+        {!props.canBuy ? (
+          <span className="font-sans text-[12px] text-white/60">Join the islands to buy</span>
+        ) : (
+          short > 0 && (
+            <span className="hidden font-sans text-[12px] text-white/60 sm:inline">
+              {coins(short)} short
+            </span>
+          )
+        )}
+        <Button
+          disabled={!props.canBuy || short > 0}
+          onClick={props.onPrimary}
+          className="tabular-nums"
+        >
+          Buy one · {coins(price)}
+        </Button>
+      </div>
+    );
+  }
+  if (!props.owned && props.shelf === "vehicles") {
+    const price = VEHICLES[props.id as VehicleKind].price;
+    const short = price - props.coins;
+    return (
+      <div className="flex shrink-0 items-center gap-3">
+        {!props.canBuy ? (
+          <span className="font-sans text-[12px] text-white/60">Join the islands to buy</span>
+        ) : (
+          short > 0 && (
+            <span className="hidden font-sans text-[12px] text-white/60 sm:inline">
+              {coins(short)} short · earn more at the Guild Board
+            </span>
+          )
+        )}
+        <Button
+          disabled={!props.canBuy || short > 0 || props.buying}
+          onClick={props.onPrimary}
+          className="tabular-nums"
+        >
+          {props.buying ? "Buying…" : `Buy · ${coins(price)}`}
+        </Button>
+      </div>
+    );
+  }
+  if (!props.owned) {
+    return (
+      <Button onClick={props.onPrimary}>
+        Get it
+        <PlusIcon size={13} weight="bold" />
+      </Button>
+    );
+  }
+  if (props.shelf === "weapons") {
+    const holding = props.held === props.id;
+    return (
+      <div className="flex shrink-0 items-center gap-3">
+        {wheel}
+        {holding ? (
+          <>
+            <Button variant="secondary" onClick={props.onPutAway}>
+              Put away
+            </Button>
+            <Button disabled>
+              Holding
+              <CheckIcon size={14} weight="bold" />
+            </Button>
+          </>
+        ) : (
+          <Button onClick={props.onPrimary}>Hold</Button>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="flex shrink-0 items-center gap-3">
+      {props.canSpawn ? (
+        wheel
+      ) : (
+        <span className="font-sans text-[12px] text-white/60">Go ashore first</span>
+      )}
+      <Button disabled={!props.canSpawn} onClick={props.onPrimary}>
+        Spawn
+      </Button>
+    </div>
+  );
+}
+
+/* Why a button can't be pressed, beside it. */
+function Why(props: { children: ReactNode }) {
+  return (
+    <span className="hidden max-w-[16rem] text-right font-sans text-[12px] text-white/60 sm:inline">
+      {props.children}
+    </span>
   );
 }
 
@@ -666,69 +953,36 @@ function areaText(m2: number) {
   return m2 >= 10000 ? `${(m2 / 10000).toFixed(1)} ha` : `${Math.round(m2 / 100) * 100} m²`;
 }
 
-function LandStats(props: {
-  size: PlotSizeId;
-  shape: PlotShapeId;
-  area: number | null;
-  coins: number;
-  /* Your own land: whether it can still grow. */
-  owned: "growable" | "full" | null;
-  /* Your own land: seconds left on its shield (0: it can be raided). */
-  shield: number | null;
-}) {
-  const def = PLOT_SIZES[props.size];
-  return (
-    <div className="flex flex-col gap-1.5">
-      <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
-        {props.owned === "growable"
-          ? "Your land: you wake at its Hearth. Pick a bigger size to grow it where it stands."
-          : props.owned === "full"
-            ? "Your land, as big as land grows. You wake at its Hearth."
-            : `${PLOT_SHAPES[props.shape].note} A sandy shore all round, and a Hearth at its middle where you'll wake.`}
-      </p>
-      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label="Across" value={`${def.size} m`} />
-        {props.area !== null && <Stat label="Land" value={areaText(props.area)} />}
-        <Stat label="Your coins" value={`◎ ${props.coins.toLocaleString("en-US")}`} />
-        {props.shield !== null && (
-          <Stat
-            label="Shield"
-            value={props.shield > 0 ? `${span(props.shield)} left` : "Down · can be raided"}
-          />
-        )}
-      </dl>
-    </div>
-  );
-}
-
 /* Buy this plot (and choose where it goes), or grow the one you have. */
 function LandAction(props: {
   game: Game;
   mine: IslandInfo | null;
   size: PlotSizeId;
   shape: PlotShapeId;
+  coins: number;
   onPlace: (size: PlotSizeId, shape: PlotShapeId) => void;
   onClose: (byClick: boolean) => void;
 }) {
   const { game, mine, size } = props;
   const from = mine?.plot?.size;
   const cost = landCost(size, from);
-  const ashore = game.canBuyLand;
-  const short = cost - game.coins;
+  const short = cost - props.coins;
   if (from === size) return null;
   /* Growing happens where the land stands, so the room round it has to allow it. */
   const room = mine ? game.checkPlot(size, mine.x, mine.z, mine.id) : null;
-  const why = !ashore
+  const why = !game.canBuyLand
     ? "Go ashore first"
     : short > 0
-      ? `◎ ${short.toLocaleString("en-US")} more needed`
+      ? `${coins(short)} short`
       : room && !room.ok
         ? room.reason
         : null;
   return (
-    <div className="flex shrink-0 flex-col items-end gap-1.5">
+    <div className="flex shrink-0 items-center gap-3">
+      {why && <Why>{why}</Why>}
       <Button
         disabled={why !== null}
+        className="tabular-nums"
         onClick={() => {
           if (mine) {
             game.growPlot(size);
@@ -736,176 +990,33 @@ function LandAction(props: {
           } else props.onPlace(size, props.shape);
         }}
       >
-        {mine ? "Grow it" : "Choose a spot"} · ◎ {cost.toLocaleString("en-US")}
+        {mine ? "Grow it" : "Choose a spot"} · {coins(cost)}
       </Button>
-      {why && (
-        <span className="max-w-[16rem] text-right font-sans text-[12px] text-white/80">{why}</span>
-      )}
-    </div>
-  );
-}
-
-/* ---------- crew ---------- */
-
-const ORDER_NOTE = {
-  home: "At home, keeping to their posts",
-  follow: "Following you",
-  hold: "Holding where you told them",
-} as const;
-
-/* A man: what he carries and how he is; or, hiring, what a man does and what he costs. */
-function CrewStats(props: {
-  hand: CrewView | null;
-  kit: WeaponKind | null;
-  order: keyof typeof ORDER_NOTE;
-  men: number;
-  cap: number | null;
-  coins: number;
-}) {
-  const h = props.hand;
-  if (!h)
-    return (
-      <div className="flex flex-col gap-1.5">
-        <p className="max-w-[24rem] font-sans text-[13px] leading-snug text-white/80">
-          He lives on your land and keeps a post there: a round of the Hearth, a tower or a gate,
-          the village. He fights off raiders whether you're home or not. G calls your crew to follow
-          you, aboard and ashore, and H has them hold where you stand. Never killed: knocked out, he
-          wakes at your Hearth.
-        </p>
-        <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-          <Stat label="Price" value={`◎ ${CREW_PRICE}`} />
-          {props.cap !== null && <Stat label="Crew" value={`${props.men} of ${props.cap}`} />}
-          <Stat label="Your coins" value={`◎ ${props.coins.toLocaleString("en-US")}`} />
-        </dl>
-      </div>
-    );
-  const def = h.weapon ? WEAPONS[h.weapon] : null;
-  return (
-    <div className="flex flex-col gap-1.5">
-      <p className="max-w-[24rem] font-sans text-[13px] leading-snug text-white/80">
-        {h.down
-          ? "Knocked out. He'll come to at your Hearth before long."
-          : `${ORDER_NOTE[props.order]}. He fights with whatever you give him, as you would with it.`}
-      </p>
-      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label="Carries" value={def?.name ?? "Fists"} />
-        {def && <Stat label="Reach" value={`${def.reach} m`} />}
-        <Stat label="Your coins" value={`◎ ${props.coins.toLocaleString("en-US")}`} />
-      </dl>
-    </div>
-  );
-}
-
-/* Hire the next man; or arm the one you're looking at, or let him go (pressed twice). */
-function CrewAction(props: {
-  game: Game;
-  hand: CrewView | null;
-  kit: WeaponKind | null;
-  men: number;
-  cap: number | null;
-  ashore: boolean;
-}) {
-  const { game, hand, kit } = props;
-  const [letGo, setLetGo] = useState<number | null>(null);
-  if (!hand) {
-    const why =
-      props.cap === null
-        ? "Buy land first: your crew lives on it"
-        : !props.ashore
-          ? "Go ashore first"
-          : props.men >= props.cap
-            ? "Your land houses no more: grow it for more men"
-            : game.coins < CREW_PRICE
-              ? `◎ ${(CREW_PRICE - game.coins).toLocaleString("en-US")} more needed`
-              : null;
-    return (
-      <div className="flex shrink-0 flex-col items-end gap-1.5">
-        <Button disabled={why !== null} onClick={() => game.hireCrew()}>
-          Hire · ◎ {CREW_PRICE}
-        </Button>
-        {why && (
-          <span className="max-w-[16rem] text-right font-sans text-[12px] text-white/80">
-            {why}
-          </span>
-        )}
-      </div>
-    );
-  }
-  const price = kit ? WEAPONS[kit].price : 0;
-  const has = hand.weapon === kit;
-  const short = price - game.coins;
-  return (
-    <div className="flex shrink-0 flex-col items-end gap-1.5">
-      <Button disabled={has || short > 0} onClick={() => game.armCrew(hand.id, kit)}>
-        {has
-          ? `Carrying the ${kit ? WEAPONS[kit].name.toLowerCase() : "fists"}`
-          : kit
-            ? `Arm with the ${WEAPONS[kit].name.toLowerCase()} · ◎ ${price}`
-            : "Take his weapon"}
-        {has && <CheckIcon size={14} weight="bold" />}
-      </Button>
-      <div className="flex items-center gap-3">
-        {hand.weapon && (
-          <Button variant="menu" size="inline" onClick={() => game.armCrew(hand.id, null)}>
-            Take his weapon
-          </Button>
-        )}
-        <Button
-          variant="menu"
-          size="inline"
-          onClick={() => {
-            if (letGo === hand.id) {
-              game.dismissCrew(hand.id);
-              setLetGo(null);
-            } else setLetGo(hand.id);
-          }}
-        >
-          {letGo === hand.id ? "Press again to let him go" : "Dismiss"}
-        </Button>
-      </div>
-      {short > 0 && !has && (
-        <span className="max-w-[16rem] text-right font-sans text-[12px] text-white/80">
-          ◎ {short.toLocaleString("en-US")} more needed
-        </span>
-      )}
     </div>
   );
 }
 
 /* ---------- build ---------- */
 
-/* What a ready-made thing is: what it's made of, how much it takes, how big it is, and your land's budget. */
-function ThingStats(props: { kind: CatalogueId; build: BuildView }) {
+/* What a ready-made thing is: what it's made of, how much it takes, and how big it is. */
+function ThingAbout(props: { kind: CatalogueId; build: BuildView }) {
   const d = CATALOGUE[props.kind];
-  const plot = props.build.plot;
   const wood = d.material === "wood";
   return (
-    <div className="flex flex-col gap-1.5">
-      <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">{d.note}</p>
-      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label="Price" value={`◎ ${d.price.toLocaleString("en-US")}`} />
-        <Stat label="Health" value={d.health.toLocaleString("en-US")} />
-        <Stat label="Size" value={`${(d.hx * 2).toFixed(1)} × ${(d.hz * 2).toFixed(1)} m`} />
-      </dl>
-      <div className="flex flex-wrap items-center gap-2 font-sans text-[12px] font-bold">
-        <span
-          className={cn(
-            "inline-flex items-center gap-1 rounded-full px-2 py-0.5",
-            wood ? "bg-[#f2665e]/20 text-[#ffb3ad]" : "bg-white/10 text-white/80",
-          )}
-        >
-          {wood ? <FireIcon size={12} weight="fill" /> : <MountainsIcon size={12} weight="fill" />}
-          {wood ? "Wood · burns" : "Stone · won't burn"}
-        </span>
-        {d.wall && <span className="text-white/60">Snaps end to end</span>}
-        {d.post && <span className="text-white/60">Snaps onto wall ends</span>}
-      </div>
-      <p className="font-sans text-[12px] text-white/60 tabular-nums">
-        {plot
-          ? `${plot.name}: ${plot.items} of ${plot.cap} things · ◎ ${props.build.coins.toLocaleString("en-US")}`
-          : "Things you build stand on land of your own: buy a plot first."}
-      </p>
-    </div>
+    <>
+      <span
+        className={cn(
+          "mr-1.5 inline-flex items-center gap-1 rounded-full px-1.5 align-[-1px] text-[11px] font-bold",
+          wood ? "bg-[#f2665e]/20 text-[#ffb3ad]" : "bg-white/10 text-white/80",
+        )}
+      >
+        {wood ? <FireIcon size={11} weight="fill" /> : <MountainsIcon size={11} weight="fill" />}
+        {wood ? "Wood · burns" : "Stone · won't burn"}
+      </span>
+      {d.health.toLocaleString("en")} health · {(d.hx * 2).toFixed(1)} × {(d.hz * 2).toFixed(1)} m
+      {d.wall && " · snaps end to end"}
+      {d.post && " · snaps onto wall ends"} · {d.note}
+    </>
   );
 }
 
@@ -918,161 +1029,184 @@ function ThingAction(props: {
 }) {
   const why = props.game.buildBlock(props.kind);
   return (
-    <div className="flex shrink-0 flex-col items-end gap-1.5">
-      <Button disabled={why !== null} onClick={() => props.onPlace(props.kind)}>
-        Buy & place · ◎ {CATALOGUE[props.kind].price.toLocaleString("en-US")}
-      </Button>
-      {why && (
-        <span className="max-w-[16rem] text-right font-sans text-[12px] text-white/80">{why}</span>
-      )}
+    <div className="flex shrink-0 items-center gap-3">
       {CREATIVE && props.build.ashore && (
         <Button variant="menu" size="inline" onClick={() => props.game.devCoins()}>
-          +10,000 coins (dev)
+          +10,000 (dev)
           <CoinsIcon size={13} weight="fill" />
         </Button>
       )}
+      {why && <Why>{why}</Why>}
+      <Button
+        disabled={why !== null}
+        className="tabular-nums"
+        onClick={() => props.onPlace(props.kind)}
+      >
+        Buy & place · {coins(CATALOGUE[props.kind].price)}
+      </Button>
     </div>
+  );
+}
+
+/* ---------- crew ---------- */
+
+const ORDER_NOTE = {
+  home: "At home, keeping to their posts",
+  follow: "Following you",
+  hold: "Holding where you told them",
+} as const;
+
+/* A man: what he carries and how he is; or, hiring, what a man does. */
+function CrewAbout(props: { hand: CrewView | null; order: keyof typeof ORDER_NOTE }) {
+  const h = props.hand;
+  if (!h)
+    return (
+      <>
+        He lives on your land and keeps a post there, and fights off raiders whether you're home or
+        not. G calls your crew to follow you, aboard and ashore; H has them hold where you stand.
+        Never killed: knocked out, he wakes at your Hearth.
+      </>
+    );
+  if (h.down) return <>Knocked out. He'll come to at your Hearth before long.</>;
+  return (
+    <>
+      {ORDER_NOTE[props.order]} · carries {h.weapon ? WEAPONS[h.weapon].name : "his fists"}. He
+      fights with whatever you give him, as you would with it: a bow, he shoots.
+    </>
+  );
+}
+
+/* Hire the next man; or arm the one you're looking at, or let him go (pressed twice). */
+function CrewAction(props: {
+  game: Game;
+  hand: CrewView | null;
+  kit: WeaponKind | null;
+  men: number;
+  cap: number | null;
+  ashore: boolean;
+  coins: number;
+}) {
+  const { game, hand, kit } = props;
+  const [letGo, setLetGo] = useState<number | null>(null);
+  if (!hand) {
+    const why =
+      props.cap === null
+        ? "Buy land first: your crew lives on it"
+        : !props.ashore
+          ? "Go ashore first"
+          : props.men >= props.cap
+            ? "Your land houses no more: grow it for more men"
+            : props.coins < CREW_PRICE
+              ? `${coins(CREW_PRICE - props.coins)} short`
+              : null;
+    return (
+      <div className="flex shrink-0 items-center gap-3">
+        {why && <Why>{why}</Why>}
+        <Button disabled={why !== null} className="tabular-nums" onClick={() => game.hireCrew()}>
+          Hire · {coins(CREW_PRICE)}
+        </Button>
+      </div>
+    );
+  }
+  const price = kit ? WEAPONS[kit].price : 0;
+  const has = hand.weapon === kit;
+  const short = price - props.coins;
+  return (
+    <div className="flex shrink-0 items-center gap-3">
+      {hand.weapon && (
+        <Button variant="menu" size="inline" onClick={() => game.armCrew(hand.id, null)}>
+          Take his weapon
+        </Button>
+      )}
+      <Button
+        variant="menu"
+        size="inline"
+        onClick={() => {
+          if (letGo === hand.id) {
+            game.dismissCrew(hand.id);
+            setLetGo(null);
+          } else setLetGo(hand.id);
+        }}
+      >
+        {letGo === hand.id ? "Again to let him go" : "Dismiss"}
+      </Button>
+      {short > 0 && !has && <Why>{coins(short)} short</Why>}
+      <Button
+        disabled={has || short > 0}
+        className="tabular-nums"
+        onClick={() => game.armCrew(hand.id, kit)}
+      >
+        {has ? "Carrying it" : kit ? `Arm him · ${coins(price)}` : "Take his weapon"}
+        {has && <CheckIcon size={14} weight="bold" />}
+      </Button>
+    </div>
+  );
+}
+
+/* ---------- shared ---------- */
+
+/* Tier colours: plain for free, warm for cheap, rich for premium. */
+const TIER_TEXT: Record<VehicleTier, string> = {
+  free: "text-[#7fd6cc]",
+  cheap: "text-[#f2b35e]",
+  premium: "text-[#c9a0ff]",
+};
+
+/* A vehicle's tier, and its price until it's yours. */
+function VehiclePrice(props: { kind: VehicleKind; owned: boolean }) {
+  const d = VEHICLES[props.kind];
+  return (
+    <span className="flex shrink-0 items-baseline gap-2 font-sans text-[12px] tabular-nums">
+      <span className={cn("font-bold", TIER_TEXT[d.tier])}>{TIER_NAMES[d.tier]}</span>
+      {d.tier !== "free" && (
+        <span className={props.owned ? "text-white/45" : "font-bold text-white/85"}>
+          {props.owned ? "Bought" : coins(d.price)}
+        </span>
+      )}
+    </span>
   );
 }
 
 function Price(props: { price: number }) {
   return (
-    <div className="flex items-baseline gap-2 font-sans text-sm tabular-nums">
-      {props.price > 0 && <span className="text-white/80 line-through">◎ {props.price}</span>}
-      <span className="text-white/70">Free</span>
-    </div>
+    <span className="flex shrink-0 items-baseline gap-1.5 font-sans text-[12px] tabular-nums">
+      {props.price > 0 && <span className="text-white/45 line-through">◎ {props.price}</span>}
+      <span className="font-bold text-[#7fd6cc]">Free</span>
+    </span>
   );
 }
 
-/* How quickly it comes round again, in words. */
-function pace(cooldown: number) {
-  if (cooldown < 0.3) return "Very fast";
-  if (cooldown < 0.5) return "Fast";
-  if (cooldown < 0.9) return "Steady";
-  if (cooldown < 1.25) return "Slow";
-  return "Very slow";
-}
+/* `short`: more than you've got. */
+type TileBadge = "owned" | "holding" | "wearing" | { price: number; short?: boolean } | null;
 
-/* How it's held, in words. */
-const HELD: Record<Grip, string> = {
-  unarmed: "Bare hands",
-  "1h": "One hand",
-  "2h": "Two hands",
-  dual: "A pair",
-  polearm: "Two hands",
-  shield: "Left arm",
-  bow: "Left hand",
-  crossbow: "Shouldered",
-};
-
-/* How well it batters buildings: what a full blow takes off a wooden wall. */
-function siegeOf(d: WeaponDef) {
-  const blow = (d.charged ?? d.damage) * d.siege;
-  return blow >= 20 ? "Heavy" : blow >= 8 ? "Fair" : blow >= 2 ? "Light" : "None";
-}
-
-/* What a weapon does: how it's held, damage, reach and pace, then what makes it different. */
-function WeaponStats(props: { def: WeaponDef; grip: Grip }) {
-  const d = props.def;
-  const damage = d.charged ? `${d.damage}–${d.charged}` : `${d.damage}`;
-  const special = d.hint.split(" · ").slice(1).join(" · ");
-  const thrown = d.throws ? SHOTS[d.throws.shot] : null;
-  return (
-    <div className="flex flex-col gap-1.5">
-      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label="Held" value={thrown ? "One hand" : HELD[props.grip]} />
-        {thrown ? (
-          thrown.blast ? (
-            <>
-              <Stat label="Blast" value={`${thrown.blast.radius} m`} />
-              <Stat label="Fuse" value={`${thrown.fuse ?? 0} s`} />
-              <Stat label="Siege" value="Breaks stone" />
-            </>
-          ) : (
-            <Stat label="Cloud" value={`${SMOKE.radius * 2} m · ${SMOKE.time} s`} />
-          )
-        ) : (
-          <>
-            {/* A shield's blow is its bash. */}
-            <Stat label={d.guard ? "Bash" : "Damage"} value={damage} />
-            {d.ranged ? (
-              <Stat label="Flies" value={`${d.ranged.speed[1]} m/s`} />
-            ) : (
-              <Stat label="Reach" value={`${d.reach} m`} />
-            )}
-            <Stat label="Pace" value={pace(d.cooldown)} />
-            <Stat label="Siege" value={siegeOf(d)} />
-          </>
-        )}
-      </dl>
-      {special && (
-        <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
-          {special.charAt(0).toUpperCase() + special.slice(1)}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/* What a vehicle is like: its pace, who it carries, and how you drive it. */
-function VehicleStats(props: { kind: VehicleKind }) {
-  const d = VEHICLES[props.kind];
-  const top = d.hull?.speed ?? d.car?.speed ?? d.mount?.gallop ?? 0;
-  const afloat = !!d.hull;
-  const pace = afloat ? `${Math.round(top * 1.944)} knots` : `${Math.round(top * 3.6)} km/h`;
-  const seats = d.seats.length;
-  return (
-    <div className="flex flex-col gap-1.5">
-      <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">{d.blurb}</p>
-      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label={d.class === "sail" ? "Best pace" : "Top speed"} value={pace} />
-        <Stat label="Seats" value={seats === 1 ? "1" : `${seats}`} />
-        <Stat label="Length" value={`${d.length.toFixed(1)} m`} />
-      </dl>
-      <p className="max-w-[22rem] font-sans text-[12px] leading-snug text-white/60">
-        {controlsOf(props.kind)}
-      </p>
-    </div>
-  );
-}
-
-function Stat(props: { label: string; value: string }) {
-  return (
-    <div className="flex items-baseline gap-1.5">
-      <dt className="text-white/80">{props.label}</dt>
-      <dd className="font-bold text-white">{props.value}</dd>
-    </div>
-  );
-}
-
-/* One thing on offer: click to look at it, double-click to wear, hold or spawn it. */
+/* One thing on the shelf: click to pick it, double-click to get it (or use it). */
 function Tile(props: {
   name: string;
   /* Print the name on the tile: weapons look alike at a glance, skins don't. */
-  caption?: boolean;
-  /* A price under the name, or a word about it. */
-  price?: number;
+  caption: boolean;
+  /* A word under the name (a crewman's weapon). */
   note?: string;
-  /* Greyed: it can't be had right now. */
+  /* Greyed: it can't be had (or used) right now. */
   dim?: boolean;
   portrait: string | null;
   picked: boolean;
-  chosen: boolean;
-  chosenLabel: string;
+  badge: TileBadge;
   onPick: () => void;
   onChoose: () => void;
 }) {
+  const b = props.badge;
+  const forSale = typeof b === "object" && b !== null;
   return (
     <button
       type="button"
       aria-pressed={props.picked}
-      aria-label={props.chosen ? `${props.name}, ${props.chosenLabel}` : props.name}
+      aria-label={typeof b === "string" ? `${props.name}, ${b}` : props.name}
       title={props.name}
       onClick={props.onPick}
       onDoubleClick={props.onChoose}
       className={cn(
-        "relative block aspect-[4/5] w-full overflow-hidden rounded-lg bg-white/[0.04] transition-colors outline-none hover:bg-white/[0.08] focus-visible:ring-2 focus-visible:ring-white/60",
-        props.picked && "bg-white/[0.08] ring-2 ring-white",
+        "relative block aspect-[4/5] w-full overflow-hidden rounded-xl bg-[#1a1a1a] transition-[background-color,transform] outline-none hover:-translate-y-px hover:bg-[#222] focus-visible:ring-2 focus-visible:ring-white/60",
+        props.picked && "bg-[#232323] ring-2 ring-white",
       )}
     >
       {props.portrait ? (
@@ -1081,7 +1215,8 @@ function Tile(props: {
           alt=""
           draggable={false}
           className={cn(
-            "absolute inset-0 h-full w-full object-contain",
+            "absolute inset-0 h-full w-full object-contain transition-opacity",
+            forSale && !props.picked && "opacity-70",
             props.dim && "opacity-45 grayscale-[60%]",
           )}
         />
@@ -1089,18 +1224,28 @@ function Tile(props: {
         <span className="absolute inset-0 animate-pulse bg-white/[0.03]" />
       )}
       {props.caption && (
-        <span className="absolute inset-x-2 bottom-2 flex flex-col text-left font-sans text-[11px] font-bold text-white/70">
+        <span className="absolute inset-x-2 bottom-2 flex flex-col text-left font-sans text-[11px] font-bold text-white/75">
           <span className="truncate">{props.name}</span>
-          {props.price !== undefined && (
-            <span className={cn("tabular-nums", props.dim ? "text-white/45" : "text-white/90")}>
-              ◎ {props.price.toLocaleString("en-US")}
-            </span>
-          )}
-          {props.note && <span className="truncate font-normal text-white/60">{props.note}</span>}
+          {props.note && <span className="truncate font-normal text-white/55">{props.note}</span>}
         </span>
       )}
-      {props.chosen && (
-        <span className="absolute top-2 right-2 grid size-5 place-items-center rounded-full bg-white text-black">
+      {forSale && (
+        <span
+          className={cn(
+            "absolute top-2 right-2 rounded-md bg-black/55 px-1.5 py-0.5 font-sans text-[10px] font-bold tabular-nums",
+            b.short ? "text-white/45" : "text-white/85",
+          )}
+        >
+          {coins(b.price)}
+        </span>
+      )}
+      {(b === "owned" || b === "holding" || b === "wearing") && (
+        <span
+          className={cn(
+            "absolute top-2 right-2 grid size-5 place-items-center rounded-full",
+            b === "owned" ? "bg-white/90 text-black" : "bg-[#f2665e] text-white",
+          )}
+        >
           <CheckIcon size={11} weight="bold" />
         </span>
       )}

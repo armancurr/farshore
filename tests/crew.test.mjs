@@ -152,13 +152,12 @@ test("hiring: land first, coins each, no more than the land houses, dismissed fo
   const again = new Room({ online: true, grand: true, now: () => clock.now, world: save });
   assert.equal(again.crew.of(pa.id).length, 2, "back on their land after a restart");
   assert.equal(again.crew.get(first.id).hand.weapon, "spear");
-  /* A version 7 save loads with nobody hired; a malformed man is dropped. */
-  const v7 = parseWorldSave({
+  /* A plot saved with nobody hired loads that way; a malformed man is dropped. */
+  const none = parseWorldSave({
     ...raw,
-    v: 7,
     plots: raw.plots.map(({ crew, ...p }) => p),
   });
-  assert.equal(v7.plots[0].crew, undefined);
+  assert.equal(none.plots[0].crew, undefined);
   const odd = parseWorldSave({
     ...raw,
     plots: raw.plots.map((p) => ({ ...p, crew: [...p.crew, { id: 5, name: "Zed", skin: "x" }] })),

@@ -44,6 +44,14 @@ test("every plot shape at every size is at least three quarters buildable, over 
         assert(!t.props.some((p) => p.kind === "tree"), `${label}: no trees`);
         assert(t.props.filter((p) => p.kind === "rock").length <= 4, `${label}: a few rocks`);
         assert(t.structures.length === 1 && t.structures[0].kind === "hearth");
+        /* No roads and no pier: it's bare land, for its owner to build on. */
+        assert.equal(t.paths.length, 0, `${label}: no roads`);
+        assert.equal(t.berths.length, 0, `${label}: no berths`);
+        assert.deepEqual(
+          t.places.map((pl) => pl.kind),
+          ["hearth"],
+          `${label}: only the Hearth`,
+        );
         /* You wake on dry, level ground in front of it. */
         assert(t.home.y > 1 && t.normalAt(t.home.x, t.home.z)[1] > 0.97, `${label}: home`);
       }
@@ -78,6 +86,13 @@ test("a plot needs open sea: never on or by the Harbor or a hunting island, or a
   assert.match(near.reason, /150 m of sea/);
   assert.equal(check("cove", 0, 760).ok, false, "overlapping its tile");
   assert.deepEqual(check("cove", 0, 1000), { ok: true });
+  /* The roads' bookkeeping takes a plot in its stride: no berths of its own, the piers' kept. */
+  const berths = world.berths.length;
+  assert(berths > 0, "the authored islands have their piers");
+  world.add(plot("holm", "long", 3, 0, 1100, PLOT_ID_BASE + 1));
+  assert.equal(world.berths.length, berths);
+  world.remove(PLOT_ID_BASE + 1);
+  assert.equal(world.berths.length, berths);
   /* Growing in place ignores itself. */
   assert.deepEqual(check("isle", 0, 700, PLOT_ID_BASE), { ok: true });
 });
@@ -254,7 +269,7 @@ test("plots are kept in the save and come back where they were, with their owner
 test("saves from before land was sold load as they were, with no plots", () => {
   const inv = { coins: 50, slot: 0, items: {}, tools: [], hotbar: [] };
   const save = parseWorldSave({
-    v: 3,
+    v: 4,
     ids: { tool: 4 },
     players: [
       { token: "aaaaaaaa", name: "a", saved: { x: 5, y: 1, z: 6, yaw: 0, health: 80, inv } },
@@ -268,6 +283,18 @@ test("saves from before land was sold load as they were, with no plots", () => {
   assert.equal(save.players[0].saved.x, 5);
   const room = new Room({ online: true, grand: true, now: () => 100, world: save });
   assert.equal(room.world.list().filter((o) => o.plot).length, 0);
+  /* From before the roads were cut, everyone wakes on the Harbor instead. */
+  const older = parseWorldSave({
+    v: 3,
+    ids: { tool: 4 },
+    players: [
+      { token: "aaaaaaaa", name: "a", saved: { x: 5, y: 1, z: 6, yaw: 0, health: 80, inv } },
+    ],
+  });
+  assert.equal(older.players[0].saved.relocate, true);
+  assert.deepEqual(older.plots, []);
+  /* Anything newer than this build knows is nothing saved, not a crash. */
+  assert.equal(parseWorldSave({ v: WORLD_SAVE_VERSION + 3, ids: {}, players: [] }), null);
 });
 
 test("a damaged plot in a save is dropped, not fatal", () => {

@@ -50,8 +50,11 @@ export type Shooter = {
   ride: number | null;
 };
 
-/* What a shot does on a direct hit, and how hard its blast is (see SHOTS). */
-export type Payload = { damage: number; siege: number; hull: number; scale: number };
+/*
+ * What a shot does on a direct hit, and how hard its blast is (see SHOTS);
+ * `daze` is seconds a person it hits is slowed (the wand's bolt).
+ */
+export type Payload = { damage: number; siege: number; hull: number; scale: number; daze: number };
 
 export type Shot = {
   id: number;
@@ -150,6 +153,7 @@ export class Shots {
         siege: load?.siege ?? spec.siege,
         hull: load?.hull ?? spec.hull,
         scale: load?.scale ?? 1,
+        daze: load?.daze ?? 0,
       },
       rest: null,
     };

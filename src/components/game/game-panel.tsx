@@ -11,11 +11,13 @@ import {
   SpeakerHighIcon,
   SpeakerSlashIcon,
   StorefrontIcon,
+  SwordIcon,
   UserCircleIcon,
   UserPlusIcon,
 } from "@phosphor-icons/react";
 import { cn } from "cn";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CURTAIN_FADE, Curtain, GOING_ASHORE, SETTING_SAIL } from "@/components/curtain";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -26,9 +28,10 @@ import type { Game, HudState, Mode } from "../../game/client/game";
 import { CREATIVE } from "../../game/client/modes";
 import type { PlotShapeId } from "../../game/shared/islands";
 import type { PlotSizeId } from "../../game/shared/plots";
+import { type ArsenalPick, ArsenalWheel } from "./arsenal-wheel";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
-import { Marketplace } from "./marketplace";
+import { Marketplace, type Shelf } from "./marketplace";
 import { AccessCard, ControlsCard, MenuPointer, PendingCard, PlayerCard } from "./menu-cards";
 import { NameDialog } from "./name-dialog";
 import { GuildBoardPanel, InventoryPanel } from "./panels";
@@ -36,6 +39,16 @@ import { PlotPlacer } from "./plot-placer";
 import { TouchControls } from "./touch-controls";
 
 type Status = "loading" | "ready" | "failed";
+
+/*
+ * Going ashore, the curtain comes all the way down before the island is
+ * built behind it (that's the heavy part, and it would stall the fade). Once
+ * it's down it stays at least ASHORE_HOLD ms, so the words can be read even
+ * when the sea answers at once, and ASHORE_SETTLE ms after you're standing,
+ * so the first frames out there are drawn before it lifts.
+ */
+const ASHORE_HOLD = 1000;
+const ASHORE_SETTLE = 250;
 
 /*
  * Where a menu card hangs: under its button, right edges lined up, then
@@ -76,6 +89,10 @@ export function GamePanel(props: { onPress?: () => void }) {
   const startedAt = useRef(0);
 
   const [status, setStatus] = useState<Status>("loading");
+  /* The island has drawn its first frames: the opening curtain can lift. */
+  const [revealed, setRevealed] = useState(false);
+  /* Going ashore: the curtain comes down, then stays until you're standing there (or turned back). */
+  const [ashore, setAshore] = useState<"idle" | "dimming" | "going">("idle");
   const [game, setGame] = useState<Game | null>(null);
   const [hud, setHud] = useState<HudState | null>(null);
   const [muted, setMuted] = useState(false);
@@ -87,6 +104,9 @@ export function GamePanel(props: { onPress?: () => void }) {
   const [marketOpen, setMarketOpen] = useState(false);
   /* Choosing a spot on the grand map for land bought in the marketplace. */
   const [placing, setPlacing] = useState<{ size: PlotSizeId; shape: PlotShapeId } | null>(null);
+  const [marketShelf, setMarketShelf] = useState<Shelf>("weapons");
+  /* The Arsenal wheel (hold Q, or its button on a phone): what you own, to hold or spawn. */
+  const [wheelOpen, setWheelOpen] = useState(false);
   /*
    * Both menu cards open on hover. Keyboard focus opens Controls; the account
    * card (the waitlist, for guests) opens on Enter or a tap, and stays up while
@@ -173,8 +193,30 @@ export function GamePanel(props: { onPress?: () => void }) {
         setAccountOpen(false);
         setControlsOpen((open) => !open);
       }
+      /*
+       * Q brings up the Arsenal wheel while you're out there with the mouse
+       * locked; the wheel itself watches for Q coming back up.
+       */
+      const now = latest.current;
+      if (
+        e.code === "KeyQ" &&
+        !e.repeat &&
+        !typing &&
+        !now.touch &&
+        !now.wheelOpen &&
+        !now.marketOpen &&
+        now.hud?.player &&
+        now.hud.locked &&
+        !now.hud.panel &&
+        !now.hud.placing &&
+        !now.placing
+      ) {
+        setMapOpen(false);
+        setWheelOpen(true);
+      }
       /* K opens or closes the marketplace, but not over another panel. */
-      const blocked = !!latest.current.hud?.panel || placingLand;
+      const blocked =
+        !!latest.current.hud?.panel || placingLand || latest.current.ashore !== "idle";
       if (e.code === "KeyK" && !e.repeat && !typing && latest.current.ready && !blocked) {
         e.preventDefault();
         if (latest.current.marketOpen) latest.current.closeMarket(true);
@@ -236,12 +278,20 @@ export function GamePanel(props: { onPress?: () => void }) {
     if (!canPlay) return;
     props.onPress?.();
     setAccountOpen(false);
-    if (!game) return;
-    startedAt.current = performance.now();
+    if (!game || latest.current.ashore !== "idle") return;
+    /* Fullscreen and the pointer need this very key or tap, so they come before the fade. */
     /* Phones play sideways: fullscreen and locked to landscape, where the browser lets us. */
     if (touch) void enterLandscape();
-    game.start(next, auth.username);
     game.lock();
+    setAshore("dimming");
+    const name = auth.username;
+    setTimeout(() => {
+      const g = gameRef.current;
+      if (!g) return;
+      startedAt.current = performance.now();
+      g.start(next, name);
+      setAshore("going");
+    }, CURTAIN_FADE);
   };
 
   const openAccount = () => {
@@ -250,10 +300,12 @@ export function GamePanel(props: { onPress?: () => void }) {
     setTimeout(() => document.getElementById("waitlist-email")?.focus(), 30);
   };
 
-  const openMarket = () => {
+  const openMarket = (shelf: Shelf = "weapons") => {
     setMapOpen(false);
     setAccountOpen(false);
     setControlsOpen(false);
+    setWheelOpen(false);
+    setMarketShelf(shelf);
     setMarketOpen(true);
     gameRef.current?.input.unlock();
   };
@@ -275,6 +327,20 @@ export function GamePanel(props: { onPress?: () => void }) {
     if (byClick && latest.current.playing) gameRef.current?.lock();
   }, []);
 
+  /* A slice of the Arsenal wheel taken: hold it, spawn it, or go and get more. */
+  /* The wheel freed the mouse; once it's put away (unless for the market), the island takes it back. */
+  const pickFromWheel = (pick: ArsenalPick) => {
+    setWheelOpen(false);
+    if (pick.t === "market") return openMarket(pick.shelf);
+    if (pick.t === "weapon") game?.arm(pick.kind);
+    else game?.spawnVehicle(pick.kind);
+    if (!touch) game?.lock();
+  };
+  const closeWheel = useCallback(() => {
+    setWheelOpen(false);
+    if (!latest.current.touch) gameRef.current?.lock();
+  }, []);
+
   /* The keyboard handler and the status poll live outside renders; give them the latest. */
   const latest = useRef({
     hud,
@@ -291,6 +357,8 @@ export function GamePanel(props: { onPress?: () => void }) {
     openMarket,
     closeMarket,
     placing,
+    ashore,
+    wheelOpen,
   });
   latest.current = {
     hud,
@@ -307,6 +375,8 @@ export function GamePanel(props: { onPress?: () => void }) {
     openMarket,
     closeMarket,
     placing,
+    ashore,
+    wheelOpen,
   };
 
   /* Approved without a name: ask for one as soon as the island is up. */
@@ -338,17 +408,46 @@ export function GamePanel(props: { onPress?: () => void }) {
     return () => clearTimeout(timer);
   }, [auth.notice]);
 
+  /* Give the island a couple of frames to draw itself before lifting the opening curtain. */
+  useEffect(() => {
+    if (status !== "ready") return;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => setRevealed(true));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [status]);
+
+  /*
+   * Ashore once you're standing on the island; back on the title screen if
+   * the sea turned you away. Either way the curtain lifts, but not before
+   * it's been down a moment.
+   */
+  const standing = !!hud?.player;
+  useEffect(() => {
+    if (ashore !== "going" || (!standing && mode !== "attract")) return;
+    const wait = Math.max(ASHORE_SETTLE, startedAt.current + ASHORE_HOLD - performance.now());
+    const timer = setTimeout(() => setAshore("idle"), wait);
+    return () => clearTimeout(timer);
+  }, [ashore, standing, mode]);
+
   const lockedReason = LOCKED_REASON[auth.status];
 
   const leave = () => {
     setMapOpen(false);
     setMarketOpen(false);
     setPlacing(null);
+    setWheelOpen(false);
     setReloadKey(null);
     game?.input.unlock();
     game?.start("attract");
     if (touch) exitLandscape();
   };
+
+  /* Down, gone, or into a panel: the wheel goes away. */
+  const wheelAllowed = !!hud?.player && !hud.panel && !placing;
+  useEffect(() => {
+    if (!wheelAllowed) setWheelOpen(false);
+  }, [wheelAllowed]);
 
   /* Back in the game (or off it): the reload question is settled. */
   const locked = !!hud?.locked;
@@ -369,6 +468,7 @@ export function GamePanel(props: { onPress?: () => void }) {
     !hud.panel &&
     !marketOpen &&
     !placing &&
+    !wheelOpen &&
     (!!reloadKey || performance.now() - startedAt.current > 500);
 
   return (
@@ -382,23 +482,7 @@ export function GamePanel(props: { onPress?: () => void }) {
         onClick={() => playing && game?.lock()}
       />
 
-      {status !== "ready" && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="font-mono text-[11px] tracking-[0.3em] text-white/80 uppercase">
-            {status === "failed"
-              ? "This browser can't draw the island (WebGL is off)"
-              : "Charting the island…"}
-          </div>
-        </div>
-      )}
-
       {playing && hud && <Hud hud={hud} touch={touch} onSelect={(i) => game?.selectSlot(i)} />}
-
-      {playing && hud?.connecting && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="font-sans text-xs font-bold text-white/80">Reaching the grand map…</div>
-        </div>
-      )}
 
       {playing && mapOpen && hud?.player && game && (
         <div className="pointer-events-none absolute inset-0 z-10">
@@ -425,7 +509,7 @@ export function GamePanel(props: { onPress?: () => void }) {
                 lockedReason={canPlay ? null : (lockedReason ?? "")}
                 onClick={() => play("online")}
               />
-              <MarketLink touch={touch} onClick={openMarket} />
+              <MarketLink touch={touch} onClick={() => openMarket()} />
               {!touch && (
                 <ControlsMenu open={controlsOpen && !accountOpen} onOpenChange={setControlsOpen} />
               )}
@@ -493,7 +577,7 @@ export function GamePanel(props: { onPress?: () => void }) {
 
       {playing && touch && portrait && <TurnPhone />}
 
-      {playing && touch && game && hud?.player && !hud.down && !hud.panel && (
+      {playing && touch && game && hud?.player && !hud.down && !hud.panel && !wheelOpen && (
         <TouchControls
           input={game.input}
           creative={hud.creative}
@@ -532,16 +616,9 @@ export function GamePanel(props: { onPress?: () => void }) {
             touch ? "top-3 right-4 gap-4" : "top-5 right-5 gap-4 sm:top-6 sm:right-6 sm:gap-6",
           )}
         >
-          {/* Online: how many are out here. */}
-          {mode === "online" && hud?.name && (
-            <span
-              className={cn(
-                menuText,
-                "text-white/80",
-                /* Phones: only where it fits beside the belt. */
-                touch && "hidden min-[760px]:inline",
-              )}
-            >
+          {/* Online, on a phone: how many are out here, where it fits beside the belt. */}
+          {touch && mode === "online" && hud?.name && (
+            <span className={cn(menuText, "hidden text-white/80 min-[760px]:inline")}>
               {hud.humans} online
             </span>
           )}
@@ -570,7 +647,22 @@ export function GamePanel(props: { onPress?: () => void }) {
                 )}
               </Button>
               {hud?.player && (
-                <Button variant="menu" size="inline" aria-label="Marketplace" onClick={openMarket}>
+                <Button
+                  variant="menu"
+                  size="inline"
+                  aria-label={wheelOpen ? "Close arsenal" : "Arsenal"}
+                  onClick={() => setWheelOpen((open) => !open)}
+                >
+                  <SwordIcon size={18} weight={wheelOpen ? "fill" : "bold"} />
+                </Button>
+              )}
+              {hud?.player && (
+                <Button
+                  variant="menu"
+                  size="inline"
+                  aria-label="Marketplace"
+                  onClick={() => openMarket()}
+                >
                   <StorefrontIcon size={18} weight="fill" />
                 </Button>
               )}
@@ -588,34 +680,32 @@ export function GamePanel(props: { onPress?: () => void }) {
                   </Kbd>
                 </span>
               )}
-              {hud?.player && (
-                <Button
-                  variant="menu"
-                  size="inline"
-                  onClick={() => game?.toggleView()}
-                  aria-label={
-                    hud.view === "third" ? "Switch to first person" : "Switch to third person"
-                  }
-                >
-                  {hud.view === "third" ? "Third person" : "First person"}
-                  <Kbd className={menuKbd}>V</Kbd>
-                </Button>
-              )}
-              {mode === "online" && hud?.player && (
-                <Button variant="menu" size="inline" onClick={() => setMapOpen((open) => !open)}>
-                  Open map
-                  <Kbd className={menuKbd}>N</Kbd>
-                </Button>
-              )}
-              {hud?.player && <MarketLink touch={false} onClick={openMarket} />}
+              {hud?.player && <MarketLink touch={false} onClick={() => openMarket()} />}
               <ControlsMenu open={controlsOpen} onOpenChange={setControlsOpen} />
             </>
           )}
         </div>
       )}
 
+      {/* Online, at a desk: how many are out here, tucked in the corner. */}
+      {playing && !touch && mode === "online" && hud?.name && (
+        <span className="pointer-events-none absolute right-5 bottom-5 z-10 font-sans text-[13px] leading-none font-bold text-white/75 select-none [text-shadow:0_1px_3px_rgba(0,0,0,0.6)] sm:right-6 sm:bottom-6">
+          {hud.humans} online
+        </span>
+      )}
+
+      {wheelOpen && game && wheelAllowed && (
+        <ArsenalWheel game={game} touch={touch} onPick={pickFromWheel} onClose={closeWheel} />
+      )}
+
       {marketOpen && game && (
-        <Marketplace game={game} touch={touch} onClose={closeMarket} onPlace={placeLand} />
+        <Marketplace
+          game={game}
+          touch={touch}
+          shelf={marketShelf}
+          onClose={closeMarket}
+          onPlace={placeLand}
+        />
       )}
       {placing && playing && game && (
         <PlotPlacer
@@ -626,6 +716,18 @@ export function GamePanel(props: { onPress?: () => void }) {
           onClose={closePlacer}
         />
       )}
+
+      {/* Over everything: the island being drawn, then going ashore. */}
+      <Curtain
+        show={!revealed}
+        instant
+        backdrop="sky"
+        lines={SETTING_SAIL}
+        message={
+          status === "failed" ? "This browser can't draw the island (WebGL is off)" : undefined
+        }
+      />
+      <Curtain show={ashore !== "idle"} backdrop="night" lines={GOING_ASHORE} />
     </div>
   );
 }

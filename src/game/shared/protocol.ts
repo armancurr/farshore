@@ -231,7 +231,7 @@ export type ClientMsg =
   | { t: "skin"; skin: SkinId }
   /* Take up a weapon from the marketplace, in place of the one you carry (null: put it away). */
   | { t: "arm"; kind: WeaponKind | null }
-  /* Put a vehicle from the marketplace in the water or on the ground nearby, in place of your last one. */
+  /* Put a vehicle you own in the water or on the ground nearby, in place of your last one. */
   | { t: "spawn"; kind: VehicleKind }
   /* Buy a plot of land from the marketplace and set it down on the open sea, centred on (x, z). */
   | { t: "buyplot"; size: PlotSizeId; shape: PlotShapeId; x: number; z: number }
@@ -256,6 +256,8 @@ export type ClientMsg =
   | { t: "crewarm"; id: number; kind: WeaponKind | null }
   /* Tell your crew to keep to their posts, follow you, or hold where you stand. */
   | { t: "order"; order: Order }
+  /* Buy a vehicle from the marketplace with coins: yours to spawn from then on. */
+  | { t: "buyVehicle"; kind: VehicleKind }
   | {
       t: "move";
       x: number;
@@ -409,6 +411,8 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "broadside":
       if (m.side !== 1 && m.side !== -1) return null;
       return { t: "broadside", side: m.side, lift: finite(m.lift, 2) ? m.lift : 0 };
+    case "buyVehicle":
+      return isVehicleKind(m.kind) ? { t: "buyVehicle", kind: m.kind } : null;
     case "stance":
       return { t: "stance", block: m.block === true, charge: m.charge === true };
     case "interact":

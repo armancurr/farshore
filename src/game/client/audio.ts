@@ -512,6 +512,13 @@ export class TideAudio {
     });
   }
 
+  /* A spell cast: a falling zap with a hiss behind it. */
+  zap(near = 1) {
+    const k = Math.max(0.1, near);
+    this.tone(980, 260, 0.16 * k, 0.004, 0.22, "triangle");
+    this.noiseBurst({ type: "highpass", freq: 3000, peak: 0.08 * k, attack: 0.01, decay: 0.2 });
+  }
+
   /* An arrow striking home: a dull thock in timber or flesh, a dry tick off stone, a plip in the sea. */
   thock(on: "soft" | "hard" | "water", near = 1) {
     const k = Math.max(0.08, near);

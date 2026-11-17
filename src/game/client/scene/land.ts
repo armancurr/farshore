@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import { CONTOUR, GRAND_SIZE } from "../../shared/constants";
-import type { Terrain } from "../../shared/terrain";
+import { PLAZA, type Terrain } from "../../shared/terrain";
 import { GLSL_COMMON, PALETTE, shared } from "./materials";
-import { pathDistance } from "../../shared/paths";
+import { pathDistance, ROAD_HALF } from "../../shared/paths";
 import { bakeShoreDistance } from "./shore";
 
 /*
@@ -169,6 +169,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
   uniform sampler2D uZones;
   /* 1 on the Harbor: its paths are cobbled. */
   uniform float uCobbled;
+  const float ROAD_HALF = ${ROAD_HALF.toFixed(2)};
   varying vec3 vWorld;
 
   /* Cobblestones: a cell pattern, each stone its own shade, mortar between. */
@@ -231,8 +232,8 @@ const TERRAIN_FRAGMENT = /* glsl */ `
 
     /* Paths: worn earth (cobbles on the Harbor) with a soft, ragged edge; places are trampled. */
     float pd = zone.r * 12.0 + (grain - 0.5) * 0.7;
-    /* Trails are a cart's width; the Harbor's cobbled lanes are wider. */
-    float tw = uCobbled > 0.5 ? 1.9 : 1.15;
+    /* Roads are two carts wide. */
+    float tw = ROAD_HALF;
     float trail = 1.0 - smoothstep(tw - 0.4, tw + 0.35, pd);
     float verge = (1.0 - smoothstep(tw + 0.2, tw + 1.6, pd)) * (1.0 - trail);
     vec3 path = uDirt * (0.92 + 0.1 * grain);
@@ -240,6 +241,14 @@ const TERRAIN_FRAGMENT = /* glsl */ `
       vec2 cb = cobble(vWorld.xz * 1.4);
       vec3 stone = uCobble * (0.86 + 0.18 * cb.y);
       path = mix(uDirt * 0.8, stone, smoothstep(0.04, 0.12, cb.x));
+    } else {
+      /* A pair of wheel ruts down each side of the road, a shade darker. */
+      float across = zone.r * 12.0;
+      float rut = max(
+        1.0 - smoothstep(0.2, 0.5, abs(across - 1.1)),
+        1.0 - smoothstep(0.2, 0.5, abs(across - 2.8))
+      );
+      path *= 1.0 - 0.09 * rut * (0.6 + 0.4 * grain);
     }
     ground = mix(ground, ground * 0.9, verge * 0.6);
     ground = mix(ground, path, trail * (1.0 - steep));
@@ -399,33 +408,49 @@ function zonesTexture(terrain: Terrain) {
   const data = new Uint8Array(res * res * 4);
   const cell = terrain.size / res;
   for (let k = 0; k < res * res; k++) data[k * 4] = Math.round((dist[k] / 12) * 255);
+  /* Squares are paved like the roads: the market, each pier's quay, the lighthouse square. */
+  const squares: { x: number; z: number; r: number }[] = [];
+  const trodden: { x: number; z: number; r: number }[] = [];
   for (const pl of terrain.places) {
-    if (pl.kind === "landing" || pl.kind === "dock" || pl.kind === "wreck") continue;
-    /* The market is a cobbled square: drawn as path, not trodden earth. */
-    const square = pl.kind === "market";
-    const cx = pl.x - terrain.ox + terrain.half;
-    const cz = pl.z - terrain.oz + terrain.half;
-    const r = pl.r + 2;
+    if (pl.kind === "market") squares.push({ x: pl.x, z: pl.z, r: pl.r + 1 });
+    else if (pl.quay) squares.push({ ...pl.quay, r: pl.quay.r + 1 });
+    else if (pl.kind !== "wreck") trodden.push(pl);
+  }
+  if (terrain.harbor) squares.push({ ...terrain.lighthouse, r: PLAZA });
+  const over = (
+    area: { x: number; z: number; r: number },
+    reach: number,
+    each: (k: number, d: number) => void,
+  ) => {
+    const cx = area.x - terrain.ox + terrain.half;
+    const cz = area.z - terrain.oz + terrain.half;
     for (
-      let i = Math.max(0, Math.floor((cz - r) / cell));
-      i <= Math.min(res - 1, Math.ceil((cz + r) / cell));
+      let i = Math.max(0, Math.floor((cz - reach) / cell));
+      i <= Math.min(res - 1, Math.ceil((cz + reach) / cell));
       i++
     )
       for (
-        let j = Math.max(0, Math.floor((cx - r) / cell));
-        j <= Math.min(res - 1, Math.ceil((cx + r) / cell));
+        let j = Math.max(0, Math.floor((cx - reach) / cell));
+        j <= Math.min(res - 1, Math.ceil((cx + reach) / cell));
         j++
-      ) {
-        const d = Math.hypot((j + 0.5) * cell - cx, (i + 0.5) * cell - cz);
-        const v = Math.round(
-          255 * (1 - Math.min(1, Math.max(0, (d - pl.r * 0.55) / (r - pl.r * 0.55)))),
-        );
-        const k = (i * res + j) * 4;
-        if (square) {
-          if (d < pl.r + 1)
-            data[k] = Math.min(data[k], Math.round((Math.max(0, d - pl.r + 2) / 12) * 255));
-        } else if (v > data[k + 1]) data[k + 1] = v;
-      }
+      )
+        each((i * res + j) * 4, Math.hypot((j + 0.5) * cell - cx, (i + 0.5) * cell - cz));
+  };
+  for (const sq of squares)
+    over(sq, sq.r + 1, (k, d) => {
+      /* As far from a road's middle as its edge is from the square's. */
+      const v = Math.round((Math.max(0, d - sq.r + ROAD_HALF) / 12) * 255);
+      if (v < data[k]) data[k] = v;
+    });
+  /* Round the places the ground is trodden bare. */
+  for (const pl of trodden) {
+    const r = pl.r + 2;
+    over(pl, r, (k, d) => {
+      const v = Math.round(
+        255 * (1 - Math.min(1, Math.max(0, (d - pl.r * 0.55) / (r - pl.r * 0.55)))),
+      );
+      if (v > data[k + 1]) data[k + 1] = v;
+    });
   }
   /* How far inland each spot is (b, 0..32 m): the beach is a band round the coast, whatever its height. */
   const inland = new Float32Array(res * res);

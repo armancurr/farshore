@@ -14,7 +14,7 @@ import {
 import { parseMission, parsePayouts } from "./missions";
 import { type Captor, isPlotSize, PLOT_ID_BASE, PLOT_SIZES, type Plot } from "./plots";
 import { isSkinId, type SkinId } from "./skins";
-import { migrateKind, type VehicleKind } from "./vehicles";
+import { migrateKind, VEHICLES, type VehicleKind } from "./vehicles";
 import { isThrown, STACK, toWeaponKind } from "./weapons";
 
 /*
@@ -106,7 +106,22 @@ function inventory(v: unknown): Inventory | null {
     slot: v.slot,
     mission,
     payouts: parsePayouts(v.payouts),
+    vehicles: ownedVehicles(v.vehicles),
   };
+}
+
+/*
+ * The vehicles someone has bought. Older saves have none (everything was
+ * free then); anything since retired, or now in the free tier, is dropped.
+ */
+function ownedVehicles(v: unknown): VehicleKind[] {
+  if (!Array.isArray(v)) return [];
+  const out: VehicleKind[] = [];
+  for (const k of v) {
+    const kind = migrateKind(k);
+    if (kind && VEHICLES[kind].tier !== "free" && !out.includes(kind)) out.push(kind);
+  }
+  return out;
 }
 
 /*
@@ -131,7 +146,7 @@ function vehicle(v: Obj): SavedVehicle | null {
   }
   if (id(v.boat))
     return {
-      kind: "rowboat",
+      kind: "skiff",
       x: v.x as number,
       y: 0,
       z: v.z as number,
@@ -169,19 +184,15 @@ function player(v: unknown, relocate: boolean): SavedPlayer | null {
  * what they carry but wakes on the Harbor.
  * 3: the islands were reshaped (terraces, places, paths). Older saves load
  * the same way: everyone keeps their things and wakes on the Harbor.
- * 4: plots of land. A version 3 save loads as it was, with nobody owning any.
- * 5: things bought for a plot (houses, walls, towers) stand on it. A version
- * 4 save loads as it was, every plot still bare.
- * 6: things can be battered and burnt: each keeps when it was last hurt
- * (`hitAt`, for its mending) and whether it burnt down. A version 5 save
- * loads as it was: whatever was short of health mends from long ago, so whole.
- * 7: raids. A plot keeps when its shield drops (`shield`) and, if a raid
- * brought it on, whose colours fly on its Hearth till then (`captor`). A
- * version 6 save loads with every plot unshielded.
- * 8: crew. A plot keeps the men hired for it (`crew`): each one's name, look
- * and weapon. A version 7 save loads with nobody hired.
+ * 4: the islands got their road networks and piers, cut into the ground. The
+ * same again: everyone keeps their things and wakes on the Harbor.
+ * 5: land of your own. Plots, the things bought for them (each keeping its
+ * health, when it was last hurt for its mending, and whether it burnt down),
+ * when a plot's shield drops and whose colours fly on its Hearth till then,
+ * and the crew hired for it. A version 4 save loads as it was, with nobody
+ * owning any land.
  */
-export const WORLD_SAVE_VERSION = 8;
+export const WORLD_SAVE_VERSION = 5;
 
 /* Someone who's been here: who they are, and where they left off. */
 export type SavedProfile = {
@@ -243,13 +254,11 @@ function plots(v: unknown, players: readonly SavedProfile[]): SavedPlot[] {
       x: p.x,
       z: p.z,
       owner: p.owner,
-      /* Before version 5 nothing stood on a plot. */
+      /* Plots came in with version 5, and everything on them. */
       items: placed(p.items, PLOT_SIZES[p.size].size, p.x, p.z),
     };
-    /* Before version 8 nobody was hired. */
     const men = crewOf(p.crew, PLOT_SIZES[p.size].crew);
     if (men.length) plot.crew = men;
-    /* Before version 7 nothing was shielded. */
     if (num(p.shield, 0, 1e12)) {
       plot.shield = p.shield;
       const captor = captorOf(p.captor);
@@ -284,8 +293,8 @@ function captorOf(v: unknown): Captor | null {
 export function parseWorldSave(raw: unknown): WorldSave | null {
   if (!isObj(raw) || !int(raw.v, 1, WORLD_SAVE_VERSION)) return null;
   if (!Array.isArray(raw.players) || !isObj(raw.ids)) return null;
-  /* Before version 3 every place on the map may now be sea, a cliff, or somewhere else entirely. */
-  const relocate = raw.v < 3;
+  /* Before version 4 every place on the map may now be sea, a cliff, a road, or somewhere else entirely. */
+  const relocate = raw.v < 4;
   const players: SavedProfile[] = [];
   for (const v of raw.players) {
     if (!isObj(v) || typeof v.token !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(v.token))

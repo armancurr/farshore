@@ -338,14 +338,13 @@ test("an offline owner is plundered from their saved purse, and the shield survi
   assert.equal(item.hp, CATALOGUE.cottage.health);
   assert.equal(bob.member().raid, null);
 
-  /* A version 6 save loads with every plot unshielded. */
-  const v6 = parseWorldSave({
+  /* A plot saved with no shield loads unshielded. */
+  const bare = parseWorldSave({
     ...raw,
-    v: 6,
     plots: raw.plots.map(({ shield, captor, ...p }) => p),
   });
-  assert.equal(v6.plots[0].shield, undefined);
-  assert.equal(v6.plots[0].captor, undefined);
+  assert.equal(bare.plots[0].shield, undefined);
+  assert.equal(bare.plots[0].captor, undefined);
   /* A bad captor is dropped, the shield kept. */
   const odd = parseWorldSave({
     ...raw,

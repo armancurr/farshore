@@ -465,12 +465,12 @@ test("the owner can pay to mend at once, rubble included; nobody else can, nor w
   assert.match(a.feed(), /fire out first/);
 });
 
-test("version 5 saves load with everything whole; health and charring survive in version 6", () => {
+test("things saved hurt without a time mend from long ago; health and charring survive a save", () => {
   const players = [{ token: "aaaaaaaa", name: "a", saved: null }];
   const plot = { id: 100, size: "cove", shape: "round", seed: 7, x: 0, z: 700, owner: "aaaaaaaa" };
   const item = { id: 5, kind: "cottage", x: 10, y: 2, z: 710, rot: 0, hp: 500 };
   const v5 = parseWorldSave({
-    v: 5,
+    v: WORLD_SAVE_VERSION,
     ids: { tool: 1, plot: 101, item: 6 },
     players,
     plots: [{ ...plot, items: [item, { ...item, id: 6, hp: 120 }] }],
@@ -479,7 +479,7 @@ test("version 5 saves load with everything whole; health and charring survive in
   assert.equal(v5.plots[0].items[1].hitAt, 0, "mending since long ago");
   assert.equal(healthAt(v5.plots[0].items[1], 1e9), 500);
   const v6 = parseWorldSave({
-    v: 6,
+    v: WORLD_SAVE_VERSION,
     ids: { tool: 1, plot: 101, item: 7 },
     players,
     plots: [{ ...plot, items: [{ ...item, hp: 0, hitAt: 12345, burnt: true }] }],

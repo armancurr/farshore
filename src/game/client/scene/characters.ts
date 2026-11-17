@@ -120,8 +120,10 @@ export type ClipHalves = { lower: THREE.AnimationClip; upper: THREE.AnimationCli
 let clips: Promise<Map<string, ClipHalves>> | null = null;
 
 /*
- * More of the rig's clips, from the pack's own sets: drawing and loosing a
- * bow, a crossbow's shot, and a throw. Only the ones named are kept.
+ * More of the rig's clips, from KayKit's own sets as they come: drawing and
+ * loosing a bow, a crossbow's shot, a spell raised and cast, and a throw.
+ * Only the ones named are kept; without a set (it failed to load), what
+ * would use it just swings like the rest.
  */
 const EXTRA_ANIMS: [string, readonly string[]][] = [
   [
@@ -133,6 +135,8 @@ const EXTRA_ANIMS: [string, readonly string[]][] = [
       "Ranged_Bow_Aiming_Idle",
       "Ranged_2H_Aiming",
       "Ranged_2H_Shoot",
+      "Ranged_Magic_Raise",
+      "Ranged_Magic_Shoot",
     ],
   ],
   ["/models/anims/general.glb", ["Throw"]],
@@ -149,8 +153,10 @@ export function playerClips(): Promise<Map<string, ClipHalves>> {
     clips = Promise.all([loadModel(PLAYER_ANIMS), ...extras]).then(([gltf, ...more]) => {
       const out = new Map<string, ClipHalves>();
       for (const clip of [...gltf.animations, ...more.flat()]) {
-        const lower = clip.tracks.filter((t) => LOWER.has(t.name.split(".")[0]));
-        const upper = clip.tracks.filter((t) => !LOWER.has(t.name.split(".")[0]));
+        /* Scale never changes on this rig (player.glb has it stripped already). */
+        const tracks = clip.tracks.filter((t) => !t.name.endsWith(".scale"));
+        const lower = tracks.filter((t) => LOWER.has(t.name.split(".")[0]));
+        const upper = tracks.filter((t) => !LOWER.has(t.name.split(".")[0]));
         out.set(clip.name, {
           lower: new THREE.AnimationClip(`${clip.name}:lower`, clip.duration, lower),
           upper: new THREE.AnimationClip(`${clip.name}:upper`, clip.duration, upper),

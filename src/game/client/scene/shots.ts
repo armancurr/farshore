@@ -18,14 +18,29 @@ import { packModel } from "./packs";
  * Everything in flight, drawn. The room says where each shot set off and how
  * fast; we fly our own copy with the same sums (shotAt), so it needs nothing
  * more until it comes down. Then an arrow is left standing in whatever it
- * hit for a while, a cannonball or a stone bursts, a keg lies spitting on its
- * fuse until the room says it's gone off, and a smoke bomb lets out its cloud.
+ * hit for a while, a bolt of magic bursts in a flash, a cannonball or a stone
+ * bursts, a keg lies spitting on its fuse until the room says it's gone off,
+ * and a smoke bomb lets out its cloud.
  */
 
-type Model = { id: string; texture?: string; scale: number; tumble?: number };
+/*
+ * A model from the packs (objects look down +Z, which is where arrows
+ * point), or for a bolt of magic a glowing core of this size and colour.
+ */
+type Model = {
+  id: string;
+  texture?: string;
+  scale: number;
+  tumble?: number;
+  glow?: { size: number; color: number };
+};
 
 const MODELS: Record<ShotKind, Model> = {
-  arrow: { id: "gear/arrow-bow", texture: "/models/gear/ranger.png", scale: 0.75 },
+  /* The pack's arrows are 1.2 model units long, so about 0.75 m. */
+  arrow: { id: "weapons/arrow-a", scale: 0.62 },
+  "arrow-b": { id: "weapons/arrow-b", scale: 0.62 },
+  magic: { id: "", scale: 1, glow: { size: 1, color: 0xc9a6ff } },
+  spell: { id: "", scale: 1, glow: { size: 1.5, color: 0x9fd2ff } },
   firearrow: { id: "gear/arrow-bow", texture: "/models/gear/ranger.png", scale: 0.75 },
   bolt: { id: "gear/arrow-crossbow", texture: "/models/gear/ranger.png", scale: 1 },
   ballista: { id: "gear/arrow-crossbow", texture: "/models/gear/ranger.png", scale: 3 },
@@ -53,6 +68,8 @@ type Flying = {
   end: { at: number; p: number[]; on: LandOn } | null;
   /* A keg lying on its fuse. */
   resting: boolean;
+  /* A bolt of magic bursting where it ended: seconds since. */
+  burst: number | null;
   spin: THREE.Vector3;
 };
 
@@ -74,15 +91,45 @@ function template(kind: ShotKind) {
   return p;
 }
 
-/* A copy of a shot's model, scaled, dropped in as soon as it's loaded. */
+const boltGeometry = new THREE.IcosahedronGeometry(0.16, 1);
+const glowGeometry = new THREE.IcosahedronGeometry(0.32, 1);
+const GLOW_OPACITY = 0.45;
+
+/*
+ * A copy of a shot's model, scaled, dropped in as soon as it's loaded; a
+ * bolt of magic is a hot core in a soft glow, its materials its own (they fade).
+ */
 function build(kind: ShotKind) {
   const group = new THREE.Group();
   const holder = new THREE.Group();
-  holder.scale.setScalar(MODELS[kind].scale);
+  const m = MODELS[kind];
+  holder.scale.setScalar(m.scale);
   group.add(holder);
+  if (m.glow) {
+    const core = new THREE.MeshBasicMaterial({ color: 0xfff1e6, transparent: true });
+    const glow = new THREE.MeshBasicMaterial({
+      color: m.glow.color,
+      transparent: true,
+      opacity: GLOW_OPACITY,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    holder.scale.setScalar(m.glow.size);
+    holder.add(new THREE.Mesh(boltGeometry, core), new THREE.Mesh(glowGeometry, glow));
+    group.userData.fades = [core, glow];
+    return group;
+  }
   void template(kind).then((g) => holder.add(g.clone(true)));
   return group;
 }
+
+/* Let go of a bolt's own materials (models share theirs). */
+function release(obj: THREE.Object3D) {
+  for (const m of (obj.userData.fades as THREE.Material[] | undefined) ?? []) m.dispose();
+}
+
+/* Seconds a bolt of magic takes to burst and fade where it ends. */
+const BURST = 0.25;
 
 const tmp = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -126,6 +173,7 @@ export class ShotsView {
       obj,
       end: this.early.get(msg.id) ?? null,
       resting: false,
+      burst: null,
       spin: new THREE.Vector3(
         (Math.random() - 0.5) * tumble,
         (Math.random() - 0.5) * tumble,
@@ -144,7 +192,8 @@ export class ShotsView {
     else if (kind === "ballista") {
       this.fx.muzzle(x, y, z, vx, vy, vz, 0.4);
       this.audio.loose(true, near);
-    } else if (kind === "arrow" || kind === "firearrow" || kind === "bolt")
+    } else if (SHOTS[kind].magic) this.audio.zap(near);
+    else if (kind === "arrow" || kind === "arrow-b" || kind === "firearrow" || kind === "bolt")
       this.audio.loose(kind === "bolt", near);
   }
 
@@ -171,6 +220,16 @@ export class ShotsView {
   update(dt: number) {
     this.clock += dt;
     for (const f of [...this.flying.values()]) {
+      if (f.burst !== null) {
+        f.burst += dt;
+        const t = f.burst / BURST;
+        f.obj.scale.setScalar(1 + t * 2.5);
+        const [core, glow] = f.obj.userData.fades as THREE.MeshBasicMaterial[];
+        core.opacity = Math.max(0, 1 - t);
+        glow.opacity = Math.max(0, 1 - t) * GLOW_OPACITY;
+        if (t >= 1) this.drop(f);
+        continue;
+      }
       if (f.resting) {
         const p = f.obj.position;
         this.fx.fuse(p.x, p.y + 0.55, p.z, dt);
@@ -190,6 +249,8 @@ export class ShotsView {
         continue;
       }
       this.place(f);
+      /* A bolt spins as it goes. */
+      if (SHOTS[f.kind].magic) f.obj.rotateZ(f.age * 9);
       if (f.kind === "firearrow") {
         const p = f.obj.position;
         this.fx.ember(p.x, p.y, p.z);
@@ -240,6 +301,13 @@ export class ShotsView {
     const [x, y, z] = end.p;
     const spec = SHOTS[f.kind];
     const near = this.ev.near(x, y, z);
+    if (spec.magic) {
+      /* A bolt bursts wherever it ends, in the air as much as on something. */
+      f.obj.position.set(x, y, z);
+      f.burst = 0;
+      if (end.on !== "air") this.audio.thock(end.on === "water" ? "water" : "soft", near);
+      return;
+    }
     if (spec.rests) {
       if (end.on === "water") {
         this.fx.splash(x, z, 0.6);
@@ -293,6 +361,7 @@ export class ShotsView {
   private drop(f: Flying) {
     this.flying.delete(f.id);
     this.group.remove(f.obj);
+    release(f.obj);
   }
 
   /* A blast: fire and smoke, the bang, and a scorch on the ground. */
@@ -337,7 +406,10 @@ export class ShotsView {
   }
 
   clear() {
-    for (const f of this.flying.values()) this.group.remove(f.obj);
+    for (const f of this.flying.values()) {
+      this.group.remove(f.obj);
+      release(f.obj);
+    }
     this.flying.clear();
     this.early.clear();
     for (const s of this.stuck) this.group.remove(s.obj);

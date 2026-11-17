@@ -10,15 +10,15 @@ import {
   disposeCharacter,
   playerClips,
 } from "./characters";
-import { edges, flatten, inkMaterial, lineMaterial, PALETTE } from "./materials";
+import { PALETTE } from "./materials";
 import { measure } from "./models";
 import { packModel } from "./packs";
 import { buildVehicle, disposeBuilt } from "./vehicles";
-import { buildWeapon, WEAPON_SPAN, weaponsReady } from "./weapons";
+import { buildWeapon, weaponsReady } from "./weapons";
 
 /*
- * The marketplace's fitting room: one skin on a plinth, turning slowly and
- * walking on the spot, or one weapon or vehicle over it. Drag to turn any.
+ * Still pictures of everything on offer, for the marketplace's shelves and
+ * the Arsenal wheel: drawn once with a borrowed renderer and kept.
  */
 
 /* How tall a character stands in the frame, hat and all. */
@@ -55,16 +55,6 @@ function disposeFigure(f: Figure) {
   disposeCharacter(f.char);
 }
 
-function plinth() {
-  const g = new THREE.Group();
-  const geo = new THREE.CylinderGeometry(1.05, 1.1, 0.08, 10);
-  g.add(new THREE.Mesh(flatten(geo), inkMaterial(0.015)));
-  g.add(new THREE.LineSegments(edges(geo, 25), lineMaterial(0.3)));
-  geo.dispose();
-  g.position.y = -0.04;
-  return g;
-}
-
 /* Fit something `height` metres tall in view, with `margin` metres to spare above and below. */
 function frame(camera: THREE.PerspectiveCamera, height: number, margin = 0.45) {
   /* Taller skins (a lantern, a lighthouse) need the camera to step back. */
@@ -73,34 +63,6 @@ function frame(camera: THREE.PerspectiveCamera, height: number, margin = 0.45) {
   const dist = (top / 2 + margin) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   camera.position.set(0, mid + 0.35, -dist);
   camera.lookAt(0, mid, 0);
-}
-
-/*
- * A weapon on display: stood on its pommel just over the plinth, about as
- * tall as a person, its flat (or a shield's face) toward the camera.
- */
-function displayWeapon(kind: WeaponKind) {
-  const span = WEAPON_SPAN[kind];
-  const length = span.to - span.from;
-  const shield = gripOf(kind) === "shield";
-  /* Knuckledusters are a hand's width: they'd be a speck stood up at a person's height. */
-  const scale = Math.min(shield ? 1.6 : kind === "knuckles" ? 9 : 3, 1.85 / length);
-  const model = buildWeapon(kind);
-  model.scale.setScalar(scale);
-  /* Lift it so the bottom clears the plinth, then lean it a touch. */
-  model.position.y = -span.from * scale;
-  if (shield) model.rotation.y = Math.PI;
-  /* A bow or a crossbow is stood on end. */
-  if (span.lies) model.rotation.x = -Math.PI / 2;
-  /* Knuckledusters lie flat in the hand's frame: tip them up so the rings face out. */
-  if (kind === "knuckles") model.rotation.x = -1.2;
-  const tilt = new THREE.Group();
-  tilt.add(model);
-  tilt.position.y = kind === "knuckles" ? 0.75 : 0.25;
-  tilt.rotation.z = shield ? 0 : 0.12;
-  const root = new THREE.Group();
-  root.add(tilt);
-  return root;
 }
 
 /*
@@ -211,163 +173,6 @@ function disposeWeapon(root: THREE.Object3D) {
   });
 }
 
-export class Showcase {
-  private renderer: THREE.WebGLRenderer;
-  private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
-  private figure: Figure | null = null;
-  /* Bumped on every change, so a character that loads after you've moved on is dropped. */
-  private showing = 0;
-  /* A weapon or a vehicle: something that stands still and turns. */
-  private weapon: THREE.Group | null = null;
-  private lights = weaponLights();
-  private yaw = 0.55;
-  /* Counts what's been asked to show, so a slow-loading vehicle doesn't land on top of the next. */
-  private shown = 0;
-  private disposed = false;
-  private spinning = true;
-  private walking = true;
-  private walk = 1;
-  private clock = 0;
-  private last = performance.now();
-  private raf = 0;
-  private resize: ResizeObserver;
-
-  constructor(private canvas: HTMLCanvasElement) {
-    /* Transparent, so the skin stands on whatever the marketplace sits over. */
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-    this.renderer.setClearColor(0x000000, 0);
-    this.scene.add(plinth());
-    light(this.scene);
-    this.resize = new ResizeObserver(() => this.fit());
-    this.resize.observe(canvas);
-    this.fit();
-    this.raf = requestAnimationFrame(this.tick);
-  }
-
-  show(skin: SkinId) {
-    this.clear();
-    const ticket = this.showing;
-    frame(this.camera, FIGURE_HEIGHT);
-    void Promise.all([buildCharacter(skin), playerClips()]).then(([char, clips]) => {
-      const f = figure(char, clips);
-      if (ticket !== this.showing) {
-        disposeFigure(f);
-        return;
-      }
-      this.figure = f;
-      this.scene.add(char.root);
-    });
-  }
-
-  showWeapon(kind: WeaponKind) {
-    this.clear();
-    this.weapon = displayWeapon(kind);
-    this.scene.add(this.weapon, this.lights);
-    frame(this.camera, 2.3);
-  }
-
-  showItem(kind: CatalogueId, team: Team) {
-    this.clear();
-    const shown = ++this.shown;
-    void displayItem(kind, team).then((root) => {
-      if (shown !== this.shown || this.disposed) {
-        root.removeFromParent();
-        return;
-      }
-      this.weapon = root;
-      this.scene.add(root);
-      frameVehicle(this.camera, 7.2, root.userData.height);
-    });
-  }
-
-  showVehicle(kind: VehicleKind) {
-    this.clear();
-    const shown = ++this.shown;
-    void displayVehicle(kind).then((root) => {
-      /* Something else was picked while it loaded. */
-      if (shown !== this.shown || this.disposed) {
-        disposeVehicle(root);
-        return;
-      }
-      this.weapon = root;
-      this.scene.add(root);
-      frameVehicle(this.camera, 7.2, root.userData.height);
-    });
-  }
-
-  private clear() {
-    this.showing++;
-    this.shown++;
-    if (this.figure) {
-      disposeFigure(this.figure);
-      this.figure = null;
-    }
-    if (this.weapon) {
-      this.scene.remove(this.weapon, this.lights);
-      if (this.weapon.userData.built) disposeVehicle(this.weapon);
-      /* Pack models share their geometry: nothing of the item's own to let go of. */ else if (
-        !this.weapon.userData.item
-      )
-        disposeWeapon(this.weapon);
-      this.weapon = null;
-    }
-  }
-
-  /* Turn by a drag of `dx` pixels. Turning by hand stops the turntable. */
-  turn(dx: number) {
-    this.yaw += dx * 0.012;
-    this.spinning = false;
-  }
-
-  setWalking(walking: boolean) {
-    this.walking = walking;
-  }
-
-  setSpinning(spinning: boolean) {
-    this.spinning = spinning;
-  }
-
-  private fit() {
-    const w = this.canvas.clientWidth;
-    const h = this.canvas.clientHeight;
-    if (!w || !h) return;
-    this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-  }
-
-  private tick = (now: number) => {
-    this.raf = requestAnimationFrame(this.tick);
-    const dt = Math.min(0.05, (now - this.last) / 1000);
-    this.last = now;
-    this.clock += dt;
-    this.walk += ((this.walking ? 1 : 0) - this.walk) * Math.min(1, dt * 4);
-    if (this.spinning) this.yaw += dt * 0.45;
-    if (this.weapon) {
-      this.weapon.rotation.y = this.yaw;
-      this.weapon.position.y = Math.sin(this.clock * 1.6) * 0.04;
-    } else if (this.figure) {
-      const f = this.figure;
-      f.char.root.rotation.y = this.yaw;
-      for (const a of f.walk) a.weight = this.walk;
-      for (const a of f.idle) a.weight = 1 - this.walk;
-      f.mixer.update(dt);
-    } else return;
-    this.renderer.render(this.scene, this.camera);
-  };
-
-  dispose() {
-    this.disposed = true;
-    cancelAnimationFrame(this.raf);
-    this.resize.disconnect();
-    this.clear();
-    this.renderer.dispose();
-    this.renderer.forceContextLoss();
-  }
-}
-
 /*
  * Still portraits of each skin for the marketplace grid, drawn once with a
  * borrowed renderer and kept as image URLs. The characters load first, and
@@ -443,9 +248,14 @@ function portraitWeapon(kind: WeaponKind) {
   root.add(model);
   switch (gripOf(kind)) {
     case "bow":
-      /* Side on, its string toward you, leaning like a blade. */
-      model.rotation.set(0, Math.PI / 2, 0);
-      root.rotation.z = -0.62;
+      if (kind === "firebow") {
+        /* The adventurer's bow lies along its own z: side on, its string toward you, leaning like a blade. */
+        model.rotation.set(0, Math.PI / 2, 0);
+        root.rotation.z = -0.62;
+        break;
+      }
+      /* The pack's bows: stood up on end, the curve to the camera (they lie flat across their frame). */
+      model.rotation.set(Math.PI / 2, 0, Math.PI / 2 + 0.25);
       break;
     case "crossbow":
       /* Three-quarters on, so the bow and the stock both show. */
@@ -456,7 +266,7 @@ function portraitWeapon(kind: WeaponKind) {
       model.rotation.y = Math.PI + 0.35;
       break;
     case "dual":
-      if (kind === "knuckles") {
+      if (kind === "knuckles" || kind === "fistweapon-b") {
         /* Looked down on, so the finger rings show. */
         model.rotation.set(-1.1, 0.4, 0);
         break;

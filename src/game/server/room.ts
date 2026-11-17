@@ -149,6 +149,7 @@ import {
   afloat,
   BROADSIDE_RELOAD,
   BROADSIDE_SPEED,
+  ownsVehicle,
   BOARD_REACH as RIDE_REACH,
   gunsOf,
   hullOf,
@@ -304,10 +305,17 @@ export type RoomOptions = {
    * server turns it on. Otherwise a client's creative and fly flags are dropped.
    */
   creative?: boolean;
+  /*
+   * Everyone who joins is topped up to at least this many coins: only the
+   * local dev server sets it, for trying out the marketplace.
+   */
+  devCoins?: number;
 };
 
 /* How far from you a vehicle from the marketplace may be put down, in metres (more for big ships). */
 const LAUNCH_RANGE = 32;
+/* Within this far of a pier, a boat from the marketplace is put in a free berth alongside it. */
+const BERTH_RANGE = 70;
 /* Under water in a car: seconds of breath, then this much health a second. */
 const DROWN_BREATH = 3;
 const DROWN_DAMAGE = 12;
@@ -1505,6 +1513,8 @@ export class Room {
       this.welcomeBack(member, profile.saved);
       profile.saved = null;
     }
+    const purse = this.opts.devCoins ?? 0;
+    if (member.inv.coins < purse) member.inv.coins = purse;
     /* The browser's choice of weapon wins, as with skins. */
     if (
       placed &&
@@ -1690,6 +1700,9 @@ export class Room {
       case "repair":
         this.repair(m, msg.id);
         return;
+      case "buyVehicle":
+        this.buyVehicle(m, msg.kind);
+        return;
       case "devcoins":
         /* Only where creative is allowed: the dev server. */
         if (this.opts.creative) {
@@ -1851,8 +1864,29 @@ export class Room {
 
   /* ---------- vehicles ---------- */
 
-  /* A vehicle from the marketplace, near you. The one you spawned before goes. */
+  /* A vehicle from the marketplace, paid for once with coins and kept. */
+  private buyVehicle(m: Member, kind: VehicleKind) {
+    const def = VEHICLES[kind];
+    if (ownsVehicle(m.inv.vehicles, kind)) return;
+    if (m.inv.coins < def.price) {
+      m.peer.send({
+        t: "feed",
+        text: `${(def.price - m.inv.coins).toLocaleString("en")} more coins for the ${def.name.toLowerCase()}`,
+      });
+      return;
+    }
+    m.inv.coins -= def.price;
+    m.inv.vehicles.push(kind);
+    m.invDirty = true;
+    m.peer.send({ t: "feed", text: `The ${def.name.toLowerCase()} is yours` });
+  }
+
+  /* A vehicle you own, near you. The one you spawned before goes. */
   private spawnVehicle(m: Member, kind: VehicleKind) {
+    if (!ownsVehicle(m.inv.vehicles, kind)) {
+      m.peer.send({ t: "feed", text: `Buy the ${VEHICLES[kind].name.toLowerCase()} first` });
+      return;
+    }
     if (m.ride) {
       m.peer.send({ t: "feed", text: "Get off before spawning another" });
       return;
@@ -1884,11 +1918,13 @@ export class Room {
     m.vehicle = r.id;
     m.peer.send({
       t: "feed",
-      text: afloat(kind)
-        ? `Your ${def.name.toLowerCase()} is in the water · E to climb aboard`
-        : def.class === "mount"
-          ? `Your ${def.name.toLowerCase()} is saddled · E to mount`
-          : `Your ${def.name.toLowerCase()} is ready · E to get in`,
+      text: at.moored
+        ? `Your ${def.name.toLowerCase()} is tied up at the pier · E to climb aboard`
+        : afloat(kind)
+          ? `Your ${def.name.toLowerCase()} is in the water · E to climb aboard`
+          : def.class === "mount"
+            ? `Your ${def.name.toLowerCase()} is saddled · E to mount`
+            : `Your ${def.name.toLowerCase()} is ready · E to get in`,
     });
   }
 
@@ -1927,7 +1963,20 @@ export class Room {
    * range in front is searched before turning aside, and the sides before
    * behind, so a puddle at your heels never beats the sea you're looking at.
    */
-  private launchSpot(m: Member, kind: VehicleKind) {
+  private launchSpot(
+    m: Member,
+    kind: VehicleKind,
+  ): {
+    x: number;
+    y: number;
+    z: number;
+    rot: number;
+    moored?: boolean;
+  } | null {
+    if (afloat(kind)) {
+      const berth = this.berthSpot(m, kind);
+      if (berth) return berth;
+    }
     const def = VEHICLES[kind];
     const { x: px, z: pz, yaw } = m.body;
     const range = Math.max(LAUNCH_RANGE, def.length * 2.2);
@@ -1954,6 +2003,37 @@ export class Room {
         }
       }
     return null;
+  }
+
+  /*
+   * Near a pier, a boat is tied up alongside it, bow to the sea: the free
+   * berth nearest you with water deep enough for its hull, clear of the
+   * boats already there. Null when you're nowhere near a pier, or it's full.
+   */
+  private berthSpot(m: Member, kind: VehicleKind) {
+    const def = VEHICLES[kind];
+    const { x: px, z: pz } = m.body;
+    const off = def.beam / 2 + 0.6;
+    let best: { x: number; y: number; z: number; rot: number; moored: true; d: number } | null =
+      null;
+    for (const b of this.world.berths) {
+      const along = clamp((px - b.x) * b.dx + (pz - b.z) * b.dz, 0, b.length);
+      if (Math.hypot(b.x + b.dx * along - px, b.z + b.dz * along - pz) > BERTH_RANGE) continue;
+      const rot = Math.atan2(-b.dx, -b.dz);
+      /* A big ship may stand a little past the end. */
+      const last = b.length - def.length * 0.25;
+      for (let s = def.length / 2; s <= last; s += 1.5) {
+        const x = b.x + b.dx * s + b.nx * off;
+        const z = b.z + b.dz * s + b.nz * off;
+        const d = Math.hypot(x - px, z - pz);
+        if (best && d >= best.d) continue;
+        if (distanceTo(kind, { x, z, rot }, px, pz) < 0.9) continue;
+        const y = placeAt(kind, this.world, x, z, rot);
+        if (y === null) continue;
+        best = { x, y, z, rot, moored: true, d };
+      }
+    }
+    return best;
   }
 
   /* Take back the vehicle you spawned, unless someone is sitting in it. */
@@ -2152,6 +2232,8 @@ export class Room {
    * for it, and you at its helm if that's where you were. True if you're seated.
    */
   private restoreVehicle(m: Member, saved: SavedVehicle) {
+    /* From before vehicles cost coins: one that was never bought doesn't come back. */
+    if (!ownsVehicle(m.inv.vehicles, saved.kind)) return false;
     const y = placeAt(saved.kind, this.world, saved.x, saved.z, saved.rot);
     if (y === null || this.rides.size >= MAX_RIDES) return false;
     const r = this.addRide(saved.kind, saved.x, y, saved.z, saved.rot);
@@ -2928,20 +3010,28 @@ export class Room {
       if (d > def.reach + 0.7 * size || Math.abs(a.y + 0.6 * size - m.body.y) > 2.4 * size)
         continue;
       if (def.arc > -1 && d > 0.9 && (dx * fx + dz * fz) / d < def.arc - 0.15) continue;
-      /* An animal facing away takes it in the back. */
-      const behind = (-Math.sin(a.yaw) * dx + -Math.cos(a.yaw) * dz) / (d || 1) > 0.4;
-      const damage = this.damageOf(def, p, behind, false) + (def.bleed ?? 0);
-      const dead = this.herd.strike(a, this.asPrey(m), damage, now);
-      if (dead) this.killed(m, a);
-      this.broadcast({
-        t: "ahit",
-        id: a.id,
-        kind: a.species,
-        by: m.id,
-        damage: Math.round(damage),
-        dead,
-      });
+      this.hitAnimal(m, p, def, a, now);
     }
+  }
+
+  private hitAnimal(m: Member, p: PendingHit, def: WeaponDef, a: Animal, now: number) {
+    if (!this.herd) return;
+    const dx = a.x - m.body.x;
+    const dz = a.z - m.body.z;
+    const d = Math.hypot(dx, dz);
+    /* An animal facing away takes it in the back. */
+    const behind = (-Math.sin(a.yaw) * dx + -Math.cos(a.yaw) * dz) / (d || 1) > 0.4;
+    const damage = this.damageOf(def, p, behind, false) + (def.bleed ?? 0);
+    const dead = this.herd.strike(a, this.asPrey(m), damage, now);
+    if (dead) this.killed(m, a);
+    this.broadcast({
+      t: "ahit",
+      id: a.id,
+      kind: a.species,
+      by: m.id,
+      damage: Math.round(damage),
+      dead,
+    });
   }
 
   /* A kill: the carcass goes in your pack, and the board hears of it. */
@@ -3017,6 +3107,7 @@ export class Room {
         damage,
         siege: damage * def.siege,
         hull: damage * 0.4,
+        daze: def.daze ?? 0,
       });
       return;
     }
@@ -3074,6 +3165,7 @@ export class Room {
       damage,
       siege: damage * def.siege,
       hull: damage * 0.4,
+      daze: def.daze ?? 0,
     });
   }
 
@@ -3146,6 +3238,10 @@ export class Room {
         o.lastHitAt = now;
         if (push.speed > 0)
           this.push(o, push.x, push.z, push.speed * knockScale(o.stagger), push.lift);
+        if (s.load.daze > 0) {
+          if (isCrew(o)) this.crew.daze(o, s.load.daze, now);
+          else o.peer.send({ t: "daze", seconds: s.load.daze });
+        }
         this.harm(o, damage, by);
         return damage;
       },
@@ -3292,6 +3388,13 @@ export class Room {
         text: afloat(r.kind) ? `The ${name} went down` : `The ${name} is wrecked`,
       });
     }
+    /* Bought once, kept: a wreck only sends it back to the yard, to be spawned again. */
+    for (const o of this.members.values())
+      if (o.vehicle === r.id)
+        o.peer.send({
+          t: "feed",
+          text: `Still yours: spawn the ${name} again from your arsenal`,
+        });
     this.removeRide(r.id);
   }
 

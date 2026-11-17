@@ -135,9 +135,10 @@ function nearby(terrain: Ground, spec: CarSpec, x: number, z: number, rot: numbe
   return [...solids];
 }
 
-/* Low stones and kerbs a tyre can climb. Never vehicles, tree trunks or walls. */
+/* Low stones and kerbs a tyre can climb, and a pier's deck. Never vehicles, tree trunks or walls. */
 function rideable(s: Solid, terrain: Ground) {
   if (!s.standable) return false;
+  if (s.deck) return true;
   const base = terrain.heightAt(s.x, s.z);
   const rise = s.top - base;
   return (
@@ -206,7 +207,9 @@ export function wheelContacts(terrain: Ground, spec: CarSpec, x: number, z: numb
 /*
  * Where the car would rest at (x, z) facing `rot`, or what it would hit there.
  * `strict` (putting one down) wants ground it could have driven onto; driving,
- * any ground will do and the body's tilt is held within MAX_TILT.
+ * any ground will do and the body's tilt is held within MAX_TILT. `body` is
+ * where the car actually is: up in the air, over a drop, it's that body that
+ * meets things, not one resting on the ground far below it.
  */
 function probe(
   terrain: Ground,
@@ -215,6 +218,7 @@ function probe(
   z: number,
   rot: number,
   strict = false,
+  body?: Pick<VehicleState, "y" | "pitch">,
 ): { ground: Support | null; hit: Contact | null } {
   const invalid = { ground: null, hit: null };
   const l = spec.halfLength;
@@ -272,6 +276,8 @@ function probe(
     }
   }
   let hit: Contact | null = null;
+  /* Clear of the ground beneath: what it can hit is what's up there with it. */
+  const flying = !!body && body.y > y + AIRBORNE;
   /* The body as rows of circles down its length: a middle row, so a tree dead ahead is hit square. */
   const r = Math.min(w, 0.7);
   const rows = w > r ? [-(w - r), 0, w - r] : [0];
@@ -287,13 +293,14 @@ function probe(
         if (strict) return invalid;
         y += h - chassis - spec.clearance;
       }
+      const hull = flying && body ? body.y - lz * Math.tan(body.pitch) : chassis;
       for (const solid of solids) {
-        if (solid.top <= chassis + 0.12 || solid.bottom >= chassis + spec.height) continue;
+        if (solid.top <= hull + 0.12 || solid.bottom >= hull + spec.height) continue;
         const touching = contact(solid, px, pz, r);
         if (!touching) continue;
         if (
           supports.includes(solid) &&
-          surface(solid, terrain, px, pz) <= chassis + spec.clearance + 1e-6
+          surface(solid, terrain, px, pz) <= hull + spec.clearance + 1e-6
         )
           continue;
         if (!hit || touching.depth > hit.depth) hit = touching;
@@ -445,7 +452,7 @@ export function stepCar(
     }
     let x = b.x + vx * h;
     let z = b.z + vz * h;
-    let result = probe(terrain, spec, x, z, rot);
+    let result = probe(terrain, spec, x, z, rot, false, b);
     let heading = rot;
     if (result.hit) {
       bumped = true;
@@ -466,7 +473,7 @@ export function stepCar(
       b.speed = vx * -Math.sin(heading) + vz * -Math.cos(heading);
       b.slipX = vx + Math.sin(heading) * b.speed;
       b.slipZ = vz + Math.cos(heading) * b.speed;
-      result = probe(terrain, spec, x, z, heading);
+      result = probe(terrain, spec, x, z, heading, false, b);
     }
     let ground = result.ground;
     /*
@@ -490,7 +497,7 @@ export function stepCar(
         vz -= incoming * 1.04 * slope.nz;
         x = b.x + vx * h;
         z = b.z + vz * h;
-        const along = probe(terrain, spec, x, z, heading).ground;
+        const along = probe(terrain, spec, x, z, heading, false, b).ground;
         if (!wall(along, x, z)) {
           ground = along;
           b.speed = vx * -Math.sin(heading) + vz * -Math.cos(heading);
@@ -506,7 +513,7 @@ export function stepCar(
       b.slipX = 0;
       b.slipZ = 0;
       b.steer *= 0.8;
-      const rest = probe(terrain, spec, b.x, b.z, b.rot).ground;
+      const rest = probe(terrain, spec, b.x, b.z, b.rot, false, b).ground;
       if (rest && b.y > rest.y + AIRBORNE) fall(b, rest, h);
       else if (rest) suspend(b, rest, h);
       continue;

@@ -39,6 +39,7 @@ import {
   guardOf,
   STAGGER_GRACE,
   STAGGER_RECOVER,
+  type WeaponDef,
   type WeaponKind,
   WEAPONS,
   weaponDef,
@@ -83,9 +84,13 @@ const FEUD_TIME = 12;
 const SIEGE_TIME = 6;
 /* A pace for strolling round a post. */
 const STROLL = 2.4;
-/* A bowman looses from about this far off, and backs away from anyone closer than this. */
+/*
+ * A bowman looses from about this far off (nearer, with something that
+ * doesn't carry so far: a wand), and backs away from anyone closer than this.
+ */
 const BOW_RANGE = 22;
 const BOW_CLOSE = 8;
+const rangeOf = (def: WeaponDef) => Math.min(BOW_RANGE, def.reach - 2);
 /* Physics steps a tick (the room ticks at 20 Hz; the controller likes small steps). */
 const SUBSTEP = 1 / 40;
 
@@ -653,7 +658,8 @@ export class Crew {
       const r = Math.min(2.4, foe ? dist(foe.x, foe.z, h.x, h.z) : 2.4);
       const sx = h.x + Math.cos(a) * r;
       const sz = h.z + Math.sin(a) * r;
-      const close = weaponDef(weapon).ranged ? BOW_RANGE : weaponDef(weapon).reach + 0.4;
+      const def = weaponDef(weapon);
+      const close = def.ranged ? rangeOf(def) : def.reach + 0.4;
       if (foe && dist(foe.x, foe.z, c.body.x, c.body.z) < close) {
         this.fight(c, foe, now, false);
         return;
@@ -983,12 +989,13 @@ export class Crew {
     const b = c.body;
     c.look = angleTo(at.x - b.x, at.z - b.z);
     c.aim = at;
-    if (d > BOW_RANGE)
-      this.goTo(c, at.x, at.z, d > BOW_RANGE + 10 ? SPRINT_SPEED : WALK_SPEED, swim, BOW_RANGE - 2);
+    const range = rangeOf(weaponDef(c.hand.weapon));
+    if (d > range)
+      this.goTo(c, at.x, at.z, d > range + 10 ? SPRINT_SPEED : WALK_SPEED, swim, range - 2);
     else if (d < BOW_CLOSE)
       this.goTo(c, b.x - (at.x - b.x), b.z - (at.z - b.z), WALK_SPEED, swim, 0);
     const facing = Math.abs(wrapAngle(c.look - b.yaw)) < 0.25;
-    if (d <= BOW_RANGE + 4 && facing) this.attack(c, now);
+    if (d <= range + 4 && facing) this.attack(c, now);
   }
 
   /* Up to something built, and at it: the nearest part of it, not its middle. */

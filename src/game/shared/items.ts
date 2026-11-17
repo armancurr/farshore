@@ -1,5 +1,6 @@
 import type { Contract, Payout } from "./missions";
 import { SPECIES, SPECIES_IDS, type SpeciesId } from "./species";
+import type { VehicleKind } from "./vehicles";
 import { toWeaponKind, WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
@@ -73,6 +74,8 @@ export type Inventory = {
   mission: Contract | null;
   /* Alpha bounties and cull shares, waiting to be collected at the board. */
   payouts: Payout[];
+  /* Vehicles bought from the marketplace, in the order bought. The free tier isn't listed: it's everyone's. */
+  vehicles: VehicleKind[];
 };
 
 export function emptyInventory(): Inventory {
@@ -84,6 +87,7 @@ export function emptyInventory(): Inventory {
     slot: 0,
     mission: null,
     payouts: [],
+    vehicles: [],
   };
 }
 

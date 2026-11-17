@@ -1,7 +1,7 @@
 import type { Material } from "./catalogue";
 
 /*
- * Everything that flies: arrows and bolts, cannonballs, stones from the
+ * Everything that flies: arrows and bolts, bolts of magic, cannonballs, stones from the
  * siege engines, and kegs and smoke bombs lobbed by hand. The room flies
  * them and decides what they hit; every client is told where each one set
  * off from and how fast, and flies its own copy with the same sums, so they
@@ -11,8 +11,11 @@ import type { Material } from "./catalogue";
 
 export const SHOT_KINDS = [
   "arrow",
+  "arrow-b",
   "bolt",
   "firearrow",
+  "magic",
+  "spell",
   "ballista",
   "cannonball",
   "stone",
@@ -68,10 +71,13 @@ export type ShotSpec = {
   ignites?: boolean;
   /* Lets out a cloud where it lands. */
   smoke?: boolean;
+  /* A bolt of magic: it glows, and bursts in a flash wherever it ends, even in the air. */
+  magic?: boolean;
 };
 
 const ARROWY: Record<Material, number> = { wood: 1, stone: 0.2 };
 const HEAVY: Record<Material, number> = { wood: 1, stone: 1 };
+const MAGIC: Record<Material, number> = { wood: 1, stone: 0.3 };
 
 export const SHOTS: Record<ShotKind, ShotSpec> = {
   arrow: {
@@ -84,6 +90,19 @@ export const SHOTS: Record<ShotKind, ShotSpec> = {
     resist: ARROWY,
     knock: 2,
     lift: 0.8,
+    sticks: true,
+  },
+  /* Bow B's heavier arrow (the pack's arrow_B). */
+  "arrow-b": {
+    gravity: 5,
+    radius: 0.09,
+    life: 5,
+    damage: 20,
+    siege: 7,
+    hull: 6,
+    resist: ARROWY,
+    knock: 3,
+    lift: 1,
     sticks: true,
   },
   bolt: {
@@ -110,6 +129,34 @@ export const SHOTS: Record<ShotKind, ShotSpec> = {
     lift: 0.6,
     sticks: true,
     ignites: true,
+  },
+  /*
+   * The wand's quick bolt and the mage's staff's gathered one: they fly
+   * almost flat and fizzle out where their reach ends (about 22 m and 28 m).
+   */
+  magic: {
+    gravity: 0.6,
+    radius: 0.25,
+    life: 0.5,
+    damage: 6,
+    siege: 3,
+    hull: 3,
+    resist: MAGIC,
+    knock: 4,
+    lift: 1.5,
+    magic: true,
+  },
+  spell: {
+    gravity: 1,
+    radius: 0.35,
+    life: 0.7,
+    damage: 20,
+    siege: 8,
+    hull: 6,
+    resist: MAGIC,
+    knock: 12,
+    lift: 4,
+    magic: true,
   },
   /* A ballista's bolt: a spear, near enough. */
   ballista: {

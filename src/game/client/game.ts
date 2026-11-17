@@ -109,6 +109,7 @@ import {
   weaponDef,
   weaponFromIndex,
 } from "../shared/weapons";
+import { setPurse } from "./arsenal";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { drawRoutes, islandImage, type MapView } from "./map";
@@ -710,6 +711,7 @@ export class Game {
     this.down = null;
     this.health = HEALTH_MAX;
     this.inv = emptyInventory();
+    setPurse(0, []);
     this.panel = null;
     this.focus = null;
     this.herd.clear();
@@ -767,7 +769,7 @@ export class Game {
     return !!this.body && this.conn?.kind === "online";
   }
 
-  /* Put a vehicle from the marketplace in the water nearby, in place of the last one. */
+  /* Put a vehicle you own in the water nearby, in place of the last one. */
   spawnVehicle(kind: VehicleKind) {
     if (this.canSpawn) this.conn?.send({ t: "spawn", kind });
   }
@@ -1193,6 +1195,16 @@ export class Game {
     };
   }
 
+  /* Whether the marketplace can sell you anything: only out in the world, where coins are kept. */
+  get canBuy(): boolean {
+    return this.conn?.kind === "online";
+  }
+
+  /* Buy a vehicle with coins; the room answers with your inventory (or says what's short). */
+  buyVehicle(kind: VehicleKind) {
+    if (this.canBuy) this.conn?.send({ t: "buyVehicle", kind });
+  }
+
   /* Everything the grand map shows, as it is right now. */
   mapView(): MapView {
     const world = this.world;
@@ -1436,7 +1448,11 @@ export class Game {
         if (this.mode === "online") {
           this.pushFeed(`You are ${msg.name}`);
           if (readWeapon() === undefined)
-            this.pushFeed("Choose a weapon in the marketplace. The Harbor is safe ground");
+            this.pushFeed(
+              this.touch
+                ? "Get a weapon in the Marketplace, then draw it from your Arsenal. The Harbor is safe ground"
+                : "Get a weapon in the Marketplace (K), then draw it with Q. The Harbor is safe ground",
+            );
         }
         break;
       case "full":
@@ -1522,7 +1538,7 @@ export class Game {
         this.dazeUntil = performance.now() / 1000 + msg.seconds;
         this.pushFeed("You're dazed");
         break;
-      case "swing":
+      case "swing": {
         if (msg.by !== this.myId) {
           const r = this.remotes.get(msg.by) ?? this.crews.get(msg.by);
           r?.avatar.strike(msg.heavy);
@@ -1531,11 +1547,13 @@ export class Game {
           if (s && !shoots && this.distanceTo(s.x, s.z) < 20) this.audio.swing(msg.kind, msg.heavy);
         }
         break;
+      }
       case "hit":
         this.onHit(msg);
         break;
       case "inv":
         this.inv = msg.inv;
+        setPurse(msg.inv.coins, msg.inv.vehicles);
         break;
       case "crew":
         this.myCrew = { order: msg.order, men: msg.men };

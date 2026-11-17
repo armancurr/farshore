@@ -11,15 +11,23 @@ const DOWN_TEXT: Record<string, string> = {
   drown: "You went down with your car",
 };
 
-/* The contract you've taken, and what's afoot on the islands. */
+/*
+ * What the guild has you doing: only what's yours. The contract you've taken,
+ * a cull you're hunting in, and coins owed. What else is afoot (the alpha,
+ * a cull you're not in) shows only at the Guild Board, where you'd take it up.
+ */
 function Missions(props: { hud: HudState }) {
-  const g = props.hud.guild;
+  const h = props.hud;
+  const g = h.guild;
   const c = g.mission;
-  const alpha = g.alpha && !g.alpha.slainBy ? g.alpha : null;
-  const cull = g.cull?.state === "active" ? g.cull : null;
+  const alpha = g.near && g.alpha && !g.alpha.slainBy ? g.alpha : null;
+  const live = g.cull?.state === "active" ? g.cull : null;
+  const hunting = !!live && !!h.name && live.hunters.some((x) => x.name === h.name);
+  const cull = live && (g.near || hunting) ? live : null;
+  if (!c && !alpha && !cull && g.owed <= 0) return null;
   return (
     <div className="flex flex-col items-center gap-1.5 font-mono text-[11px] tracking-[0.2em] uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]">
-      {c ? (
+      {c && (
         <>
           <div className="flex items-baseline gap-3">
             <span className="text-white/75">Contract</span>
@@ -37,8 +45,6 @@ function Missions(props: { hud: HudState }) {
             <div className="text-[10px]">Done · hand it in at the Guild Board</div>
           )}
         </>
-      ) : (
-        <div className="text-white/75">No contract · the Guild Board is atop the lighthouse</div>
       )}
       {alpha && (
         <div className="text-[10px]">

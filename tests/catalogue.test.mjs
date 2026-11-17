@@ -346,10 +346,15 @@ test("what stands on a plot is saved and comes back, solid, after a restart", ()
   assert(again.plots.get(pa.id).items.some((o) => o.kind === "tent" && o.id > placed.id));
 });
 
-test("version 4 saves (bare plots) still load, and damaged items are dropped", () => {
+test("bare plots in a save still load, and damaged items are dropped", () => {
   const players = [{ token: "aaaaaaaa", name: "a", saved: null }];
   const plot = { id: 100, size: "cove", shape: "round", seed: 7, x: 0, z: 700, owner: "aaaaaaaa" };
-  const old = parseWorldSave({ v: 4, ids: { tool: 1, plot: 101 }, players, plots: [plot] });
+  const old = parseWorldSave({
+    v: WORLD_SAVE_VERSION,
+    ids: { tool: 1, plot: 101 },
+    players,
+    plots: [plot],
+  });
   assert.deepEqual(old.plots, [{ ...plot, items: [] }]);
   assert.equal(old.ids.item, 1);
   const room = new Room({ online: true, grand: true, now: () => 100, world: old });

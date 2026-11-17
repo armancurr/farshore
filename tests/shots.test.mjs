@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { CATALOGUE } from "../src/game/shared/catalogue.ts";
 import { arcClear, DEFENSES, lineOfSight } from "../src/game/shared/defenses.ts";
 import { checkItem } from "../src/game/shared/placing.ts";
-import { FLAG } from "../src/game/shared/protocol.ts";
+import { FLAG, parseClientMsg } from "../src/game/shared/protocol.ts";
+import { parseWorldSave, WORLD_SAVE_VERSION } from "../src/game/shared/save.ts";
 import {
   aimAt,
   blastShare,
@@ -15,7 +16,7 @@ import {
   smokeBlocks,
 } from "../src/game/shared/shots.ts";
 import { gunsOf, hullOf } from "../src/game/shared/vehicles.ts";
-import { STACK, WEAPONS } from "../src/game/shared/weapons.ts";
+import { STACK, toWeaponKind, WEAPONS } from "../src/game/shared/weapons.ts";
 import { Room } from "../src/game/server/room.ts";
 
 /* ---------- the sums on their own ---------- */
@@ -85,15 +86,24 @@ test("line of sight: the ground and anything solid block it, a lob only needs to
 });
 
 test("the numbers: hulls, guns, bows and kegs as the rules have them", () => {
-  assert(hullOf("rowboat") < 150, "a cannonball sinks a rowboat");
-  assert(
-    hullOf("galleon") > hullOf("pirate_brig") && hullOf("pirate_brig") > hullOf("pirate_sloop"),
-  );
-  assert.equal(gunsOf("rowboat"), 0);
-  assert.equal(gunsOf("pirate_sloop"), 2);
+  assert(hullOf("skiff") < 2 * SHOTS.cannonball.blast.hull, "two cannonballs sink a skiff");
+  assert(hullOf("galleon") > hullOf("sloop") && hullOf("sloop") > hullOf("skiff"));
+  assert.equal(gunsOf("skiff"), 0);
+  assert.equal(gunsOf("sloop"), 2);
   assert.equal(gunsOf("galleon"), 4);
-  assert(WEAPONS.crossbow.ranged.damage[0] > WEAPONS.bow.ranged.damage[0]);
-  assert(WEAPONS.crossbow.cooldown > WEAPONS.bow.cooldown);
+  assert.equal(gunsOf("liner"), 0, "a liner carries no guns");
+  assert(WEAPONS.crossbow.ranged.damage[0] > WEAPONS["bow-a"].ranged.damage[0]);
+  assert(WEAPONS.crossbow.cooldown > WEAPONS["bow-a"].cooldown);
+  /* Every weapon that shoots looses something that really flies. */
+  for (const k of ["bow-a", "bow-b", "crossbow", "firebow", "wand-a", "staff-b"])
+    assert(SHOTS[WEAPONS[k].ranged.shot], k);
+  /* Magic flies almost flat and fizzles out about where the weapon's reach ends. */
+  for (const k of ["wand-a", "staff-b"]) {
+    const r = WEAPONS[k].ranged;
+    const s = SHOTS[r.shot];
+    assert(s.gravity < 2, `${k} flies flat`);
+    assert(Math.abs(r.speed[1] * s.life - WEAPONS[k].reach) < 6, `${k} reaches about as far`);
+  }
   /* One keg close against a castle wall leaves it standing; two bring it down. */
   const keg = SHOTS.keg.blast.siege * SHOTS.keg.resist.stone;
   assert(keg < CATALOGUE.castleWall.health && keg * 2 >= CATALOGUE.castleWall.health);
@@ -191,7 +201,7 @@ function range() {
 
 test("a bow: the longer the draw, the faster the arrow and the harder it hits; it hits whom it's aimed at", () => {
   const { room, a, b, pa, t, tick, aimFrom } = range();
-  room.handle(b.id, { t: "arm", kind: "bow" });
+  room.handle(b.id, { t: "arm", kind: "bow-a" });
   /* Out on Alice's land, off the Harbor: fair game. */
   a.stand(t.ox + 6, t.oz);
   b.stand(t.ox - 5, t.oz);
@@ -210,19 +220,19 @@ test("a bow: the longer the draw, the faster the arrow and the harder it hits; i
   assert.equal(landed?.on, "body", "it hit her");
   assert.equal(landed.who, a.id);
   const lost = before - a.member().health;
-  assert(Math.abs(lost - WEAPONS.bow.ranged.damage[0]) < 0.5, `a slack draw (${lost})`);
+  assert(Math.abs(lost - WEAPONS["bow-a"].ranged.damage[0]) < 0.5, `a slack draw (${lost})`);
   a.member().health = 100;
-  fire(0.9);
+  fire(1);
   const strong = shots().at(-1);
   const speed = (m) => Math.hypot(m.p[3], m.p[4], m.p[5]);
   assert(speed(strong) > speed(weak) * 2, "a full draw flies faster");
-  assert(100 - a.member().health > lost * 3, "and hits much harder");
+  assert(100 - a.member().health > lost * 2.5, "and hits much harder");
   /* A slack draw drops short of someone further off; a full one carries. */
   a.member().health = 100;
   a.stand(t.ox + 45, t.oz);
   fire(0.15, 1);
   assert.notEqual(b.all("land").find((m) => m.id === shots().at(-1).id)?.on, "body", "short");
-  fire(0.9, 1);
+  fire(1, 1);
   assert.equal(b.all("land").find((m) => m.id === shots().at(-1).id)?.on, "body", "carries");
   assert.equal(b.member().raid?.plot, pa.id, "shooting on her land is raiding it");
 });
@@ -232,7 +242,7 @@ test("arrows stop in the ground, glance off stone, and set wood alight from a fi
   const cottage = put("cottage", 0);
   const wall = put("castleWall", Math.PI);
   away(a);
-  room.handle(b.id, { t: "arm", kind: "bow" });
+  room.handle(b.id, { t: "arm", kind: "bow-a" });
   tick(0.5);
   /* Straight down at his feet. */
   b.stand(t.ox, t.oz + 30);
@@ -263,6 +273,74 @@ test("arrows stop in the ground, glance off stone, and set wood alight from a fi
   assert(cottage.hp < CATALOGUE.cottage.health, "struck");
   assert(room.fires.isBurning(cottage.id), "and alight");
   assert.equal(b.member().raid?.plot, pa.id, "shooting at her land is raiding it");
+});
+
+test("the pack's bows, the wand and the mage's staff all loose real shots that batter wood", () => {
+  const { room, a, b, pa, t, tick, put, aimFrom, away } = range();
+  const cottage = put("cottage", 0);
+  away(a);
+  const flies = { "bow-a": "arrow", "bow-b": "arrow-b", "wand-a": "magic", "staff-b": "spell" };
+  for (const [kind, shot] of Object.entries(flies)) {
+    room.handle(b.id, { t: "arm", kind });
+    b.stand(cottage.x - 12, cottage.z + 1);
+    tick(1.5);
+    const hp = cottage.hp;
+    const n = b.all("shot").length;
+    const charge = WEAPONS[kind].charge?.max ?? 0;
+    room.handle(b.id, {
+      t: "attack",
+      charge,
+      aim: aimFrom(b, cottage.x, cottage.y + 1.5, cottage.z),
+    });
+    const loosed = b.all("shot").slice(n);
+    assert.equal(loosed.length, 1, `${kind}: one shot`);
+    assert.equal(shotFromIndex(loosed[0].k), shot, `${kind} looses a ${shot}`);
+    /* Nothing lands at once: it has to fly there. */
+    assert.equal(cottage.hp, hp, `${kind}: not yet`);
+    tick(1.5);
+    const landed = b.all("land").find((m) => m.id === loosed[0].id);
+    assert.equal(landed?.on, "item", `${kind}: it struck the cottage`);
+    assert.equal(landed.who, cottage.id);
+    assert(cottage.hp < hp, `${kind}: and battered it (${hp - cottage.hp})`);
+  }
+  assert.equal(b.member().raid?.plot, pa.id, "shooting at her land is raiding it");
+  /* The wand's bolt leaves whoever it hits dazed. */
+  room.handle(b.id, { t: "arm", kind: "wand-a" });
+  a.stand(t.ox + 6, t.oz);
+  b.stand(t.ox - 4, t.oz);
+  tick(1.5);
+  const ab = a.member().body;
+  room.handle(b.id, { t: "attack", charge: 0, aim: aimFrom(b, ab.x, ab.y + 1.2, ab.z) });
+  tick(1);
+  assert(
+    a.messages.some((m) => m.t === "daze"),
+    "dazed",
+  );
+  assert(a.member().health < 100, "and hurt");
+});
+
+test("the old plain bow comes back as Bow A, from a message or a save", () => {
+  assert.equal(toWeaponKind("bow"), "bow-a");
+  assert.deepEqual(parseClientMsg(JSON.stringify({ t: "arm", kind: "bow" })), {
+    t: "arm",
+    kind: "bow-a",
+  });
+  const inv = {
+    coins: 0,
+    slot: 1,
+    items: {},
+    tools: [{ id: 3, kind: "bow", uses: -1 }],
+    hotbar: [null, 3],
+  };
+  const save = parseWorldSave({
+    v: WORLD_SAVE_VERSION,
+    ids: { tool: 4 },
+    players: [
+      { token: "aaaaaaaa", name: "a", saved: { x: 5, y: 1, z: 6, yaw: 0, health: 80, inv } },
+    ],
+    plots: [],
+  });
+  assert.equal(save.players[0].saved.inv.tools[0].kind, "bow-a");
 });
 
 test("kegs: bought one at a time, thrown, a four-second fuse, then two of them bring down a stone wall", () => {
@@ -419,7 +497,7 @@ test("a shore cannon goes for a boat carrying a raider, and sinks it; he's in th
   a.stand(t.ox, t.oz);
   /* Bob rows in off the shore near the gun. */
   const at = offshore(0, -1.5, 8);
-  const boat = room.addRide("rowboat", at.x, 0, at.z, 0);
+  const boat = room.addRide("skiff", at.x, 0, at.z, 0);
   seat(b, boat);
   tick(1);
   assert.equal(b.member().raid?.plot, pa.id, "on her tile: raiding");
@@ -487,8 +565,8 @@ test("a broadside: guns down one side, it batters what's on shore, and the capta
 test("cannonballs batter hulls; a wrecked one goes, and its riders with it into the sea", () => {
   const { clock, room, a, b, tick, offshore, seat } = range();
   const at = offshore(Math.PI / 2, -5, 40);
-  const ship = room.addRide("pirate_sloop", at.x, 0, at.z, 0);
-  const prey = room.addRide("rowboat", at.x - 25, 0, at.z, 0);
+  const ship = room.addRide("sloop", at.x, 0, at.z, 0);
+  const prey = room.addRide("skiff", at.x - 25, 0, at.z, 0);
   seat(b, ship);
   seat(a, prey);
   tick(0.2);
@@ -496,7 +574,7 @@ test("cannonballs batter hulls; a wrecked one goes, and its riders with it into 
     ship.reportAt = room.now();
     if (room.rides.has(prey.id)) prey.reportAt = room.now();
   };
-  /* Point blank at the rowboat, off the sloop's port side, till it goes down. */
+  /* Point blank at the skiff, off the sloop's port side, till it goes down. */
   for (let i = 0; i < 4 && room.rides.has(prey.id); i++) {
     room.handle(b.id, { t: "broadside", side: -1, lift: -0.03 });
     tick(2, keep);
@@ -514,7 +592,7 @@ test("cannonballs batter hulls; a wrecked one goes, and its riders with it into 
   assert.equal(a.member().ride, null, "Alice is in the water");
   assert(a.member().body.y < 0.5);
   assert(
-    room.rides.has(ship.id) && ship.hp === hullOf("pirate_sloop"),
+    room.rides.has(ship.id) && ship.hp === hullOf("sloop"),
     "the sloop's own guns never hurt it",
   );
 });
@@ -523,10 +601,10 @@ test("a crewman with a bow keeps his distance from a raider and shoots him", () 
   const { room, a, b, pa, t, tick } = range();
   room.handle(a.id, { t: "hire" });
   const [man] = room.crew.of(pa.id);
-  room.handle(a.id, { t: "crewarm", id: man.id, kind: "bow" });
-  assert.equal(man.hand.weapon, "bow");
+  room.handle(a.id, { t: "crewarm", id: man.id, kind: "bow-a" });
+  assert.equal(man.hand.weapon, "bow-a");
   room.handle(a.id, { t: "crewarm", id: man.id, kind: "keg" });
-  assert.equal(man.hand.weapon, "bow", "no kegs for the crew");
+  assert.equal(man.hand.weapon, "bow-a", "no kegs for the crew");
   room.leave(a.id);
   const h = t.hearth;
   b.stand(h.x + 25, h.z + 6);

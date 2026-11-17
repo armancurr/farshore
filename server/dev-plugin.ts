@@ -50,8 +50,9 @@ export function tideDevServer(): Plugin {
       const room = new Room({
         online: true,
         grand: true,
-        /* Only here, on the dev server: creative mode for trying things out. */
+        /* Only here, on the dev server: creative mode and a deep purse for trying things out. */
         creative: true,
+        devCoins: 1_000_000,
         world: loadWorld(),
         onChange: () => {
           saveTimer ??= setTimeout(store, 500);

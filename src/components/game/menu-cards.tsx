@@ -43,7 +43,8 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Open your pack", ["Tab", "I"]],
   ],
   [
-    ["Marketplace: skins, weapons, boats, land, crew", ["K"]],
+    ["Arsenal: hold, point, let go", ["Q"]],
+    ["Marketplace: weapons, vehicles, skins, land, crew", ["K"]],
     ["The map", ["N"]],
     ["First or third person", ["V"]],
   ],
