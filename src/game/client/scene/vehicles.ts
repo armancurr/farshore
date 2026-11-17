@@ -496,6 +496,11 @@ type Shown = {
 /* Open cockpits (the racers and tractors, all put away for now): "racer", "prototype", "tractor", "loader". */
 const OPEN = new Set<VehicleKind>([]);
 
+/* A closed car: whoever's inside is out of sight (a seated head would poke through the roof). */
+export function enclosed(kind: VehicleKind) {
+  return VEHICLES[kind].class === "car" && !OPEN.has(kind);
+}
+
 /* Past this, a vehicle isn't drawn (the fog has it anyway). */
 const DRAW_RANGE = 700;
 
@@ -598,7 +603,7 @@ export class VehicleView {
    */
   inside(id: number | null) {
     for (const s of this.shown.values()) {
-      const hide = s.id === id && VEHICLES[s.kind].class === "car" && !OPEN.has(s.kind);
+      const hide = s.id === id && enclosed(s.kind);
       for (const w of s.built?.wheels ?? []) w.node.visible = !hide;
     }
   }
@@ -626,6 +631,13 @@ export class VehicleView {
     const s = r ? this.shown.get(r.id) : null;
     if (!r || !s) return null;
     return riderPose(s.kind, s.look, r.seat);
+  }
+
+  /* Whether a rider is shut inside a closed car, where they can't be seen. */
+  riderHidden(member: number) {
+    const r = this.riders.get(member);
+    const s = r ? this.shown.get(r.id) : null;
+    return !!s && enclosed(s.kind);
   }
 
   /*

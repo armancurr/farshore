@@ -215,6 +215,11 @@ export type RoomOptions = {
   world?: WorldSave | null;
   /* The grand map changed in a way worth keeping: the host should store exportWorld(). */
   onChange?: () => void;
+  /*
+   * Creative mode (flying, nothing hurts you) is honoured: only the local dev
+   * server turns it on. Otherwise a client's creative and fly flags are dropped.
+   */
+  creative?: boolean;
 };
 
 /* Points round a body's centre, to test whether it fits somewhere. */
@@ -592,6 +597,11 @@ export class Room {
     };
   }
 
+  /* A client's flags, less creative and flying where creative isn't allowed. */
+  private allowed(flags: number) {
+    return this.opts.creative ? flags : flags & ~(FLAG.creative | FLAG.fly);
+  }
+
   private apply(m: Member, msg: ClientMsg) {
     switch (msg.t) {
       case "move": {
@@ -599,21 +609,22 @@ export class Room {
         if (m.ride) {
           if (m.ride.seat === 0 && msg.ride) this.report(m, msg.ride);
           m.pitch = msg.pitch;
-          m.flags = (m.flags & ~FLAG.creative) | (msg.flags & FLAG.creative);
+          m.flags = (m.flags & ~FLAG.creative) | (this.allowed(msg.flags) & FLAG.creative);
           m.airVy = 0;
           return;
         }
-        this.landing(m, msg.vy, msg.flags);
+        const flags = this.allowed(msg.flags);
+        this.landing(m, msg.vy, flags);
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
-        const creative = (msg.flags & FLAG.creative) !== 0;
+        const creative = (flags & FLAG.creative) !== 0;
         m.body.y = clamp(msg.y, SEA_FLOOR - 20, creative ? FLY_CEILING + 5 : this.world.peak + 30);
         m.body.z = clamp(msg.z, -BOUNDARY, BOUNDARY);
         m.body.vx = msg.vx;
         m.body.vy = msg.vy;
         m.body.vz = msg.vz;
-        m.flags = msg.flags & (FLAG.sprint | FLAG.grounded | FLAG.wet | FLAG.fly | FLAG.creative);
+        m.flags = flags & (FLAG.sprint | FLAG.grounded | FLAG.wet | FLAG.fly | FLAG.creative);
         return;
       }
       case "attack":

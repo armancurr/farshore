@@ -11,6 +11,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { PopoverTitle } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import { isEmail, joinWaitlist, signOut } from "@/lib/auth";
+import { CREATIVE } from "../../game/client/modes";
 
 /*
  * The small pointer from a menu card up to its button. The card sits a little
@@ -49,12 +50,18 @@ const CONTROL_GROUPS: [string, string[]][][] = [
   [
     ["Marketplace: skins, weapons, boats", ["K"]],
     ["The map", ["N"]],
+    ["First or third person", ["V"]],
   ],
-  [
-    ["Creative mode", ["Shift+C"]],
-    ["Take off, or drop", ["Space ×2"]],
-    ["Fly flat out", ["W ×2"]],
-  ],
+  /* Creative is only there while developing. */
+  ...(CREATIVE
+    ? [
+        [
+          ["Creative mode", ["Shift+C"]],
+          ["Take off, or drop", ["Space ×2"]],
+          ["Fly flat out", ["W ×2"]],
+        ] as [string, string[]][],
+      ]
+    : []),
 ];
 
 const CONTROL_FOOT: [string, string][] = [

@@ -13,7 +13,7 @@ import {
   unpackVehicle,
 } from "../src/game/shared/drive.ts";
 import { stepMount } from "../src/game/shared/mount.ts";
-import { parseClientMsg, RIDE_FIELDS } from "../src/game/shared/protocol.ts";
+import { FLAG, parseClientMsg, RIDE_FIELDS } from "../src/game/shared/protocol.ts";
 import { parseWorldSave, WORLD_SAVE_VERSION } from "../src/game/shared/save.ts";
 import {
   RIDER_HIP,
@@ -654,4 +654,22 @@ test("leaving at the helm keeps your vehicle: you come back in it, where you lef
   assert.equal(vehicleFromIndex(v.index), "rowboat");
   assert(Math.hypot(v.state.x - boat.state.x, v.state.z - boat.state.z) < 0.1);
   room.leave(back.id);
+});
+
+test("creative and flying only count where the room allows creative (the dev server)", () => {
+  for (const creative of [false, true]) {
+    const room = new Room({ online: true, now: () => 100, creative });
+    const a = member(room);
+    const b = member(room);
+    room.tick();
+    const you = a.last("world").you;
+    room.handle(a.id, moveAt(you.x, you.y + 20, you.z, { flags: FLAG.creative | FLAG.fly }));
+    room.tick();
+    const seen = b.last("snap").p.find((p) => p[0] === a.id);
+    assert(seen, "the other player is in the snapshot");
+    assert.equal((seen[6] & FLAG.creative) !== 0, creative);
+    assert.equal((seen[6] & FLAG.fly) !== 0, creative);
+    room.leave(a.id);
+    room.leave(b.id);
+  }
 });

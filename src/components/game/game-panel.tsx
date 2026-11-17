@@ -23,6 +23,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { type AuthStatus, dismissNotice, useAuth } from "@/lib/auth";
 import { enterLandscape, exitLandscape, usePortrait } from "@/lib/landscape";
 import type { Game, HudState, Mode } from "../../game/client/game";
+import { CREATIVE } from "../../game/client/modes";
 import { GrandMap } from "./grand-map";
 import { Hud } from "./hud";
 import { Marketplace } from "./marketplace";
@@ -478,6 +479,7 @@ export function GamePanel(props: { onPress?: () => void }) {
           creative={hud.creative}
           flying={hud.flying}
           building={!!hud.build}
+          view={hud.view}
         />
       )}
 
@@ -555,13 +557,26 @@ export function GamePanel(props: { onPress?: () => void }) {
             </>
           ) : (
             <>
-              {hud?.player && (
+              {hud?.player && CREATIVE && (
                 <span className={cn(menuText, "inline-flex items-center gap-1.5")}>
                   {hud.creative ? "Creative" : "Survival"}
                   <Kbd className={menuKbd} aria-label="Shift+C">
                     <ArrowUpIcon weight="bold" />C
                   </Kbd>
                 </span>
+              )}
+              {hud?.player && (
+                <Button
+                  variant="menu"
+                  size="inline"
+                  onClick={() => game?.toggleView()}
+                  aria-label={
+                    hud.view === "third" ? "Switch to first person" : "Switch to third person"
+                  }
+                >
+                  {hud.view === "third" ? "Third person" : "First person"}
+                  <Kbd className={menuKbd}>V</Kbd>
+                </Button>
               )}
               {mode === "online" && hud?.player && (
                 <Button variant="menu" size="inline" onClick={() => setMapOpen((open) => !open)}>

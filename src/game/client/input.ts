@@ -11,7 +11,9 @@ export type Action =
   | "rotate"
   | "creative"
   /* Creative: take off or come down (the touch button for a double tap of Space). */
-  | "fly";
+  | "fly"
+  /* First person or third, behind you. */
+  | "view";
 
 /*
  * Keyboard and mouse while the pointer is locked, plus a small API the touch
@@ -59,6 +61,7 @@ export class Input {
       /* ⌘R / Ctrl+R is the reload key, which the island menu catches. */
       if (e.code === "KeyR" && !e.metaKey && !e.ctrlKey) this.queued.add("rotate");
       if (e.code === "KeyC" && e.shiftKey) this.queued.add("creative");
+      if (e.code === "KeyV") this.queued.add("view");
       if (e.code === "KeyW" || e.code === "ArrowUp") {
         const now = performance.now();
         this.boostHeld = now - this.lastForwardTap < 300;

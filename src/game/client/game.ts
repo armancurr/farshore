@@ -56,6 +56,7 @@ import {
   afloat,
   BOARD_REACH as RIDE_REACH,
   controlsOf,
+  RIDER_HIP,
   VEHICLES,
   type VehicleKind,
   vehicleFromIndex,
@@ -88,6 +89,7 @@ import {
 import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { drawRoutes, islandImage, type MapView } from "./map";
+import { CREATIVE, type CameraView, keepView, readView } from "./modes";
 import {
   type Connection,
   keepSkin,
@@ -109,7 +111,7 @@ import { WorldProps } from "./scene/props";
 import { Clouds } from "./scene/clouds";
 import { NO_CAST, SunShadows } from "./scene/shadows";
 import { Sky } from "./scene/sky";
-import { stateFrom, VehicleView } from "./scene/vehicles";
+import { enclosed, stateFrom, VehicleView } from "./scene/vehicles";
 import { ViewModel } from "./scene/weapons";
 
 /* The title screen, or the game: online, on the grand map. */
@@ -210,6 +212,8 @@ export type HudState = {
   creative: boolean;
   /* Up in the air in creative. */
   flying: boolean;
+  /* Where the camera is: at your eyes, or behind you. */
+  view: CameraView;
   health: number;
   /* Fades from 1 when you get hurt. */
   hurt: number;
@@ -405,6 +409,17 @@ export class Game {
   private lastJumpTap = 0;
   /* Just left creative in mid-air: the fall down from there doesn't hurt. */
   private safeFall = false;
+  /*
+   * The camera: `footView` is what you chose on foot (V switches it), `view`
+   * what it is right now. Climbing aboard anything puts it behind you; V
+   * still switches it while you ride, and stepping off goes back to yours.
+   */
+  private footView: CameraView = readView();
+  private view: CameraView = this.footView;
+  /* You, drawn for the view from behind. */
+  private self: Avatar | null = null;
+  /* How far back the camera is behind you right now (pulled in when the ground is in the way). */
+  private chaseDist = 0;
 
   private raf = 0;
   private last = performance.now();
@@ -419,6 +434,7 @@ export class Game {
   private visHandler = () => this.onVisibility();
   private tmpV = new THREE.Vector3();
   private tmpF = new THREE.Vector3();
+  private tmpE = new THREE.Vector3();
 
   constructor(
     private container: HTMLElement,
@@ -601,6 +617,8 @@ export class Game {
     this.creative = false;
     this.flying = false;
     this.safeFall = false;
+    this.view = this.footView;
+    if (this.self) this.self.group.visible = false;
     this.build = null;
     this.chestId = null;
     this.animalStates.clear();
@@ -723,6 +741,8 @@ export class Game {
     document.removeEventListener("pointerlockchange", this.lockHandler);
     document.removeEventListener("visibilitychange", this.visHandler);
     this.input.dispose();
+    this.self?.dispose();
+    this.self = null;
     this.audio.close();
     this.viewmodel.dispose();
     this.herd.dispose();
@@ -856,6 +876,7 @@ export class Game {
       }
       case "hurt":
         this.hurtFlash = 1;
+        this.self?.hurt();
         this.flash = Math.max(this.flash, 0.6);
         this.kick = Math.max(this.kick, 0.6);
         this.audio.shoved();
@@ -973,10 +994,14 @@ export class Game {
       const state = msg.seat === 0 && pose ? stateFrom(pose) : null;
       this.ride = { id: msg.id, seat: msg.seat, kind, state, yaw: pose?.rot ?? b.yaw };
       this.vehicles.steer(msg.id, state);
-      /* Facing the way it faces. */
+      /* Facing the way it faces, and seen from behind. */
       if (!same && pose) {
         this.input.yaw = pose.rot;
         this.input.pitch = -0.05;
+      }
+      if (!same) {
+        this.view = "third";
+        this.chaseDist = 0;
       }
       this.acc = 0;
       if (afloat(kind)) this.audio.splash(0.3);
@@ -994,7 +1019,12 @@ export class Game {
   }
 
   private leaveRide() {
-    if (this.ride) this.vehicles.steer(this.ride.id, null);
+    if (this.ride) {
+      this.vehicles.steer(this.ride.id, null);
+      /* Back to the view you walk about with. */
+      this.view = this.footView;
+      this.chaseDist = 0;
+    }
     this.ride = null;
     this.acc = 0;
   }
@@ -1076,9 +1106,26 @@ export class Game {
     if (!look) return;
     const eye = eyeOf(ride.kind, look, ride.seat);
     this.smoothEye = eye.y;
-    this.camera.position.set(eye.x, eye.y, eye.z);
     this.kick += (0 - this.kick) * Math.min(1, dt * 7);
     this.dip = 0;
+    const def = VEHICLES[ride.kind];
+    const top = def.hull?.speed ?? def.car?.speed ?? def.mount?.gallop ?? 10;
+    const rush = Math.min(1, Math.abs(look.speed) / top) * (def.class === "car" ? 0.45 : 0.25);
+    const targetFov = BASE_FOV + rush * 22;
+    this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
+    this.setFov(this.fov);
+    if (this.view === "third") {
+      /*
+       * Behind and above it, over its middle, far enough back to see all of
+       * it, looking a little down. The horizon stays level as it rolls.
+       */
+      const seat = riderPose(ride.kind, look, ride.seat);
+      const lift = Math.max(seat.y + RIDER_HIP + 1.25, look.y + def.height * 0.75);
+      this.tmpV.set(look.x, lift, look.z);
+      this.chase(dt, this.tmpV, clamp(def.length * 0.55 + 3.5, 5, 20), this.input.pitch - 0.2);
+      return;
+    }
+    this.camera.position.set(eye.x, eye.y, eye.z);
     TILT.setFromEuler(TILT_E.set(look.pitch, look.rot, look.roll, "YXZ")).multiply(
       HEADING.setFromAxisAngle(UP, look.rot).invert(),
     );
@@ -1089,12 +1136,6 @@ export class Game {
           TILT_E.set(this.input.pitch - this.kick * 0.06, this.input.yaw, 0, "YXZ"),
         ),
       );
-    const def = VEHICLES[ride.kind];
-    const top = def.hull?.speed ?? def.car?.speed ?? def.mount?.gallop ?? 10;
-    const rush = Math.min(1, Math.abs(look.speed) / top) * (def.class === "car" ? 0.45 : 0.25);
-    const targetFov = BASE_FOV + rush * 22;
-    this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
-    this.setFov(this.fov);
   }
 
   /* An engine you can hear: yours, when you're in something with one. */
@@ -1331,6 +1372,7 @@ export class Game {
     this.lastSwingAt = now;
     this.conn?.send({ t: "attack", charge });
     this.viewmodel.swing(heavy);
+    this.self?.strike(heavy);
     this.audio.swing(kind, heavy);
     this.kick = kind ? -0.3 : -0.6;
   }
@@ -1367,8 +1409,11 @@ export class Game {
       this.camera.position,
       this.world?.ground,
     );
-    this.vehicles.inside(this.ride && !this.devCamera ? this.ride.id : null);
+    this.vehicles.inside(
+      this.ride && !this.devCamera && this.view === "first" ? this.ride.id : null,
+    );
     if (this.ride && this.body && !this.down) this.rideCamera(dt);
+    this.updateSelf(dt);
     this.engineSound();
 
     if (this.world) {
@@ -1391,7 +1436,8 @@ export class Game {
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     const held = this.body && !this.down ? heldTool(this.inv) : null;
     const holding = this.ride ? null : held ? TOOLS[held.kind].weapon : null;
-    this.viewmodel.set(holding);
+    /* From behind, what you hold is in your avatar's hands instead. */
+    this.viewmodel.set(this.view === "third" ? null : holding);
     const def = weaponDef(holding);
     this.viewmodel.update(dt, {
       aspect: this.camera.aspect,
@@ -1454,7 +1500,8 @@ export class Game {
       this.blocking =
         guardOf(this.weapon) !== null && active && this.input.altHeld && !this.build && !this.ride;
       const charging = this.chargeStart !== null;
-      if (active && this.input.take("creative") && !this.ride) this.toggleCreative(b);
+      if (active && this.input.take("creative") && !this.ride && CREATIVE) this.toggleCreative(b);
+      if (active && this.input.take("view")) this.toggleView();
       if (active && this.input.take("fly") && this.creative && !this.ride)
         this.setFlying(b, !this.flying);
       const tapped = active && this.input.take("jump");
@@ -1608,6 +1655,16 @@ export class Game {
     }
   }
 
+  /* V: first person or third. On foot it's remembered; aboard something it lasts the ride. */
+  toggleView() {
+    this.view = this.view === "first" ? "third" : "first";
+    this.chaseDist = 0;
+    if (!this.ride) {
+      this.footView = this.view;
+      keepView(this.view);
+    }
+  }
+
   private setFlying(b: Body, on: boolean) {
     this.flying = on;
     if (on) {
@@ -1632,6 +1689,7 @@ export class Game {
       "jump",
       "creative",
       "fly",
+      "view",
     ] as const)
       this.input.take(a);
     this.input.takeDigit();
@@ -1780,7 +1838,8 @@ export class Game {
     const world = this.world!;
     const def = PREFABS[kind];
     const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    const p = this.tmpV.copy(this.camera.position);
+    /* From your eyes, not the camera, which may be behind you. */
+    const p = this.tmpV.set(b.x, this.smoothEye, b.z);
     let hit: { x: number; y: number; z: number } | null = null;
     for (let d = 0; d < BUILD_REACH + 2; d += 0.25) {
       p.addScaledVector(dir, d === 0 ? 0 : 0.25);
@@ -1883,6 +1942,7 @@ export class Game {
   wear(skin: SkinId) {
     if (!canWear(skin)) return;
     keepSkin(skin);
+    this.self?.setSkin(skin);
     if (this.conn?.kind === "online") this.conn.send({ t: "skin", skin });
   }
 
@@ -2056,6 +2116,18 @@ export class Game {
     const bobY = Math.abs(Math.sin(this.bob * 0.5)) * 0.07 * this.bobAmp;
     const bobX = Math.sin(this.bob * 0.5) * 0.04 * this.bobAmp;
 
+    /* The view widens as you pick up speed in the air. */
+    const rush = this.flying ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST) : 0;
+    const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + rush * 22 + Math.abs(this.kick) * 4;
+    this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
+    this.setFov(this.fov);
+
+    if (this.view === "third") {
+      /* Behind you, a little over your head: you stand just under the crosshair. */
+      this.tmpV.set(b.x, this.smoothEye + 0.35 - this.dip * 0.2, b.z);
+      this.chase(dt, this.tmpV, 3.6, this.input.pitch - this.kick * 0.06);
+      return;
+    }
     this.camera.position.set(b.x, this.smoothEye + bobY - this.dip * 0.35, b.z);
     this.camera.rotation.set(
       this.input.pitch - this.kick * 0.06 - this.dip * 0.05,
@@ -2064,12 +2136,88 @@ export class Game {
       "YXZ",
     );
     this.camera.translateX(bobX);
+  }
 
-    /* The view widens as you pick up speed in the air. */
-    const rush = this.flying ? Math.min(1, Math.hypot(b.vx, b.vz) / FLY_BOOST) : 0;
-    const targetFov = BASE_FOV + (b.sprinting ? 7 : 0) + rush * 22 + Math.abs(this.kick) * 4;
-    this.fov += (targetFov - this.fov) * Math.min(1, dt * 6);
-    this.setFov(this.fov);
+  /*
+   * The camera `dist` back from `pivot` along where you look (pitched by
+   * `pitch`), looking at it. Where the ground or the sea is in the way it
+   * comes in closer at once, and eases back out once it's clear.
+   */
+  private chase(dt: number, pivot: THREE.Vector3, dist: number, pitch: number) {
+    const yaw = this.input.yaw;
+    const cp = Math.cos(pitch);
+    const fx = -Math.sin(yaw) * cp;
+    const fy = Math.sin(pitch);
+    const fz = -Math.cos(yaw) * cp;
+    const ground = this.world?.ground;
+    const dry = pivot.y > SEA_LEVEL + 0.3;
+    let clear = dist;
+    if (ground) {
+      for (let d = 0.4; d <= dist; d += 0.4) {
+        const x = pivot.x - fx * d;
+        const y = pivot.y - fy * d;
+        const z = pivot.z - fz * d;
+        const floor = Math.max(ground.heightAt(x, z), dry ? SEA_LEVEL : -Infinity) + 0.3;
+        if (y < floor) {
+          clear = Math.max(0.5, d - 0.4);
+          break;
+        }
+      }
+    }
+    if (!this.chaseDist || clear < this.chaseDist) this.chaseDist = clear;
+    else this.chaseDist += (clear - this.chaseDist) * Math.min(1, dt * 4);
+    const d = this.chaseDist;
+    this.camera.position.set(pivot.x - fx * d, pivot.y - fy * d, pivot.z - fz * d);
+    this.camera.rotation.set(pitch, yaw, 0, "YXZ");
+  }
+
+  /* You, as others see you: only drawn when the camera is behind you. */
+  private updateSelf(dt: number) {
+    const b = this.body;
+    const show =
+      !!b &&
+      !this.down &&
+      this.view === "third" &&
+      !this.devCamera &&
+      !(this.ride && enclosed(this.ride.kind));
+    if (!show) {
+      if (this.self) this.self.group.visible = false;
+      return;
+    }
+    if (!this.self) {
+      this.self = new Avatar(this.myId, this.myName, this.skin);
+      this.self.labelled = false;
+      this.scene.add(this.self.group);
+    }
+    const me = this.self;
+    me.group.visible = true;
+    me.setGear(this.weapon, 0);
+    const flags =
+      FLAG.alive |
+      (b.sprinting ? FLAG.sprint : 0) |
+      (b.grounded ? FLAG.grounded : 0) |
+      (b.y < SEA_LEVEL ? FLAG.wet : 0) |
+      (this.flying ? FLAG.fly : 0) |
+      (this.blocking ? FLAG.block : 0) |
+      (this.chargeStart !== null ? FLAG.charge : 0);
+    const ride = this.ride;
+    const look = ride ? (this.vehicles.look(ride.id) ?? ride.state) : null;
+    if (ride && look) {
+      /* In the seat on the vehicle as it's drawn, as everyone else rides. */
+      const seat = riderPose(ride.kind, look, ride.seat);
+      me.setPose(
+        seat.x,
+        seat.y,
+        seat.z,
+        seat.yaw,
+        this.input.pitch,
+        flags | FLAG.riding,
+        dt,
+        this.camera.position,
+      );
+      return;
+    }
+    me.setPose(b.x, b.y, b.z, b.yaw, this.input.pitch, flags, dt, this.camera.position);
   }
 
   /* Down: the view slumps to the ground and tips over. */
@@ -2152,6 +2300,11 @@ export class Game {
        * ride with it rather than a snapshot behind or ahead.
        */
       const seat = this.vehicles.riderPose(id);
+      /* Shut inside a closed car: only the car is seen. */
+      if (seat && this.vehicles.riderHidden(id)) {
+        r.avatar.group.visible = false;
+        continue;
+      }
       if (seat) {
         r.avatar.setPose(
           seat.x,
@@ -2219,14 +2372,16 @@ export class Game {
 
     /* Whoever's under the crosshair, close enough to hit. */
     let target: HudState["target"] = null;
-    if (playing) {
+    if (playing && this.body) {
       const fwd = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+      /* Measured from your eyes, which the camera may be behind. */
+      const eye = this.tmpE.set(this.body.x, this.smoothEye, this.body.z);
       let best = 0.985;
       for (const r of this.remotes.values()) {
         if (!r.avatar.group.visible) continue;
         const to = this.tmpV.copy(r.avatar.group.position);
         to.y += 1.2;
-        to.sub(this.camera.position);
+        to.sub(eye);
         const d = to.length();
         if (d > 8) continue;
         const dot = to.normalize().dot(fwd);
@@ -2238,7 +2393,7 @@ export class Game {
       for (const a of this.herd.list().values()) {
         if (a.state === ANIMAL_STATE.dead) continue;
         const to = this.tmpV.set(a.x, a.y + this.herd.aimHeight(a), a.z);
-        to.sub(this.camera.position);
+        to.sub(eye);
         const d = to.length();
         if (d > 14) continue;
         const dot = to.normalize().dot(fwd);
@@ -2262,6 +2417,7 @@ export class Game {
       player: playing,
       creative: this.creative,
       flying: this.flying,
+      view: this.view,
       health: this.health,
       hurt: this.hurtFlash,
       down: this.down,
