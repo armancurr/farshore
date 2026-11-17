@@ -176,7 +176,7 @@ const P = (x: number, y: number, z: number, rx = 0, ry = 0, rz = 0): Pose => [x,
 
 /* Down and across from up by the right shoulder. */
 const forehand = (strike = 0.13, recover = 0.3): Move => ({
-  wind: P(0.34, -0.04, -0.42, 0.15, -0.3, -0.75),
+  wind: P(0.3, -0.12, -0.5, 0.1, -0.2, -0.38),
   via: P(0.12, -0.12, -0.62, -0.6, 0.05, 0.35),
   end: P(-0.24, -0.4, -0.5, -1.3, 0.3, 1.1),
   strike,
@@ -184,9 +184,9 @@ const forehand = (strike = 0.13, recover = 0.3): Move => ({
 });
 /* And back the other way, from low on the left up and out to the right. */
 const backhand: Move = {
-  wind: P(-0.16, -0.16, -0.42, -0.1, 0.5, 1.05),
+  wind: P(-0.12, -0.2, -0.5, 0.0, 0.4, 0.75),
   via: P(0.06, -0.12, -0.62, -0.6, 0.05, 0.0),
-  end: P(0.42, -0.3, -0.48, -1.15, -0.35, -1.1),
+  end: P(0.4, -0.3, -0.5, -1.1, -0.35, -1.0),
   strike: 0.13,
   recover: 0.3,
 };
@@ -195,7 +195,7 @@ const backhand: Move = {
  * weapon stops higher (`low`), so its head stays in sight at the bottom.
  */
 const overhead = (strike: number, recover: number, low = -0.46, tug = 0): Move => ({
-  wind: P(0.26, 0.02, -0.44, 0.3, -0.2, -0.25),
+  wind: P(0.28, -0.08, -0.5, 0.05, -0.2, -0.35),
   via: P(0.12, -0.1, -0.64, -0.6, -0.05, 0.12),
   end: P(0.04, low, -0.52, -1.45, 0.1, 0.35),
   strike,
@@ -304,7 +304,7 @@ const STANCES: Record<WeaponKind, Stance> = {
     scale: 0.45,
     turn: -0.15,
     rest: P(0.3, -0.38, -0.48, -0.45, -0.2, 0.55),
-    moves: [overhead(0.17, 0.55)],
+    moves: [overhead(0.17, 0.55, -0.38)],
   },
   greatsword: {
     scale: 0.52,
