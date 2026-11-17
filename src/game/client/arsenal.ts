@@ -1,5 +1,5 @@
 import { ownsVehicle, VEHICLE_KINDS, type VehicleKind } from "../shared/vehicles";
-import { toWeaponKind, type WeaponKind } from "../shared/weapons";
+import { isThrown, toWeaponKind, type WeaponKind } from "../shared/weapons";
 
 /*
  * Your arsenal: the weapons and vehicles you've got from the marketplace,
@@ -31,7 +31,7 @@ function load(): Arsenal {
     if (raw) {
       const saved = JSON.parse(raw) as { weapons?: unknown };
       const weapons = Array.isArray(saved.weapons)
-        ? saved.weapons.map(toWeaponKind).filter((k): k is WeaponKind => !!k)
+        ? saved.weapons.map(toWeaponKind).filter((k): k is WeaponKind => !!k && !isThrown(k))
         : [];
       return { weapons: [...new Set(weapons)], vehicles, coins: 0 };
     }
@@ -48,7 +48,7 @@ function load(): Arsenal {
   } catch {
     /* Storage unavailable. */
   }
-  return { weapons: carried ? [carried] : [], vehicles, coins: 0 };
+  return { weapons: carried && !isThrown(carried) ? [carried] : [], vehicles, coins: 0 };
 }
 
 let arsenal: Arsenal | null = null;
@@ -91,8 +91,9 @@ export function setPurse(coins: number, bought: readonly VehicleKind[]) {
 
 export const ownsWeapon = (kind: WeaponKind) => getArsenal().weapons.includes(kind);
 
-/* Into the arsenal, in the order it was got. */
+/* Into the arsenal, in the order it was got. Kegs and smoke bombs are bought one by one instead, onto the belt. */
 export function getWeapon(kind: WeaponKind) {
+  if (isThrown(kind)) return;
   const now = getArsenal();
   if (!now.weapons.includes(kind)) save({ ...now, weapons: [...now.weapons, kind] });
 }

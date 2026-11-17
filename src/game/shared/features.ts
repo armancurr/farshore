@@ -17,6 +17,4 @@ export const FEATURES = {
   animals: true,
   /* The Guild Board at the top of the Harbor lighthouse: the only source of coins. */
   board: true,
-  /* The keeper's stall on the lighthouse plinth: the only place to spend them. */
-  shop: false,
 };

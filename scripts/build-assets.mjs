@@ -8,7 +8,7 @@
  * texture stripped out: each pack's models share one colour atlas, written
  * once beside them as palette.png, recoloured to the world's palette. The
  * bounds of every model go to src/game/shared/models.gen.ts so the server can
- * size collision without loading a mesh.
+ * size collision without loading a mesh. Effects sprites go to public/fx/.
  */
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -93,17 +93,28 @@ function grade(rgb, opts) {
   return rgb;
 }
 
+/*
+ * `team` is the atlas's team-colour swatch, [u0, v0, u1, v1]: it keeps its
+ * colour (a green team must not turn coral), taken from `shift` across, so a
+ * pack whose teams sit side by side in one atlas gets a palette per team.
+ */
 async function palette(src, out, opts = {}) {
   const raw = await sharp(src).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   /* Resampled by hand, point-sampling the middle of each cell: sharp's own shrink blends the bands. */
   const [w, h] = opts.resize ?? [raw.info.width, raw.info.height];
+  const [u0, v0, u1, v1] = opts.team ?? [0, 0, 0, 0];
   const data = Buffer.alloc(w * h * 3);
   for (let j = 0; j < h; j++) {
     for (let i = 0; i < w; i++) {
-      const sx = Math.floor(((i + 0.5) / w) * raw.info.width);
-      const sy = Math.floor(((j + 0.5) / h) * raw.info.height);
+      let u = (i + 0.5) / w;
+      const v = (j + 0.5) / h;
+      const team = u >= u0 && u < u1 && v >= v0 && v < v1;
+      if (team) u += opts.shift ?? 0;
+      const sx = Math.floor(u * raw.info.width);
+      const sy = Math.floor(v * raw.info.height);
       const k = (sy * raw.info.width + sx) * 3;
-      const c = grade([raw.data[k], raw.data[k + 1], raw.data[k + 2]], opts);
+      const rgb = [raw.data[k], raw.data[k + 1], raw.data[k + 2]];
+      const c = team ? rgb : grade(rgb, opts);
       const o = (j * w + i) * 3;
       data[o] = Math.round(c[0]);
       data[o + 1] = Math.round(c[1]);
@@ -533,6 +544,136 @@ const fresh = (pack) => {
   );
 }
 
+/*
+ * Buildings for the marketplace: the KayKit medieval hexagon pack's whole
+ * buildings, walls, fences and bridges (not its ground tiles), made to stand
+ * on its hex tiles (2 units across the flats). Each team's buildings are the
+ * same mesh with the team-coloured faces moved onto that team's swatch, so
+ * only the blue set is kept and each team gets a palette instead.
+ */
+{
+  const dir = join(KAY("kaykit-medieval-hexagon"), "Assets/gltf");
+  fresh("buildings");
+  const name = (f) => kebab(f.replace(/\.gltf$/, "").replace(/^building_|_blue$/g, ""));
+  const PROPS = [
+    "flag_blue",
+    "tent",
+    "target",
+    "weaponrack",
+    "bucket_arrows",
+    "wheelbarrow",
+    "resource_lumber",
+    "resource_stone",
+  ];
+  const files = [
+    ...gltfs(join(dir, "buildings/blue")).map((f) => join(dir, "buildings/blue", f)),
+    ...gltfs(join(dir, "buildings/neutral")).map((f) => join(dir, "buildings/neutral", f)),
+    ...gltfs(join(dir, "decoration/props"))
+      .filter((f) => PROPS.includes(f.replace(".gltf", "")))
+      .map((f) => join(dir, "decoration/props", f)),
+  ];
+  for (const f of files) await model(f, "buildings", name(basename(f)), { material: "buildings" });
+  counts.buildings = files.length;
+  const atlas = join(dir, "buildings/blue/hexagons_medieval.png");
+  /* The team swatches run along the atlas's bottom row: blue, red, yellow, green. */
+  for (const [n, out] of [
+    [0, "palette"],
+    [1, "palette-red"],
+    [2, "palette-yellow"],
+    [3, "palette-green"],
+  ])
+    await palette(atlas, join(OUT, `buildings/${out}.png`), {
+      resize: [64, 256],
+      stone: true,
+      team: [0, 0.75, 0.125, 1],
+      shift: n * 0.125,
+    });
+}
+
+/*
+ * Castle walls, towers, gates, flags and siege engines: the Kenney castle kit,
+ * less its ground and trees. Its blue trim comes in red, green and yellow too,
+ * as whole alternative atlases: those are the team palettes.
+ */
+{
+  fresh("castle");
+  counts.castle = await each(
+    KENNEY("k-castle-kit"),
+    "castle",
+    (n) => !/^(ground|rocks|tree)/.test(n) && n !== "wall-stud",
+    { material: "castle" },
+  );
+  for (const [src, out] of [
+    ["GLB format/Textures/colormap.png", "palette"],
+    ["Textures/variation-a.png", "palette-red"],
+    ["Textures/variation-c.png", "palette-yellow"],
+    ["Textures/variation-b.png", "palette-green"],
+  ])
+    await palette(join(SRC, "k-castle-kit/Models", src), join(OUT, `castle/${out}.png`), {
+      stone: true,
+      team: [0.5, 0.5, 0.625, 0.75],
+    });
+}
+
+/*
+ * Effects sprites (white on transparent, tinted in the game) from the Kenney
+ * particle and smoke packs, shrunk, into public/fx/.
+ */
+{
+  const FX = join(ROOT, "public/fx");
+  rmSync(FX, { recursive: true, force: true });
+  mkdirSync(FX, { recursive: true });
+  const pp = join(SRC, "k-particle-pack/PNG (Transparent)");
+  const sp = join(SRC, "k-smoke-particles/PNG");
+  const SPRITES = [
+    ...[
+      "fire_01",
+      "fire_02",
+      "flame_01",
+      "flame_05",
+      "flame_06",
+      "muzzle_01",
+      "muzzle_02",
+      "muzzle_05",
+      "scorch_01",
+      "scorch_02",
+      "smoke_02",
+      "smoke_04",
+      "smoke_05",
+      "smoke_07",
+      "smoke_08",
+      "dirt_01",
+      "dirt_03",
+      "circle_02",
+      "circle_05",
+      "flare_01",
+      "star_04",
+      "trace_06",
+      "trace_07",
+    ].map((n) => [join(pp, `${n}.png`), n.replace("_", "-")]),
+    ...[
+      ["Black smoke/blackSmoke00", "smoke-black-1"],
+      ["Black smoke/blackSmoke03", "smoke-black-2"],
+      ["Black smoke/blackSmoke06", "smoke-black-3"],
+      ["White puff/whitePuff00", "puff-1"],
+      ["White puff/whitePuff03", "puff-2"],
+      ["White puff/whitePuff06", "puff-3"],
+      ["Explosion/explosion00", "explosion-1"],
+      ["Explosion/explosion02", "explosion-2"],
+      ["Explosion/explosion04", "explosion-3"],
+      ["Explosion/explosion08", "explosion-4"],
+      ["Flash/flash00", "flash-1"],
+      ["Flash/flash02", "flash-2"],
+    ].map(([f, n]) => [join(sp, `${f}.png`), n]),
+  ];
+  for (const [src, n] of SPRITES)
+    await sharp(src)
+      .resize(128, 128, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .png({ compressionLevel: 9, palette: true })
+      .toFile(join(FX, `${n}.png`));
+  counts.fx = SPRITES.length;
+}
+
 /* ---------- manifest ---------- */
 
 const keys = Object.keys(bounds).sort();
@@ -543,7 +684,10 @@ writeFileSync(
   join(ROOT, "src/game/shared/models.gen.ts"),
   `/* Generated by scripts/build-assets.mjs: the bounds of every model in public/models, in its own units. Do not edit. */
 
-export type ModelBounds = { min: readonly [number, number, number]; max: readonly [number, number, number] };
+export type ModelBounds = {
+  min: readonly [number, number, number];
+  max: readonly [number, number, number];
+};
 
 export const MODEL_BOUNDS = {
 ${lines.join("\n")}
@@ -561,10 +705,15 @@ writeFileSync(
   forest, characters, anims, weapons, gear, tools
     KayKit by Kay Lousberg (kaylousberg.itch.io): Forest Nature Pack, Adventurers,
     Skeletons, Character Animations, Fantasy Weapons Bits, RPG Tools Bits.
+  buildings
+    KayKit Medieval Hexagon Pack by Kay Lousberg (kaylousberg.itch.io).
   anims/player.glb (swim, drive, sit)
     Universal Animation Library by Quaternius (quaternius.com), moved onto the KayKit rig.
-  boats, ships, cars, camp, coast, town
-    Kenney (kenney.nl): Watercraft Kit, Pirate Kit, Car Kit, Survival Kit, Fantasy Town Kit.
+  boats, ships, cars, camp, coast, town, castle
+    Kenney (kenney.nl): Watercraft Kit, Pirate Kit, Car Kit, Survival Kit, Fantasy Town Kit,
+    Castle Kit.
+  ../fx (the effects sprites in public/fx)
+    Kenney (kenney.nl): Particle Pack, Smoke Particles.
   animals
     Quaternius (quaternius.com) and Gobkit; see animals/LICENSE-*.txt.
 
@@ -573,4 +722,3 @@ Textures have been recoloured to the game's palette. https://creativecommons.org
 );
 
 console.log(counts, `${keys.length} models with bounds`);
-void basename;

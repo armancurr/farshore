@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { MODEL_BOUNDS, type ModelId } from "../../shared/models.gen";
-import { type WeaponKind, weaponDef } from "../../shared/weapons";
+import { type WeaponKind, WEAPONS, weaponDef } from "../../shared/weapons";
 import { PALETTE, shared } from "./materials";
 import { packModel } from "./packs";
 
@@ -65,6 +65,15 @@ const SPECS: Record<WeaponKind, Spec> = {
   "shield-a": { id: "weapons/shield-a", scale: 0.55 },
   kite: { id: "weapons/shield-b", scale: 0.68 },
   spiked: { id: "weapons/shield-c", scale: 0.64 },
+  /* A pitch torch, 0.6 m, alight at its head; a pail held by its handle, hanging under the hand. */
+  torch: { id: "tools/torch", scale: 0.52 },
+  bucket: { id: "tools/bucket-metal", scale: 0.3, grip: 1.1 },
+  /* A stocked crossbow, and the rogue's longbow, 1.5 m tip to tip, with a lit arrow nocked. */
+  crossbow: { id: "gear/crossbow-2handed", texture: "/models/gear/ranger.png", scale: 0.62 },
+  firebow: { id: "gear/bow-with-string", texture: "/models/gear/rogue.png", scale: 0.76 },
+  /* A powder keg, half a metre tall; a smoke bomb fits in the hand. */
+  keg: { id: "coast/barrel", scale: 0.36 },
+  smokebomb: { id: "gear/smokebomb", texture: "/models/gear/rogue.png", scale: 0.6 },
 };
 
 /* The model's bounds in metres, in the weapon's own frame (grip at the origin). */
@@ -117,7 +126,52 @@ export function buildWeapon(kind: WeaponKind): THREE.Group {
   const ready = loaded.get(kind);
   if (ready) holder.add(ready.clone(true));
   else void load(kind).then((model) => holder.add(model.clone(true)));
+  if (WEAPONS[kind].ignites) group.add(torchFlame(boundsOf(kind).max[1] - 0.09));
   return group;
+}
+
+/* ---------- a torch's flame ---------- */
+
+let flameMaterials: [THREE.SpriteMaterial, THREE.SpriteMaterial] | null = null;
+
+/*
+ * Two sprites, a wide orange one and a hot core, that flicker on their own.
+ * Drawn over what's behind rather than added to it, so a flame against the
+ * sky stays orange instead of washing pink.
+ */
+function torchFlame(top: number) {
+  if (!flameMaterials) {
+    const map = new THREE.TextureLoader().load("/fx/flame-06.png");
+    map.colorSpace = THREE.SRGBColorSpace;
+    const make = (color: number) =>
+      new THREE.SpriteMaterial({
+        map,
+        color,
+        transparent: true,
+        depthWrite: false,
+        fog: false,
+      });
+    flameMaterials = [make(0xff6a10), make(0xffc860)];
+  }
+  const flame = new THREE.Group();
+  flame.name = "flame";
+  flame.position.y = top;
+  const seed = Math.random() * 100;
+  flameMaterials.forEach((material, i) => {
+    const sprite = new THREE.Sprite(material);
+    const w = i === 0 ? 0.34 : 0.18;
+    const h = i === 0 ? 0.44 : 0.24;
+    sprite.center.set(0.5, 0.06);
+    sprite.scale.set(w, h, 1);
+    sprite.renderOrder = 3;
+    sprite.onBeforeRender = () => {
+      const t = performance.now() / 1000 + seed + i;
+      const f = 1 + 0.16 * Math.sin(t * 17) + 0.1 * Math.sin(t * 29 + 1.7);
+      sprite.scale.set(w * (2 - f) * 0.9 + w * 0.1, h * f, 1);
+    };
+    flame.add(sprite);
+  });
+  return flame;
 }
 
 /*
@@ -136,14 +190,6 @@ export async function weaponsReady(kinds: readonly WeaponKind[]) {
   for (let i = 0; i < 100 && [...maps].some((t) => !t.image); i++)
     await new Promise((r) => setTimeout(r, 50));
 }
-
-/* How long each weapon is, grip to tip (metres up its length), for framing it in a picture. */
-export const WEAPON_SPAN = Object.fromEntries(
-  (Object.keys(SPECS) as WeaponKind[]).map((k) => {
-    const b = boundsOf(k);
-    return [k, { from: b.min[1], to: b.max[1] }];
-  }),
-) as Record<WeaponKind, { from: number; to: number }>;
 
 /* ---------- first person ---------- */
 
@@ -480,7 +526,101 @@ const STANCES: Record<WeaponKind, Stance> = {
   kite: shieldStance(0.55),
 
   spiked: shieldStance(0.55),
+  /* Held up and out ahead, its flame in sight; a blow is a quick jab down at what's in front. */
+  torch: {
+    scale: 0.58,
+    turn: 0,
+    rest: P(0.25, -0.31, -0.56, -0.12, -0.1, 0.1),
+    moves: [
+      {
+        wind: P(0.3, -0.18, -0.42, 0.15, -0.15, -0.1),
+        via: P(0.18, -0.22, -0.62, -0.45, -0.05, 0.1),
+        end: P(0.1, -0.36, -0.7, -0.9, 0.0, 0.2),
+        strike: 0.12,
+        recover: 0.34,
+      },
+    ],
+  },
+  /* Low on the left, drawn up square in front of you; a loose snaps it forward a touch. */
+  firebow: longbowStance(),
+  /* Shouldered, the bolt under the crosshair; it bucks as it shoots. */
+  crossbow: {
+    scale: 0.7,
+    turn: 0,
+    rest: P(0.16, -0.24, -0.38, 0.05, Math.PI, 0),
+    moves: [
+      {
+        wind: P(0.16, -0.24, -0.38, 0.05, Math.PI, 0),
+        via: P(0.16, -0.2, -0.3, 0.25, Math.PI, 0),
+        end: P(0.16, -0.21, -0.32, 0.2, Math.PI, 0),
+        strike: 0.05,
+        recover: 0.5,
+      },
+    ],
+  },
+  /* Held low at your side; a throw swings it up and away under the crosshair. */
+  keg: throwStance(0.42),
+  smokebomb: throwStance(0.9),
+  /* Hanging by your side; a throw swings it forward and up, emptying it ahead of you. */
+  bucket: {
+    scale: 0.6,
+    turn: 0,
+    rest: P(0.26, -0.06, -0.62, 0.05, 0.3, 0.05),
+    moves: [
+      {
+        wind: P(0.24, -0.1, -0.42, 0.5, 0.3, 0.05),
+        via: P(0.12, 0.0, -0.66, -0.4, 0.1, 0.0),
+        end: P(0.06, 0.12, -0.7, -1.6, 0.0, 0.0),
+        strike: 0.14,
+        recover: 0.4,
+      },
+    ],
+  },
 };
+
+/*
+ * The adventurer's longbow (it lies along its own z), in the left hand,
+ * upright with its string toward you (as an archer sees it): held low and
+ * canted, then drawn up just left of the crosshair.
+ */
+function longbowStance(): Stance {
+  const Q = Math.PI / 2;
+  const drawn = P(-0.1, -0.13, -0.62, Q, 0.05, -Q);
+  return {
+    scale: 0.55,
+    turn: 0,
+    left: true,
+    rest: P(-0.2, -0.3, -0.58, Q - 0.25, 0.45, -Q),
+    raised: drawn,
+    moves: [
+      {
+        wind: drawn,
+        via: P(-0.1, -0.12, -0.68, Q - 0.05, 0.05, -Q),
+        end: P(-0.11, -0.15, -0.64, Q - 0.1, 0.1, -Q),
+        strike: 0.05,
+        recover: 0.3,
+      },
+    ],
+  };
+}
+
+/* Something to throw, low in the right hand: back, then up and out ahead. */
+function throwStance(scale: number): Stance {
+  return {
+    scale,
+    turn: 0,
+    rest: P(0.26, -0.36, -0.55, -0.1, 0, 0.1),
+    moves: [
+      {
+        wind: P(0.3, -0.2, -0.3, 0.6, 0, -0.2),
+        via: P(0.18, -0.05, -0.6, -0.3, 0, 0.1),
+        end: P(0.12, -0.2, -0.75, -0.8, 0, 0.2),
+        strike: 0.12,
+        recover: 0.4,
+      },
+    ],
+  };
+}
 
 /*
  * Held out on the left arm and raised square-on to block. You see its painted

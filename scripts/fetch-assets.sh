@@ -44,12 +44,16 @@ itch kaylousberg kaykit-skeletons kaykit-skeletons
 itch kaylousberg kaykit-character-animations kaykit-character-animations
 itch kaylousberg fantasy-weapons-bits fantasy-weapons-bits
 itch kaylousberg rpg-tools-bits rpg-tools-bits
+itch kaylousberg kaykit-medieval-hexagon kaykit-medieval-hexagon
 itch quaternius universal-animation-library ual
 kenney watercraft-kit k-watercraft-kit
 kenney pirate-kit k-pirate-kit
 kenney car-kit k-car-kit
 kenney survival-kit k-survival-kit
 kenney fantasy-town-kit k-fantasy-town-kit
+kenney castle-kit k-castle-kit
+kenney particle-pack k-particle-pack
+kenney smoke-particles k-smoke-particles
 
 for z in "$DL"/*.zip; do
   name=$(basename "$z" .zip)

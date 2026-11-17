@@ -19,7 +19,8 @@ export type StructureKind =
   | "well"
   | "aqueduct"
   | "wreck"
-  | "jetty";
+  | "jetty"
+  | "hearth";
 
 export type Tone = "dark" | "mid" | "light";
 
@@ -93,6 +94,42 @@ export const LIGHTHOUSE = {
   bands: 7,
   galleryRadius: 4.1,
 };
+
+/*
+ * The Hearth at the middle of every plot: a round stone plinth in two tiers,
+ * each a step high, the fire on top (its models are the place's; see
+ * places.ts). Raids will make it the thing to hold. A nicer model can take
+ * its place: these blocks are only its collision and its plain drawing.
+ */
+export const HEARTH = {
+  /* Radius and top (above the ground) of each tier, from the bottom up. */
+  tiers: [
+    [3.4, 0.5],
+    [2.5, 1],
+  ] as const,
+};
+
+export function hearthStructure(x: number, y: number, z: number, rot: number): Structure {
+  const top = HEARTH.tiers[HEARTH.tiers.length - 1][1];
+  return {
+    id: 0,
+    kind: "hearth",
+    x,
+    y,
+    z,
+    rot,
+    variant: 0,
+    w: HEARTH.tiers[0][0] * 2,
+    d: HEARTH.tiers[0][0] * 2,
+    h: top,
+    /* Sunk a little, so the plinth never floats over a dip. */
+    blocks: HEARTH.tiers.map(([r, h], k) =>
+      cyl(x, z, y - 0.6, y + h, r, r - 0.1, k ? "light" : "mid", 18, true),
+    ),
+    ladders: [],
+    lamps: [],
+  };
+}
 
 const STEP_RISE = 0.45;
 const WALL = 0.4;

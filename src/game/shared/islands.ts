@@ -1,5 +1,6 @@
 import { BASE_CELL, BASE_TILE, ISLAND_RADIUS, MAX_HEIGHT, SEA_FLOOR } from "./constants";
-import { createNoise2D, fbm, mulberry32, type Rng, range, smoothstep } from "./math";
+import { clamp, createNoise2D, fbm, mulberry32, type Rng, range, smoothstep } from "./math";
+import type { PlotSizeId } from "./plots";
 
 /*
  * The grand map is authored: the Harbor in the middle and the hunting islands
@@ -9,7 +10,8 @@ import { createNoise2D, fbm, mulberry32, type Rng, range, smoothstep } from "./m
  * the seed and the size alone.
  */
 
-export const SHAPE_IDS = [
+/* The wild shapes: the Harbor and the hunting islands. */
+export const WILD_SHAPE_IDS = [
   "plain",
   "headland",
   "crescent",
@@ -22,10 +24,20 @@ export const SHAPE_IDS = [
   "spire",
 ] as const;
 
-export type ShapeId = (typeof SHAPE_IDS)[number];
+/* The calm shapes a bought plot of land comes in; see PLOT_SHAPES. */
+export const PLOT_SHAPE_IDS = ["round", "oval", "long"] as const;
+
+export const SHAPE_IDS = [...WILD_SHAPE_IDS, ...PLOT_SHAPE_IDS] as const;
+
+export type WildShapeId = (typeof WILD_SHAPE_IDS)[number];
+export type PlotShapeId = (typeof PLOT_SHAPE_IDS)[number];
+export type ShapeId = WildShapeId | PlotShapeId;
 
 export const isShapeId = (v: unknown): v is ShapeId =>
   typeof v === "string" && (SHAPE_IDS as readonly string[]).includes(v);
+
+export const isPlotShape = (v: unknown): v is PlotShapeId =>
+  typeof v === "string" && (PLOT_SHAPE_IDS as readonly string[]).includes(v);
 
 /* What lives on a hunting island and what grows there. */
 export type BiomeId = "meadow" | "pinewood" | "ridge" | "marsh" | "fells";
@@ -47,6 +59,8 @@ export type IslandInfo = {
   /* The common ground in the middle of the map; see HARBOR. */
   harbor?: boolean;
   biome?: BiomeId;
+  /* Land someone bought: its size, who owns it (by name), and whether it's yours. */
+  plot?: { size: PlotSizeId; owner: string; mine?: boolean };
 };
 
 /* Height samples a side for an island. */
@@ -171,7 +185,7 @@ function wrapAngle(a: number) {
   return a;
 }
 
-export const SHAPES: Record<ShapeId, ShapeDef> = {
+export const SHAPES: Record<WildShapeId, ShapeDef> = {
   plain: {
     name: "Plain",
     note: "One broad, whole island of gentle ground, rising a little to the middle.",
@@ -504,7 +518,8 @@ export const SHAPES: Record<ShapeId, ShapeDef> = {
  * coordinates, centred on the island, in BASE_TILE units). The game uses the
  * island's own grid; the map draws from far fewer.
  */
-export function islandHeights(shape: ShapeId, seed: number, n: number, lift = 1) {
+export function islandHeights(shape: ShapeId, seed: number, n: number, lift = 1, size = BASE_TILE) {
+  if (isPlotShape(shape)) return plotHeights(shape, seed, n, size);
   const def = SHAPES[shape];
   const rng = mulberry32(seed >>> 0);
   const rolling = createNoise2D(rng);
@@ -590,6 +605,123 @@ function terraced(
   /* The lowest bench comes in gently, so beaches stay beaches. */
   const shore = smoothstep(1.2, 3.5, h);
   return h + (stepped - h) * on * shore;
+}
+
+/* ---------- plots ---------- */
+
+/*
+ * A plot is land to build on, so its shapes are calm: one broad, nearly flat
+ * top a few metres above the sea, a soft sand rim down to the water, and a
+ * coast that wanders only a little. No terraces, cliffs or lagoons. Unlike
+ * the wild shapes these are measured in metres, not stretched from a
+ * BASE_TILE drawing, so a small plot is as gentle as a big one.
+ */
+type PlotShapeDef = {
+  name: string;
+  note: string;
+  /*
+   * How far inside the coast (x, z) is, in metres, for a shape whose longest
+   * reach from the middle is `reach`, its long axis along x.
+   */
+  inside: (x: number, z: number, reach: number) => number;
+};
+
+export const PLOT_SHAPES: Record<PlotShapeId, PlotShapeDef> = {
+  round: {
+    name: "Round",
+    note: "A broad disc of level ground: the most room for its size.",
+    inside: (x, z, reach) => reach - Math.hypot(x, z),
+  },
+  oval: {
+    name: "Oval",
+    note: "An easy oval, two thirds as wide as it is long.",
+    inside: (x, z, reach) => {
+      const a = reach;
+      const b = reach * 0.66;
+      /* The ellipse's distance, to first order: how far out, over how fast that grows. */
+      const q = Math.hypot(x / a, z / b) || 1e-6;
+      const g = Math.hypot(x / (a * a), z / (b * b)) / q;
+      return (1 - q) / Math.max(g, 1e-6);
+    },
+  },
+  long: {
+    name: "Long",
+    note: "A long, straight-sided strip with rounded ends, for a row of buildings.",
+    inside: (x, z, reach) => {
+      const w = Math.max(reach * 0.4, 24);
+      const l = Math.max(0, reach - w);
+      return w - Math.hypot(Math.max(0, Math.abs(x) - l), z);
+    },
+  },
+};
+
+/* How high a plot's top stands, by its tile's side: a bigger plot a little higher. */
+export const plotTop = (size: number) => 1.6 + size * 0.004;
+/* The sand lip at the waterline: this high, this wide. */
+const LIP = 0.5;
+const LIP_RUN = 2;
+/* The open water round a plot's coast inside its own tile, before its edge. */
+export const plotShelf = (size: number) => clamp(size * 0.1, 16, 36);
+/* The furthest a plot's coast can reach from its middle. */
+export const plotReach = (size: number) => size / 2 - plotShelf(size) - 4;
+
+/*
+ * Heights for a plot, n samples a side over its tile of `size` metres. From
+ * the coast inland: a short sand lip, a long easy beach rising (never
+ * steeper than about 1 in 5) to the top, and on the top only the gentlest
+ * swells. Out to sea the floor drops away to the open sea's depth before
+ * the tile's edge.
+ */
+export function plotHeights(shape: PlotShapeId, seed: number, n: number, size: number) {
+  const def = PLOT_SHAPES[shape];
+  const rng = mulberry32(seed >>> 0);
+  const coast = createNoise2D(rng);
+  const swell = createNoise2D(rng);
+  const turn = rng() * Math.PI * 2;
+  const c = Math.cos(turn);
+  const s = Math.sin(turn);
+  const half = size / 2;
+  const cell = size / (n - 1);
+  const reach = plotReach(size);
+  /* The coast wanders a few percent in and out: room for that is kept inside the reach. */
+  const wobble = reach * 0.035;
+  const outline = reach - wobble;
+  const top = plotTop(size);
+  /* Long enough that the beach's steepest point is no worse than 1 in 5. */
+  const beach = 7.5 * (top - LIP) + LIP_RUN;
+  const shelf = plotShelf(size);
+  const rise = Math.min(0.9, size / 500);
+  /* The lip's slope at the waterline, carried on down under the water. */
+  const m0 = (2 * LIP) / LIP_RUN;
+
+  const out = new Float32Array(n * n);
+  for (let i = 0; i < n; i++) {
+    const z = -half + i * cell;
+    for (let j = 0; j < n; j++) {
+      const x = -half + j * cell;
+      const u = x * c + z * s;
+      const v = -x * s + z * c;
+      const ragged = fbm(coast, x / (reach * 0.8), z / (reach * 0.8), 2) * wobble * 2.2;
+      const d = def.inside(u, v, outline) + clamp(ragged, -wobble, wobble);
+      let h: number;
+      if (d >= 0) {
+        const t = Math.min(1, d / LIP_RUN);
+        h = LIP * (2 * t - t * t);
+        h += (top - LIP) * smoothstep(0, beach, d);
+        /* Swells on the top, a metre at most, from a long way off. */
+        const sw = (fbm(swell, x / 90, z / 90, 2) + 0.5) * rise;
+        h += Math.max(0, sw) * smoothstep(beach * 0.6, beach * 1.6, d);
+      } else {
+        /* A Hermite curve from the waterline (going down at the lip's slope) to the sea floor. */
+        const t = Math.min(1, -d / shelf);
+        const t2 = t * t;
+        const t3 = t2 * t;
+        h = SEA_FLOOR * (3 * t2 - 2 * t3) - m0 * shelf * (t3 - 2 * t2 + t);
+      }
+      out[i * n + j] = h;
+    }
+  }
+  return out;
 }
 
 /* ---------- the grand map ---------- */

@@ -12,7 +12,6 @@ export const SEA_FLOOR = -14;
 export const SEA_LEVEL = 0;
 /* The grand map: open sea with the Harbor in the middle and the hunting islands round it. */
 export const GRAND_SIZE = 5600; // metres, square
-export const MAX_ISLANDS = 16;
 export const BOUNDARY = GRAND_SIZE / 2 - 6;
 
 /* Room */

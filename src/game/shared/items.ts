@@ -4,64 +4,32 @@ import type { VehicleKind } from "./vehicles";
 import { toWeaponKind, WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
- * Everything you can own. Stackable items (carcasses, building kits) are
- * counted; tools (weapons) are individual, and the hotbar slots point at them.
+ * Everything you can own. Stackable items (carcasses) are counted; tools
+ * (weapons) are individual, and the hotbar slots point at them.
  */
 
-export type KitId = "campfire" | "chest" | "bed" | "hut" | "cabin" | "dock";
-export const KIT_IDS: readonly KitId[] = ["campfire", "chest", "bed", "hut", "cabin", "dock"];
-
 /* A carcass is filed under the species it came from. */
-export type ItemId = SpeciesId | KitId;
+export type ItemId = SpeciesId;
 
 type ItemDef = {
   name: string;
   plural: string;
-  kind: "game" | "kit";
   note: string;
 };
 
-const CARCASSES = Object.fromEntries(
+export const ITEMS = Object.fromEntries(
   SPECIES_IDS.map((s) => [
     s,
     {
       name: `${SPECIES[s].name} carcass`,
       plural: `${SPECIES[s].name.toLowerCase()} carcasses`,
-      kind: "game",
       note: SPECIES[s].note,
     },
   ]),
-) as Record<SpeciesId, ItemDef>;
-
-export const ITEMS: Record<ItemId, ItemDef> = {
-  ...CARCASSES,
-  campfire: {
-    name: "Campfire",
-    plural: "campfires",
-    kind: "kit",
-    note: "Warmth: you heal faster beside it.",
-  },
-  chest: { name: "Storage chest", plural: "chests", kind: "kit", note: "Keeps your spoils safe." },
-  bed: { name: "Bed", plural: "beds", kind: "kit", note: "Rest here, and wake here." },
-  hut: { name: "Hut", plural: "huts", kind: "kit", note: "Four walls, a door and a roof." },
-  cabin: {
-    name: "Cabin",
-    plural: "cabins",
-    kind: "kit",
-    note: "Roomy, with windows and a porch.",
-  },
-  dock: {
-    name: "Dock",
-    plural: "docks",
-    kind: "kit",
-    note: "Walk out over the water, and tie up a boat.",
-  },
-};
+) as Record<ItemId, ItemDef>;
 
 export const isItemId = (v: unknown): v is ItemId =>
   typeof v === "string" && Object.hasOwn(ITEMS, v);
-export const isKitId = (v: unknown): v is KitId =>
-  typeof v === "string" && (KIT_IDS as readonly string[]).includes(v);
 
 /* ---------- tools ---------- */
 
@@ -106,8 +74,6 @@ export type Inventory = {
   mission: Contract | null;
   /* Alpha bounties and cull shares, waiting to be collected at the board. */
   payouts: Payout[];
-  /* The bed you last slept in or set down: where you wake after blacking out. */
-  bed: number | null;
   /* Vehicles bought from the marketplace, in the order bought. The free tier isn't listed: it's everyone's. */
   vehicles: VehicleKind[];
 };
@@ -121,7 +87,6 @@ export function emptyInventory(): Inventory {
     slot: 0,
     mission: null,
     payouts: [],
-    bed: null,
     vehicles: [],
   };
 }

@@ -1,4 +1,4 @@
-import type { BiomeId } from "./islands";
+import type { FloraKind } from "./flora";
 import { mulberry32, range, type Rng } from "./math";
 import { MODEL_BOUNDS, type ModelId } from "./models.gen";
 
@@ -27,7 +27,8 @@ export type PlaceKind =
   | "stones"
   | "paddock"
   | "market"
-  | "view";
+  | "view"
+  | "hearth";
 
 /* The height of a pier's deck (and the quay at its root) above the sea. */
 export const DECK = 1;
@@ -61,6 +62,8 @@ export type PlacedModel = {
   sink?: number;
   /* Stands on the water rather than the ground. */
   float?: boolean;
+  /* Stands this high over the place's ground (on a plinth, say) rather than on the ground. */
+  lift?: number;
 };
 
 export type Place = {
@@ -92,7 +95,16 @@ export interface PlaceGround {
   normalAt(x: number, z: number): [number, number, number];
 }
 
-type Item = [ModelId, number, number, number?, number?, ("solid" | "stand" | "deco")?];
+type Item = [
+  ModelId,
+  number,
+  number,
+  number?,
+  number?,
+  ("solid" | "stand" | "deco")?,
+  /* How high over the ground it stands. */
+  number?,
+];
 
 /*
  * Recipes, in the place's own frame: +z is its front. Each item is
@@ -276,6 +288,19 @@ const RECIPES: Record<Exclude<PlaceKind, "pier">, (rng: Rng) => Item[]> = {
     out.push(["town/banner-red", 0, -7.4, 0, T, "deco"]);
     return out;
   },
+
+  /*
+   * The Hearth on a plot: the fire burns on top of the stone plinth
+   * (structures.ts HEARTH, a metre high), the owner's flag flies behind it
+   * and two lanterns light the way in.
+   */
+  hearth: () => [
+    ["camp/campfire-pit", 0, 0, 0, 4.6, "deco", 1],
+    ["camp/campfire-stand", 0, 0, 0.3, C, "deco", 1],
+    ["coast/flag-high", -0.6, -4.6, 0, 1.6, "solid"],
+    ["town/lantern", -3.6, 3.4, 0, 1.6, "solid"],
+    ["town/lantern", 3.6, 3.4, 0, 1.6, "solid"],
+  ],
 };
 
 /* How much flat ground each place needs, and whether it sits on the shore. */
@@ -291,16 +316,19 @@ const NEEDS: Record<PlaceKind, { r: number; shore?: boolean; high?: boolean }> =
   summit: { r: 9 },
   view: { r: 4 },
   pier: { r: 10, shore: true },
+  hearth: { r: 8 },
 };
 
 /* What each kind of island has, in the order they're placed (after its piers, its summit or its market). */
-const PLAN: Record<"harbor" | BiomeId, Exclude<PlaceKind, "pier">[]> = {
+const PLAN: Record<FloraKind, Exclude<PlaceKind, "pier">[]> = {
   harbor: ["camp", "paddock", "camp"],
   meadow: ["camp", "paddock", "stones", "ruin", "lookout", "camp"],
   pinewood: ["camp", "woodcut", "woodcut", "lookout", "ruin"],
   ridge: ["camp", "lookout", "lookout", "ruin", "stones"],
   marsh: ["wreck", "camp", "stones", "ruin", "woodcut"],
   fells: ["camp", "lookout", "ruin", "stones", "woodcut", "wreck"],
+  /* A plot has only its Hearth, at its very middle, and no pier or roads (see below). */
+  plot: [],
 };
 
 const TAU = Math.PI * 2;
@@ -310,17 +338,19 @@ const TAU = Math.PI * 2;
  * lighthouse); everything placed is added to it. `piers` are the bearings
  * the piers face, one each, back toward where the boats come from: the
  * Harbor from a hunting island; each hunting island from the Harbor (the
- * first is the main quay). A hunting island's `summit` gets its flag.
+ * first is the main quay). A hunting island's `summit` gets its flag. A
+ * plot gets only its Hearth, its front to `toward` (the Harbor).
  */
 export function planPlaces(
   ground: PlaceGround,
   seed: number,
-  kind: "harbor" | BiomeId,
+  kind: FloraKind,
   taken: { x: number; z: number; r: number }[],
   opts: {
     piers: readonly number[];
     lighthouse?: { x: number; z: number };
     summit?: { x: number; z: number };
+    toward?: number;
   },
 ): Place[] {
   const rng = mulberry32(seed ^ 0x2545f491);
@@ -350,6 +380,13 @@ export function planPlaces(
     taken.push({ x: place.x, z: place.z, r: place.r });
     if (place.quay) taken.push(place.quay);
   };
+
+  if (kind === "plot") {
+    /* The Hearth stands in the middle of the plot, its front toward the Harbor. */
+    const hearth = make("hearth", 0, 0, ground.heightAt(0, 0), faceAway(opts.toward ?? 0), rng);
+    taken.push({ x: 0, z: 0, r: hearth.r });
+    return [hearth];
+  }
 
   /* The piers first: they're where everyone arrives. */
   opts.piers.forEach((a, k) => {
@@ -660,7 +697,7 @@ function make(
   const c = Math.cos(rot);
   const s = Math.sin(rot);
   const models: PlacedModel[] = RECIPES[kind](rng).map(
-    ([model, lx, lz, r = 0, scale = 1, col = "solid"]) => ({
+    ([model, lx, lz, r = 0, scale = 1, col = "solid", lift]) => ({
       model,
       /* Local (lx, lz) turned by rot about +y, as three.js turns things. */
       x: x + lx * c + lz * s,
@@ -670,6 +707,7 @@ function make(
       scale,
       solid: col !== "deco",
       stand: col === "stand",
+      lift,
     }),
   );
   const shore = NEEDS[kind].shore;

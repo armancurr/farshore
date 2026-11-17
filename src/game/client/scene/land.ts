@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CONTOUR, GRAND_SIZE, MAX_ISLANDS } from "../../shared/constants";
+import { CONTOUR, GRAND_SIZE } from "../../shared/constants";
 import { PLAZA, type Terrain } from "../../shared/terrain";
 import { GLSL_COMMON, PALETTE, shared } from "./materials";
 import { pathDistance, ROAD_HALF } from "../../shared/paths";
@@ -603,13 +603,16 @@ export function createLand(terrain: Terrain) {
 
 /*
  * The open sea between the islands: plain deep water out to the horizon. It
- * steps aside wherever an island's own tile of sea is drawn.
+ * steps aside wherever an island's own tile of sea is drawn: the nearest
+ * SEA_TILES of them, which is every one you could see.
  */
+const SEA_TILES = 48;
+
 const OPEN_SEA_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
   ${GLSL_COLORS}
   ${GLSL_SWASH}
-  uniform vec4 uTiles[${MAX_ISLANDS}];
+  uniform vec4 uTiles[${SEA_TILES}];
   uniform int uTileCount;
   varying vec3 vWorld;
 
@@ -626,7 +629,7 @@ const OPEN_SEA_FRAGMENT = /* glsl */ `
 
   void main() {
     vec2 xz = vWorld.xz;
-    for (int i = 0; i < ${MAX_ISLANDS}; i++) {
+    for (int i = 0; i < ${SEA_TILES}; i++) {
       if (i >= uTileCount) break;
       vec4 t = uTiles[i];
       if (max(abs(xz.x - t.x), abs(xz.y - t.y)) < t.z) discard;
@@ -643,10 +646,15 @@ const OPEN_SEA_FRAGMENT = /* glsl */ `
   }
 `;
 
+type Tile = { x: number; z: number; size: number };
+
 export class OpenSea {
   readonly mesh: THREE.Mesh;
-  private tiles = Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector4());
+  private tiles = Array.from({ length: SEA_TILES }, () => new THREE.Vector4());
   private count = { value: 0 };
+  private all: Tile[] = [];
+  /* Where the tiles were last picked from (NaN: pick again). */
+  private from = { x: Number.NaN, z: Number.NaN };
 
   constructor() {
     const geo = new THREE.PlaneGeometry(GRAND_SIZE + 6400, GRAND_SIZE + 6400, 1, 1);
@@ -666,9 +674,22 @@ export class OpenSea {
   }
 
   /* Where the islands' own seas are. */
-  setTiles(tiles: readonly { x: number; z: number; size: number }[]) {
-    const n = Math.min(tiles.length, MAX_ISLANDS);
-    for (let i = 0; i < n; i++) this.tiles[i].set(tiles[i].x, tiles[i].z, tiles[i].size / 2, 0);
-    this.count.value = n;
+  setTiles(tiles: readonly Tile[]) {
+    this.all = tiles.map((t) => ({ x: t.x, z: t.z, size: t.size }));
+    this.from.x = Number.NaN;
+  }
+
+  /* Keep the tiles nearest the camera, picked again every hundred metres or so. */
+  follow(x: number, z: number) {
+    if (Math.hypot(x - this.from.x, z - this.from.z) < 100) return;
+    this.from.x = x;
+    this.from.z = z;
+    const gap = (t: Tile) => Math.max(Math.abs(t.x - x), Math.abs(t.z - z)) - t.size / 2;
+    const near =
+      this.all.length > SEA_TILES
+        ? [...this.all].sort((a, b) => gap(a) - gap(b)).slice(0, SEA_TILES)
+        : this.all;
+    near.forEach((t, i) => this.tiles[i].set(t.x, t.z, t.size / 2, 0));
+    this.count.value = near.length;
   }
 }

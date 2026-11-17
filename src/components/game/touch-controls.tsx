@@ -2,22 +2,29 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { Action, Input } from "../../game/client/input";
 import { CREATIVE, type CameraView } from "../../game/client/modes";
+import type { Order } from "../../game/shared/crew";
 
 const RADIUS = 52;
 
 /*
  * Phones get a stick on the left (push it past its edge to run, or rush when
  * flying), look-by-dragging on the right, and thumb buttons for everything the
- * keyboard does. The buttons follow what you're about: building swaps Block
- * and Attack for Take and Place, flying swaps Block for Down. All of it feeds
- * the same Input the keyboard does.
+ * keyboard does. The buttons follow what you're about: flying swaps Block for
+ * Down. All of it feeds the same Input the keyboard does.
  */
 export function TouchControls(props: {
   input: Input;
   creative: boolean;
   flying: boolean;
-  building: boolean;
   view: CameraView;
+  /* Setting something down on your land: the thumbs place, turn and cancel. */
+  placing: boolean;
+  /* Looking at something of yours: it can be sold. */
+  ownItem: boolean;
+  /* And it's battered: mending it costs this much. */
+  repair: number | null;
+  /* Your crew, if you have one: what they've been told. */
+  crew: Order | null;
 }) {
   const [knob, setKnob] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const stickId = useRef<number | null>(null);
@@ -78,7 +85,7 @@ export function TouchControls(props: {
   /* A one-off press, as a key would queue it. */
   const tap = (action: Action) => ({ onPointerDown: () => input.press(action) });
 
-  const { creative, flying, building, view } = props;
+  const { creative, flying, view, placing, ownItem, repair, crew } = props;
 
   /*
    * A button that goes away under a thumb (Block turning into Down, or the
@@ -91,7 +98,7 @@ export function TouchControls(props: {
       input.setDownHeld(false);
       input.setJumpHeld(false);
     },
-    [input, building, flying],
+    [input, flying, placing],
   );
   useEffect(() => () => input.setStick(0, 0, false), [input]);
   const big = "pointer-events-auto";
@@ -99,10 +106,10 @@ export function TouchControls(props: {
   const side = "pointer-events-auto h-10 w-[4.5rem] text-[9px] tracking-[0.12em]";
 
   /* What the two big thumb buttons do depends on what you're about. */
-  const thumbs = building ? (
+  const thumbs = placing ? (
     <>
       <Button variant="touch" size="touch" className={big} {...hold((on) => input.setAlt(on))}>
-        Take
+        Cancel
       </Button>
       <Button variant="touch" size="touch" className={big} {...hold((on) => input.setAttack(on))}>
         Place
@@ -110,8 +117,8 @@ export function TouchControls(props: {
       <Button variant="touch" size="touch" className={small} {...tap("rotate")}>
         Turn
       </Button>
-      <Button variant="touch" size="touch" className={small} {...tap("build")}>
-        Done
+      <Button variant="touch" size="touch" className={small} {...tap("inventory")}>
+        Pack
       </Button>
     </>
   ) : (
@@ -174,9 +181,9 @@ export function TouchControls(props: {
         onPointerUp={lookUp}
         onPointerCancel={lookUp}
       />
-      {/* Modes, beside the thumb buttons: build, the camera, and (in dev) creative and taking off in it. */}
+      {/* Modes, beside the thumb buttons: the camera, and (in dev) creative and taking off in it. */}
       <div className="pointer-events-none absolute right-[10.5rem] bottom-4 flex flex-col gap-2">
-        {creative && !building && (
+        {creative && (
           <Button variant="touch" size="touch" className={side} {...tap("fly")}>
             {flying ? "Land" : "Fly"}
           </Button>
@@ -192,6 +199,38 @@ export function TouchControls(props: {
             {creative ? "Survival" : "Creative"}
           </Button>
         )}
+        {ownItem && repair !== null && (
+          <Button variant="touch" size="touch" className={side} {...tap("repair")}>
+            Mend ◎ {repair}
+          </Button>
+        )}
+        {ownItem && (
+          <Button variant="touch" size="touch" className={side} {...tap("sell")}>
+            Sell
+          </Button>
+        )}
+        {crew && (
+          <Button
+            variant="touch"
+            size="touch"
+            className={side}
+            data-on={crew === "follow"}
+            {...tap("crew")}
+          >
+            {crew === "follow" ? "Crew home" : "Call crew"}
+          </Button>
+        )}
+        {crew && (
+          <Button
+            variant="touch"
+            size="touch"
+            className={side}
+            data-on={crew === "hold"}
+            {...tap("hold")}
+          >
+            Crew hold
+          </Button>
+        )}
         <Button
           variant="touch"
           size="touch"
@@ -202,11 +241,6 @@ export function TouchControls(props: {
         >
           {view === "third" ? "1st person" : "3rd person"}
         </Button>
-        {!building && (
-          <Button variant="touch" size="touch" className={side} {...tap("build")}>
-            Build
-          </Button>
-        )}
       </div>
       <div className="pointer-events-none absolute right-5 bottom-4 grid grid-cols-2 gap-2.5">
         {thumbs}

@@ -1,8 +1,12 @@
+import type { ShotKind } from "./shots";
+
 /*
  * Weapons, chosen from the marketplace. You carry one at a time. Most are for
- * close quarters; the bows, the wand and the mage's staff shoot.
- * A hit takes health (in survival, and off the Harbor) and adds stagger;
- * stagger multiplies knockback, so a battered fighter flies further.
+ * close quarters; the bows, the crossbow, the wand and the mage's staff loose
+ * arrows and bolts that really fly (see shots.ts). Beside your weapon you can
+ * carry a stack of kegs or smoke bombs to throw, bought one by one. A hit
+ * takes health (in survival, and off the Harbor) and adds stagger; stagger
+ * multiplies knockback, so a battered fighter flies further.
  */
 
 /*
@@ -31,18 +35,25 @@ export type WeaponKind =
   | "hammer"
   | "bow-a"
   | "bow-b"
+  | "crossbow"
+  | "firebow"
   | "wand-a"
   | "staff-b"
   | "shield"
   | "shield-a"
   | "kite"
-  | "spiked";
+  | "spiked"
+  | "torch"
+  | "bucket"
+  | "keg"
+  | "smokebomb";
 
 /*
  * In marketplace order: quick and light first, then the long reach, then the
- * heavy hitters, then what shoots, then the shields. The snapshot sends a
- * weapon as its place in this list, so client and server must share it (they
- * do: it lives here).
+ * heavy hitters, then what shoots, then the shields, then the raider's and
+ * the firefighter's tools, then what you throw. The snapshot sends a weapon
+ * as its place in this list, so client and server must share it (they do:
+ * it lives here).
  */
 export const WEAPON_KINDS: readonly WeaponKind[] = [
   "daggers",
@@ -66,12 +77,18 @@ export const WEAPON_KINDS: readonly WeaponKind[] = [
   "hammer",
   "bow-a",
   "bow-b",
+  "crossbow",
+  "firebow",
   "wand-a",
   "staff-b",
   "shield",
   "shield-a",
   "kite",
   "spiked",
+  "torch",
+  "bucket",
+  "keg",
+  "smokebomb",
 ];
 
 export const isWeaponKind = (v: unknown): v is WeaponKind =>
@@ -88,6 +105,8 @@ const RETIRED: Record<string, WeaponKind> = {
   boardaxe: "beardaxe",
   trident: "spear",
   mace: "morningstar",
+  /* The plain longbow, from before the pack's bows came in. */
+  bow: "bow-a",
 };
 
 /* A weapon kind from a save, a message or storage: today's kinds as they are, retired ones as their heirs. */
@@ -105,12 +124,18 @@ export function toWeaponKind(v: unknown): WeaponKind | null {
 export type Guard = { cover: number; leak: number; parry: number; firm?: boolean; thorns?: number };
 
 /*
- * What a shooting weapon looses: an arrow (the pack's arrow_A or arrow_B) or a
- * bolt of magic. It flies at `speed` (m/s) straight down the line you look
- * along, out to the weapon's `reach`, and hits the first thing within
- * `radius` (m) of that line.
+ * Something that shoots: what it looses (see shots.ts), how fast it leaves
+ * and what it does to a person, from the least draw (or gathering of a
+ * bolt) to a full one (a crossbow or a wand has no draw: always the most).
+ * `spread` is how far off true it flies (radians). Its `reach` is roughly
+ * how far it carries, for the marketplace to say.
  */
-export type Shot = { flies: "arrow-a" | "arrow-b" | "bolt"; speed: number; radius: number };
+export type Ranged = {
+  shot: ShotKind;
+  speed: readonly [number, number];
+  damage: readonly [number, number];
+  spread: number;
+};
 
 export type WeaponDef = {
   name: string;
@@ -154,10 +179,39 @@ export type WeaponDef = {
   sunders?: boolean;
   /* Shields: right-click to raise it. */
   guard?: Guard;
-  /* Bows and magic: it shoots, out to `reach`, instead of swinging. */
-  shot?: Shot;
+  /*
+   * Against buildings: the share of its damage a blow does to something
+   * built (before the material's own resistance). Hammers and axes bring
+   * walls down; a dagger barely scratches them.
+   */
+  siege: number;
+  /* A torch: a blow on anything wooden sets it alight. */
+  ignites?: boolean;
+  /* A bucket: a swing at something burning throws water on it, while it holds any. */
+  douses?: boolean;
+  /* Shoots instead of swinging: hold to draw (with `charge`), release to loose. */
+  ranged?: Ranged;
+  /*
+   * Thrown, and gone: bought one at a time and carried on the belt beside
+   * your weapon, a stack of up to STACK. A click lobs one, at this speed.
+   */
+  throws?: { shot: ShotKind; speed: number };
   hint: string;
 };
+
+/* The most of one thing to throw you can carry. */
+export const STACK = 5;
+
+/* Ranged weapons and things to throw have no blow of their own: these fill in the melee fields. */
+const NO_BLOW = {
+  reach: 0,
+  arc: 1,
+  windup: 0,
+  stagger: 0,
+  knock: 0,
+  lift: 0,
+  siege: 0,
+} as const;
 
 export const FISTS: WeaponDef = {
   name: "Fists",
@@ -172,6 +226,7 @@ export const FISTS: WeaponDef = {
   lift: 4.5,
   heft: "steady",
   blunt: true,
+  siege: 0.12,
   hint: "Click to shove",
 };
 
@@ -190,6 +245,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 1.5,
     lift: 0.6,
     heft: "quick",
+    siege: 0.02,
     hint: "Click to jab, left and right · far deadlier from behind",
   },
   knuckles: {
@@ -207,6 +263,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 1.5,
     heft: "quick",
     blunt: true,
+    siege: 0.03,
     hint: "Click to punch · every third blow in a row is a haymaker · light on your feet",
   },
   cutlass: {
@@ -222,6 +279,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 4,
     lift: 1.8,
     heft: "quick",
+    siege: 0.14,
     hint: "Click to slash · draws blood that keeps flowing",
   },
   beardaxe: {
@@ -237,6 +295,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 0,
     lift: 2.5,
     heft: "steady",
+    siege: 0.8,
     hint: "Click to hook · the bearded blade drags them to you",
   },
   mallet: {
@@ -252,6 +311,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 7,
     heft: "steady",
     blunt: true,
+    siege: 5.5,
     hint: "Click to bonk · barely bruises, but sends them flying",
   },
   morningstar: {
@@ -268,6 +328,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 3.5,
     heft: "heavy",
     blunt: true,
+    siege: 0.7,
     hint: "Click to bludgeon · leaves them dazed and slow",
   },
   "dagger-b": {
@@ -284,6 +345,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 2,
     lift: 0.8,
     heft: "quick",
+    siege: 0.02,
     hint: "Click to stab · one blade, light on your feet, cruel from behind",
   },
   "fistweapon-b": {
@@ -300,6 +362,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 3,
     lift: 1.2,
     heft: "quick",
+    siege: 0.03,
     hint: "Click to claw · draws blood · every third blow in a row tears deep",
   },
   "sword-a": {
@@ -314,6 +377,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 5,
     lift: 2,
     heft: "quick",
+    siege: 0.14,
     hint: "Click to slash · a plain, quick blade",
   },
   "sword-b": {
@@ -328,6 +392,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 8,
     lift: 2.4,
     heft: "steady",
+    siege: 0.16,
     hint: "Click to slash · a heavier blade that shoves them back",
   },
   "axe-a": {
@@ -342,6 +407,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 6,
     lift: 2.5,
     heft: "steady",
+    siege: 0.9,
     hint: "Click to chop · a hand axe, quick to swing again",
   },
   "hammer-c": {
@@ -358,6 +424,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 3,
     heft: "steady",
     blunt: true,
+    siege: 1.0,
     hint: "Click to bash · rattles them for a moment",
   },
   /* Long reach. */
@@ -374,6 +441,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 11,
     lift: 3,
     heft: "quick",
+    siege: 0.18,
     hint: "Click to thrust · longest reach · strikes harder at anyone in the water",
   },
   halberd: {
@@ -389,6 +457,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 12,
     lift: 4,
     heft: "heavy",
+    siege: 0.65,
     hint: "Click to sweep · a long, wide arc that catches everyone in it",
   },
   "staff-a": {
@@ -404,6 +473,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 3,
     heft: "steady",
     blunt: true,
+    siege: 0.3,
     hint: "Click to sweep · a quick, wide quarterstaff that knocks them back",
   },
   /* Two hands, slow and crushing. */
@@ -421,6 +491,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 13,
     lift: 5,
     heft: "heavy",
+    siege: 1.3,
     hint: "Click to chop · cuts through shields",
   },
   greatsword: {
@@ -438,6 +509,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 9,
     lift: 4,
     heft: "heavy",
+    siege: 1.0,
     hint: "Hold to raise it, release to cleave · the longer the harder",
   },
   hammer: {
@@ -455,6 +527,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     speed: 0.8,
     heft: "heavy",
     blunt: true,
+    siege: 1.5,
     hint: "Hold, release to slam · launches everyone round you",
   },
   "sword-d": {
@@ -470,6 +543,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 10,
     lift: 3.5,
     heft: "heavy",
+    siege: 0.6,
     hint: "Click to cleave · a broad blade in both hands",
   },
   /* Shooting: hold to draw a bow or gather a bolt, release to loose it. */
@@ -488,7 +562,8 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 4,
     lift: 1.5,
     heft: "quick",
-    shot: { flies: "arrow-a", speed: 70, radius: 0.5 },
+    siege: 0.3,
+    ranged: { shot: "arrow", speed: [30, 70], damage: [7, 20], spread: 0.006 },
     hint: "Hold to draw, release to loose · a full draw flies hardest",
   },
   "bow-b": {
@@ -506,8 +581,37 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 6,
     lift: 2,
     heft: "steady",
-    shot: { flies: "arrow-b", speed: 80, radius: 0.5 },
+    siege: 0.3,
+    ranged: { shot: "arrow-b", speed: [34, 80], damage: [9, 28], spread: 0.005 },
     hint: "Hold to draw, release to loose · a heavy bow, slow to draw and far-reaching",
+  },
+  crossbow: {
+    ...NO_BLOW,
+    name: "Crossbow",
+    reach: 50,
+    price: 280,
+    damage: 34,
+    cooldown: 1.9,
+    speed: 0.92,
+    heft: "steady",
+    siege: 0.35,
+    ranged: { shot: "bolt", speed: [78, 78], damage: [34, 34], spread: 0.003 },
+    hint: "Click to shoot · slow to wind, but it hits hard and flies flat",
+  },
+  firebow: {
+    ...NO_BLOW,
+    name: "Fire bow",
+    reach: 30,
+    price: 260,
+    damage: 5,
+    charged: 16,
+    charge: { min: 0.2, max: 1 },
+    cooldown: 0.5,
+    heft: "quick",
+    siege: 0.3,
+    ignites: true,
+    ranged: { shot: "firearrow", speed: [22, 50], damage: [5, 16], spread: 0.008 },
+    hint: "Hold to draw, release to loose · pitch-soaked arrows set wood alight where they strike",
   },
   "wand-a": {
     name: "Wand A",
@@ -522,7 +626,8 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 4,
     lift: 1.5,
     heft: "quick",
-    shot: { flies: "bolt", speed: 45, radius: 0.6 },
+    siege: 0.5,
+    ranged: { shot: "magic", speed: [45, 45], damage: [6, 6], spread: 0.004 },
     hint: "Click to cast a quick bolt · leaves them dazed",
   },
   "staff-b": {
@@ -540,7 +645,8 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     knock: 12,
     lift: 4,
     heft: "steady",
-    shot: { flies: "bolt", speed: 40, radius: 0.8 },
+    siege: 0.4,
+    ranged: { shot: "spell", speed: [32, 40], damage: [10, 26], spread: 0.004 },
     hint: "Hold to gather a bolt, release to cast · the longer, the harder it hits",
   },
   /* Shields: right-click to block, click to bash. */
@@ -558,6 +664,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     heft: "steady",
     blunt: true,
     guard: { cover: 0.2, leak: 0, parry: 0.25 },
+    siege: 0.35,
     hint: "Right-click to block · click to bash · block late to parry",
   },
   "shield-a": {
@@ -575,6 +682,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     heft: "steady",
     blunt: true,
     guard: { cover: 0.4, leak: 0.1, parry: 0.4 },
+    siege: 0.3,
     hint: "Right-click to block · small and quick: the easiest to parry with",
   },
   kite: {
@@ -592,6 +700,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     heft: "steady",
     blunt: true,
     guard: { cover: -0.15, leak: 0, parry: 0.15, firm: true },
+    siege: 0.5,
     hint: "Right-click to block · guards your flanks and holds even against axes",
   },
   spiked: {
@@ -608,9 +717,70 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
     lift: 2.5,
     heft: "steady",
     guard: { cover: 0.3, leak: 0.25, parry: 0.25, thorns: 5 },
+    siege: 0.2,
     hint: "Right-click to block · its spikes bite whoever strikes it, and its bash draws blood",
   },
+  /* Tools for a raid, and for the morning after. */
+  torch: {
+    name: "Torch",
+    price: 60,
+    damage: 6,
+    reach: 2.4,
+    arc: 0.5,
+    windup: 0.12,
+    cooldown: 0.7,
+    stagger: 6,
+    knock: 5,
+    lift: 2,
+    heft: "steady",
+    blunt: true,
+    siege: 0.3,
+    ignites: true,
+    hint: "Click on anything wooden to set it alight · stone won't burn",
+  },
+  bucket: {
+    name: "Water bucket",
+    price: 25,
+    damage: 3,
+    reach: 2.6,
+    arc: 0.45,
+    windup: 0.1,
+    cooldown: 0.8,
+    stagger: 4,
+    knock: 5,
+    lift: 2,
+    heft: "steady",
+    blunt: true,
+    siege: 0.1,
+    douses: true,
+    hint: "Click on something burning to douse it · fill it in the sea or at a well",
+  },
+  /* Things to throw: bought each, carried beside your weapon. */
+  keg: {
+    ...NO_BLOW,
+    name: "Powder keg",
+    price: 150,
+    damage: 0,
+    cooldown: 1,
+    speed: 0.9,
+    heft: "heavy",
+    throws: { shot: "keg", speed: 9 },
+    hint: "Click to set it down, or look up to lob it · a four-second fuse, then it brings down stone",
+  },
+  smokebomb: {
+    ...NO_BLOW,
+    name: "Smoke bomb",
+    price: 60,
+    damage: 0,
+    cooldown: 0.8,
+    heft: "quick",
+    throws: { shot: "smoke", speed: 17 },
+    hint: "Click to throw · a thick cloud for eight seconds that towers and guns can't see through",
+  },
 };
+
+/* Something you throw and use up, carried beside your weapon rather than as it. */
+export const isThrown = (kind: WeaponKind | null) => !!kind && !!WEAPONS[kind].throws;
 
 export function weaponDef(kind: WeaponKind | null) {
   return kind ? WEAPONS[kind] : FISTS;
@@ -651,10 +821,19 @@ export function weaponFromIndex(i: number): WeaponKind | null {
 
 /*
  * How a weapon is held, which picks the character's animations: one hand,
- * two hands, a pair, a long shaft, a shield on the arm, a bow, or a spell
- * caster (a wand or a mage's staff).
+ * two hands, a pair, a long shaft, a shield on the arm, a bow, a crossbow, or a
+ * spell caster (a wand or a mage's staff).
  */
-export type Grip = "unarmed" | "1h" | "2h" | "dual" | "polearm" | "shield" | "bow" | "magic";
+export type Grip =
+  | "unarmed"
+  | "1h"
+  | "2h"
+  | "dual"
+  | "polearm"
+  | "shield"
+  | "bow"
+  | "crossbow"
+  | "magic";
 
 const GRIPS: Record<WeaponKind, Grip> = {
   daggers: "dual",
@@ -684,13 +863,15 @@ const GRIPS: Record<WeaponKind, Grip> = {
   "shield-a": "shield",
   kite: "shield",
   spiked: "shield",
+  torch: "1h",
+  bucket: "1h",
+  crossbow: "crossbow",
+  firebow: "bow",
+  keg: "1h",
+  smokebomb: "1h",
 };
 
 export const gripOf = (kind: WeaponKind | null): Grip => (kind ? GRIPS[kind] : "unarmed");
-
-/* What it shoots, if it shoots. */
-export const shotOf = (kind: WeaponKind | null): Shot | null =>
-  kind ? (WEAPONS[kind].shot ?? null) : null;
 
 /* The shield's guard, if this is a shield. */
 export const guardOf = (kind: WeaponKind | null): Guard | null =>

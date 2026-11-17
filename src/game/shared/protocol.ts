@@ -1,9 +1,12 @@
+import { type CatalogueId, isCatalogueId, type ItemSnap } from "./catalogue";
 import { GRAND_SIZE } from "./constants";
-import type { IslandInfo } from "./islands";
-import { HOTBAR, type Inventory, isItemId, isKitId, type ItemId, type KitId } from "./items";
+import { type CrewSnap, type CrewView, isOrder, type Order } from "./crew";
+import { type IslandInfo, isPlotShape, type PlotShapeId } from "./islands";
+import { HOTBAR, type Inventory } from "./items";
 import type { VehicleSnap } from "./drive";
 import type { BoardState, Payout } from "./missions";
-import type { Prefab } from "./prefabs";
+import { type Captor, isPlotSize, type PlotSizeId } from "./plots";
+import type { CaptureState } from "./raids";
 import { isSkinId, type SkinId } from "./skins";
 import type { SpeciesId } from "./species";
 import { isVehicleKind, type VehicleKind } from "./vehicles";
@@ -48,11 +51,28 @@ export const FLAG = {
   block: 64, // shield raised
   charge: 128, // winding up a warhammer or greatsword
   creative: 256, // in creative: nothing hurts you
+  raider: 1024, // Raiding someone's land: the room sets it, never a client.
 } as const;
+
+/*
+ * A plot's standing in a raid, as everyone sees it. `shield` is seconds
+ * left on its shield when this was sent (0: none); `captor` is whose colours
+ * fly on its Hearth while a raid's shield lasts; `raiders` how many are on it.
+ */
+export type PlotState = { id: number; shield: number; captor: Captor | null; raiders: number };
+
+/* A Hearth being taken: [plot id, seconds of capture so far, CAPTURE_STATE, raider's member id]. */
+export type CaptureSnap = [number, number, CaptureState, number];
 
 export type Spawn = { x: number; y: number; z: number; yaw: number };
 
 export type HurtCause = "fall" | "animal" | "hit" | "drown";
+
+/*
+ * What a shot came down on: the ground, the sea, something built, a person,
+ * an animal, a hull, a rock or a tree, or nothing (it flew out of range).
+ */
+export type LandOn = "ground" | "water" | "item" | "body" | "animal" | "ship" | "solid" | "air";
 
 export type WorldInfo = {
   /* Every island on the grand map. */
@@ -61,9 +81,12 @@ export type WorldInfo = {
   time: number;
   roster: RosterEntry[];
   board: BoardState;
-  prefabs: Prefab[];
   /* Every vehicle out there, as in a snapshot. */
   vehicles: VehicleSnap[];
+  /* What stands on every plot, by the plot's island id. */
+  items: [number, ItemSnap[]][];
+  /* Every plot's shield and raiders. */
+  plots: PlotState[];
   /* Where you stand right now; null when only watching. */
   you: Spawn | null;
 };
@@ -72,6 +95,52 @@ export type ServerMsg =
   /* `token` is who you are here: send it back next time to come back as yourself. */
   | { t: "welcome"; id: number; name: string; online: boolean; token: string | null }
   | ({ t: "world" } & WorldInfo)
+  /* An island raised while you're here (a plot bought), or raised again in its place (one grown). */
+  | { t: "island"; info: IslandInfo }
+  /* Something set down on a plot, or moved there (the same id). */
+  | { t: "item"; plot: number; item: ItemSnap }
+  /* Something taken off a plot: sold, or gone. */
+  | { t: "unitem"; plot: number; id: number }
+  /*
+   * Things on the plots whose health or state changed this tick, flat:
+   * [id, health, ITEM_STATE bits] for each. Health 0 is rubble.
+   */
+  | { t: "items"; c: number[] }
+  /* Shields and raiders, on every plot: sent whenever any of them changes. */
+  | { t: "plots"; plots: PlotState[] }
+  /*
+   * Your land is being raided: raiders landing on this side of it, or (at
+   * the Hearth) starting to take it.
+   */
+  | { t: "alarm"; plot: number; side: string; raiders: number; at: "shore" | "hearth" }
+  /* A blow landed on something built, at (x, y, z): splinters off wood, sparks off stone. */
+  | { t: "ihit"; id: number; by: number; x: number; y: number; z: number; damage: number }
+  /*
+   * Something let fly: an arrow, a cannonball, a keg. `k` is its place in
+   * SHOT_KINDS, `p` where it set off and how fast [x, y, z, vx, vy, vz];
+   * `by` who loosed it (-1: a defense, whose item is `src`; a ship's helm sends its vehicle as `src`).
+   */
+  | { t: "shot"; id: number; k: number; p: number[]; by: number; src: number }
+  /*
+   * Where a shot came down, `at` seconds into its flight; `who` what it hit
+   * (a person, an animal, a thing built or a vehicle) and `dmg` what it took.
+   * A keg or a smoke bomb only comes to rest there.
+   */
+  | {
+      t: "land";
+      id: number;
+      p: number[];
+      at: number;
+      on: LandOn;
+      who?: number;
+      dmg?: number;
+    }
+  /* A keg's fuse ran out, here. */
+  | { t: "boom"; id: number; p: number[] }
+  /* A vehicle took a battering: its hull's health now, out of `max`. */
+  | { t: "vhp"; id: number; hp: number; max: number }
+  /* A vehicle wrecked: a boat gone down, a car burnt out. */
+  | { t: "sunk"; id: number }
   /* You've been moved in one step. */
   | ({ t: "warp" } & Spawn)
   | { t: "roster"; roster: RosterEntry[] }
@@ -82,16 +151,26 @@ export type ServerMsg =
       a: AnimalSnap[];
       /* Every vehicle out there (see drive.ts packVehicle). */
       v: VehicleSnap[];
+      /* Hearths being taken, or falling back after. */
+      cap: CaptureSnap[];
+      /* The crews near you (see crew.ts). */
+      c: CrewSnap[];
+      /* Defenses awake and aiming, flat: [item id, heading, elevation] each. */
+      d: number[];
       me: {
         health: number;
         stagger: number;
         dead: boolean;
+        /* Carrying a bucket with water in it. */
+        water: boolean;
+        /* The plot you're raiding, if you are. */
+        raid: number | null;
       } | null;
     }
   | { t: "inv"; inv: Inventory }
+  /* Your own crew, and what they've been told: sent whenever either changes. */
+  | { t: "crew"; order: Order; men: CrewView[] }
   | { t: "board"; board: BoardState }
-  /* Something built, or changed (a chest's contents). */
-  | { t: "prefab"; prefab: Prefab }
   /*
    * You're in this vehicle's seat now (seat 0 steers), or out of it with
    * null: then `at` is where you step off, when the room chose it.
@@ -99,7 +178,6 @@ export type ServerMsg =
   | { t: "aboard"; id: number | null; seat: number; at?: Spawn }
   /* Where your vehicle really is: what you reported didn't add up. */
   | { t: "vfix"; snap: VehicleSnap }
-  | { t: "unprefab"; id: number }
   /* Coins into your purse at the Guild Board: a contract handed in, or payouts collected. */
   | { t: "paid"; payouts: Payout[] }
   /* An animal struck; `dead` when that was the end of it. */
@@ -113,18 +191,7 @@ export type ServerMsg =
   | { t: "daze"; seconds: number }
   | { t: "impulse"; vx: number; vy: number; vz: number }
   | ({ t: "respawn" } & Spawn)
-  | {
-      t: "swing";
-      by: number;
-      kind: WeaponKind | null;
-      heavy: boolean;
-      /*
-       * A bow or a spell: what was loosed, from where, which way (a unit
-       * vector) and how far it flies before it strikes something or the
-       * ground, or runs out of reach.
-       */
-      shot?: { x: number; y: number; z: number; dx: number; dy: number; dz: number; dist: number };
-    }
+  | { t: "swing"; by: number; kind: WeaponKind | null; heavy: boolean }
   | {
       t: "hit";
       by: number;
@@ -166,6 +233,29 @@ export type ClientMsg =
   | { t: "arm"; kind: WeaponKind | null }
   /* Put a vehicle you own in the water or on the ground nearby, in place of your last one. */
   | { t: "spawn"; kind: VehicleKind }
+  /* Buy a plot of land from the marketplace and set it down on the open sea, centred on (x, z). */
+  | { t: "buyplot"; size: PlotSizeId; shape: PlotShapeId; x: number; z: number }
+  /* Grow your plot to a bigger size where it stands, paying the difference. */
+  | { t: "growplot"; size: PlotSizeId }
+  /*
+   * Buy something from the marketplace and set it down on your land at
+   * (x, z), turned by `rot`; or, with `move`, pick up one of yours and set it
+   * down there instead, for nothing.
+   */
+  | { t: "place"; kind: CatalogueId; x: number; z: number; rot: number; move?: number }
+  /* Sell one of the things on your land back, for half what it cost. */
+  | { t: "sell"; id: number }
+  /* Pay to mend one of your things at once (rubble too). */
+  | { t: "repair"; id: number }
+  /* The dev server only: a purse full of coins, for trying things out. */
+  | { t: "devcoins" }
+  /* Hire a man for your land; or let one go (nothing back). */
+  | { t: "hire" }
+  | { t: "dismiss"; id: number }
+  /* Buy one of your men a weapon (at its price), or take his away (null: fists). */
+  | { t: "crewarm"; id: number; kind: WeaponKind | null }
+  /* Tell your crew to keep to their posts, follow you, or hold where you stand. */
+  | { t: "order"; order: Order }
   /* Buy a vehicle from the marketplace with coins: yours to spawn from then on. */
   | { t: "buyVehicle"; kind: VehicleKind }
   | {
@@ -185,25 +275,24 @@ export type ClientMsg =
        */
       ride?: number[];
     }
-  | { t: "attack"; charge: number }
+  /* `aim`, for a bow or a throw, is which way you're aiming (a direction), when the view isn't your eyes'. */
+  | { t: "attack"; charge: number; aim?: [number, number, number] }
+  /* At a ship's helm: fire the broadside to port (-1) or starboard (1), raised this much (radians). */
+  | { t: "broadside"; side: -1 | 1; lift: number }
   | { t: "stance"; block: boolean; charge: boolean }
   | { t: "interact"; kind: InteractKind; id: number }
   | { t: "slot"; i: number }
   /* Move a tool into a hotbar slot (1 to HOTBAR - 1), or back to the pack with -1. */
   | { t: "equip"; tool: number; slot: number }
-  | { t: "buy"; item: string }
-  | { t: "place"; kind: KitId; x: number; z: number; rot: number }
-  | { t: "pickup"; id: number }
-  /* Move `n` of an item into a chest (or out of it, with a negative n). */
-  | { t: "stash"; chest: number; item: ItemId; n: number }
   /* The Guild Board: take a contract, hand one in, give one up, collect what you're owed. */
   | { t: "accept"; id: number }
   | { t: "turnin" }
   | { t: "abandon" }
   | { t: "collect" };
 
-export type InteractKind = "prefab" | "vehicle";
-const INTERACT_KINDS: readonly InteractKind[] = ["prefab", "vehicle"];
+/* What E can be pressed on. Only vehicles, for now. */
+export type InteractKind = "vehicle";
+const INTERACT_KINDS: readonly InteractKind[] = ["vehicle"];
 
 /* What a driver reports of their vehicle, in this order. */
 export const RIDE_FIELDS = [
@@ -274,10 +363,56 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     }
     case "spawn":
       return isVehicleKind(m.kind) ? { t: "spawn", kind: m.kind } : null;
+    case "buyplot":
+      if (!isPlotSize(m.size) || !isPlotShape(m.shape)) return null;
+      if (!finite(m.x, COORD) || !finite(m.z, COORD)) return null;
+      return { t: "buyplot", size: m.size, shape: m.shape, x: m.x, z: m.z };
+    case "growplot":
+      return isPlotSize(m.size) ? { t: "growplot", size: m.size } : null;
+    case "place":
+      if (!isCatalogueId(m.kind) || !finite(m.x, COORD) || !finite(m.z, COORD)) return null;
+      if (!finite(m.rot, 100)) return null;
+      if (m.move !== undefined && !isId(m.move)) return null;
+      return {
+        t: "place",
+        kind: m.kind,
+        x: m.x,
+        z: m.z,
+        rot: m.rot,
+        ...(m.move !== undefined ? { move: m.move as number } : {}),
+      };
+    case "sell":
+      return isId(m.id) ? { t: "sell", id: m.id } : null;
+    case "repair":
+      return isId(m.id) ? { t: "repair", id: m.id } : null;
+    case "devcoins":
+      return { t: "devcoins" };
+    case "hire":
+      return { t: "hire" };
+    case "dismiss":
+      return isId(m.id) ? { t: "dismiss", id: m.id } : null;
+    case "crewarm": {
+      if (!isId(m.id)) return null;
+      if (m.kind === null) return { t: "crewarm", id: m.id, kind: null };
+      const kind = toWeaponKind(m.kind);
+      return kind ? { t: "crewarm", id: m.id, kind } : null;
+    }
+    case "order":
+      return isOrder(m.order) ? { t: "order", order: m.order } : null;
+    case "attack": {
+      const charge = finite(m.charge, 10) ? Math.max(0, m.charge) : 0;
+      const a = m.aim;
+      const aim =
+        Array.isArray(a) && a.length === 3 && a.every((n) => finite(n, 2))
+          ? (a as [number, number, number])
+          : undefined;
+      return aim ? { t: "attack", charge, aim } : { t: "attack", charge };
+    }
+    case "broadside":
+      if (m.side !== 1 && m.side !== -1) return null;
+      return { t: "broadside", side: m.side, lift: finite(m.lift, 2) ? m.lift : 0 };
     case "buyVehicle":
       return isVehicleKind(m.kind) ? { t: "buyVehicle", kind: m.kind } : null;
-    case "attack":
-      return { t: "attack", charge: finite(m.charge, 10) ? Math.max(0, m.charge) : 0 };
     case "stance":
       return { t: "stance", block: m.block === true, charge: m.charge === true };
     case "interact":
@@ -289,17 +424,6 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case "equip":
       if (!isId(m.tool) || !isInt(m.slot, -1, HOTBAR - 1)) return null;
       return { t: "equip", tool: m.tool, slot: m.slot };
-    case "buy":
-      return typeof m.item === "string" && m.item.length < 32 ? { t: "buy", item: m.item } : null;
-    case "place":
-      if (!isKitId(m.kind) || !finite(m.x, COORD) || !finite(m.z, COORD) || !finite(m.rot, 100))
-        return null;
-      return { t: "place", kind: m.kind, x: m.x, z: m.z, rot: m.rot };
-    case "pickup":
-      return isId(m.id) ? { t: "pickup", id: m.id } : null;
-    case "stash":
-      if (!isId(m.chest) || !isItemId(m.item) || !isInt(m.n, -9999, 9999) || m.n === 0) return null;
-      return { t: "stash", chest: m.chest, item: m.item, n: m.n };
     case "accept":
       return isId(m.id) ? { t: "accept", id: m.id } : null;
     case "turnin":

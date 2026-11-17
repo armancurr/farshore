@@ -672,6 +672,43 @@ test("old saves: a rowboat comes back as the skiff, a desert bike as nothing", (
   assert.equal(save.players[2].saved.vehicle.kind, "galleon");
 });
 
+test("old saves: building kits and a bed are let go, everything else is kept", () => {
+  const inv = {
+    coins: 40,
+    slot: 0,
+    items: { deer: 2, campfire: 1, hut: 3, dock: 1 },
+    tools: [],
+    hotbar: [],
+    bed: 17,
+  };
+  const save = parseWorldSave({
+    v: WORLD_SAVE_VERSION,
+    ids: { tool: 1 },
+    players: [
+      {
+        token: "aaaaaaaa",
+        name: "a",
+        saved: { x: 5, y: 1, z: 6, yaw: 0, health: 80, inv, vehicle: null },
+      },
+    ],
+  });
+  const kept = save.players[0].saved.inv;
+  assert.deepEqual(kept.items, { deer: 2 });
+  assert.equal(kept.coins, 40);
+  assert.equal("bed" in kept, false);
+});
+
+test("building messages are no longer understood", () => {
+  for (const m of [
+    { t: "place", kind: "hut", x: 0, z: 0, rot: 0 },
+    { t: "pickup", id: 1 },
+    { t: "buy", item: "hut" },
+    { t: "stash", chest: 1, item: "deer", n: 1 },
+    { t: "interact", kind: "prefab", id: 1 },
+  ])
+    assert.equal(parseClientMsg(JSON.stringify(m)), null);
+});
+
 /* ---------- the room ---------- */
 
 function member(room) {

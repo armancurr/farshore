@@ -84,8 +84,11 @@ export const SPECIES_TREES = {
 export type TreeSpecies = keyof typeof SPECIES_TREES;
 export const TREE_SPECIES = Object.keys(SPECIES_TREES) as TreeSpecies[];
 
-/* Per island kind: the groves' species (weighted), and the landmark trees out in the open. */
-export const WOODLAND: Record<FloraKind, { groves: [TreeSpecies, number][]; lone: TreeSpecies }> = {
+/* Per island kind: the groves' species (weighted), and the landmark trees out in the open. Plots grow none. */
+export const WOODLAND: Record<
+  Exclude<FloraKind, "plot">,
+  { groves: [TreeSpecies, number][]; lone: TreeSpecies }
+> = {
   harbor: {
     groves: [
       ["round", 3],

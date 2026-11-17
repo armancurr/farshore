@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { PLAYER_HEIGHT } from "../../shared/constants";
 import { FLAG } from "../../shared/protocol";
 import type { SkinId } from "../../shared/skins";
-import { type Grip, gripOf, type WeaponKind, weaponDef } from "../../shared/weapons";
+import { type Grip, gripOf, isThrown, type WeaponKind, weaponDef } from "../../shared/weapons";
 import {
   buildCharacter,
   CHARACTER_SCALE,
@@ -46,6 +46,7 @@ const ATTACKS: Record<Grip, readonly string[]> = {
   polearm: ["Melee_2H_Attack_Stab", "Melee_1H_Attack_Stab"],
   shield: ["Melee_Block_Attack"],
   bow: ["Ranged_Bow_Release"],
+  crossbow: ["Ranged_2H_Shoot"],
   magic: ["Ranged_Magic_Shoot"],
 };
 /* A combo's finisher. */
@@ -57,6 +58,7 @@ const HEAVY: Record<Grip, string> = {
   polearm: "Melee_2H_Attack_Stab",
   shield: "Melee_Block_Attack",
   bow: "Ranged_Bow_Release",
+  crossbow: "Ranged_2H_Shoot",
   magic: "Ranged_Magic_Shoot",
 };
 /* What a wind-up holds, where it isn't the drawn-back top of a swing: drawing a bow, raising a spell. */
@@ -64,12 +66,17 @@ const DRAW: Partial<Record<Grip, string>> = {
   bow: "Ranged_Bow_Draw",
   magic: "Ranged_Magic_Raise",
 };
+/* What the arms do, carrying a bow or a crossbow, standing about. */
+const CARRY: Partial<Record<Grip, string>> = {
+  bow: "Ranged_Bow_Idle",
+  crossbow: "Ranged_2H_Aiming",
+};
 /* How far into each swing the weapon is drawn back furthest: a charge holds there, then lets go. */
 const WINDUP: Record<string, number> = {
   Melee_2H_Attack_Chop: 0.38,
   Melee_2H_Attack_Slice: 0.3,
   Melee_2H_Attack_Stab: 0.3,
-  Ranged_Bow_Draw: 0.95,
+  Ranged_Bow_Draw: 0.96,
   Ranged_Magic_Raise: 0.9,
 };
 
@@ -96,7 +103,11 @@ function holdInHand(weapon: THREE.Object3D, slot: THREE.Bone) {
   return holder;
 }
 
-function nameTexture(name: string, stagger = 0) {
+/*
+ * A raider's name shows red to everyone, so the owner can tell who's come
+ * for them; a crewman's is in his land's colours.
+ */
+function nameTexture(name: string, stagger = 0, raider = false, colour = "#fff") {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = 96;
@@ -108,8 +119,13 @@ function nameTexture(name: string, stagger = 0) {
   /* Just the name, no box: a soft shadow keeps it legible against bright sky. */
   ctx.shadowColor = "rgba(0,0,0,0.85)";
   ctx.shadowBlur = 8;
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = raider ? "#ff5a4c" : colour;
   ctx.fillText(text, 256, 48, 500);
+  if (raider) {
+    /* A red bar under it, readable even when the name is too far off to read. */
+    const w = Math.min(480, ctx.measureText(text).width + 24);
+    ctx.fillRect(256 - w / 2, 76, w, 8);
+  }
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
@@ -219,6 +235,10 @@ export class Avatar {
   private swings = 0;
   /* Whether the name floats over them: not over yourself, seen from behind. */
   labelled = true;
+  private raider = false;
+  private colour = "#fff";
+  /* Within this many metres of the camera the name fades out. */
+  private nearFade = 2.5;
 
   constructor(
     readonly id: number,
@@ -320,18 +340,46 @@ export class Avatar {
     const s = Math.round(stagger / 5) * 5;
     if (s !== this.stagger) {
       this.stagger = s;
-      const mat = this.label.material;
-      mat.map?.dispose();
-      mat.map = nameTexture(this.name, s);
-      mat.needsUpdate = true;
+      this.relabel();
     }
+  }
+
+  /* Raiding someone's land: the name goes red. */
+  setRaider(raider: boolean) {
+    if (raider === this.raider) return;
+    this.raider = raider;
+    this.relabel();
+  }
+
+  /* What's written over their head, and in what colour (a crewman's: his land's). */
+  setTag(name: string, colour: string) {
+    if (name === this.name && colour === this.colour) return;
+    this.name = name;
+    this.colour = colour;
+    /* A longer tag ("Bram · Arman's crew") is drawn a little larger, so it isn't squeezed small. */
+    const k = name.length > 14 ? 1.25 : 1;
+    /* Crews crowd round: their names give way to the men themselves up close. */
+    this.nearFade = 5;
+    this.label.scale.set(1.7 * k, 0.32 * k, 1);
+    this.relabel();
+  }
+
+  private relabel() {
+    const mat = this.label.material;
+    mat.map?.dispose();
+    mat.map = nameTexture(this.name, this.stagger, this.raider, this.colour);
+    mat.needsUpdate = true;
   }
 
   /* A swing seen from outside: the next in turn for what they hold, or the finisher. */
   strike(heavy = false) {
     const grip = gripOf(this.weapon);
     const list = ATTACKS[grip];
-    const clip = heavy ? HEAVY[grip] : list[this.swings++ % list.length];
+    const clip = isThrown(this.weapon)
+      ? "Throw"
+      : heavy
+        ? HEAVY[grip]
+        : list[this.swings++ % list.length];
     const half = this.clips?.get(clip);
     if (!half || !this.upper) return;
     /* As long as the clip, squeezed to fit the weapon's pace (a dagger flicks, a hammer heaves). */
@@ -340,7 +388,7 @@ export class Avatar {
       Math.max(0.5, weaponDef(this.weapon).cooldown * 1.1),
     );
     const rate = half.upper.duration / pace;
-    /* Out of a wind-up, the swing picks up from the top of it. */
+    /* Out of a wind-up, the swing picks up from the top of it (a bow's loose starts at once). */
     const charged = (this.flags & FLAG.charge) !== 0 && this.upper.current === clip;
     const at = charged ? (WINDUP[clip] ?? 0) * half.upper.duration : 0;
     this.upper.play(clip, { loop: false, rate, restart: true, at });
@@ -394,7 +442,9 @@ export class Avatar {
 
     const d = camera.distanceTo(this.group.position);
     const mat = this.label.material;
-    mat.opacity = Math.max(0, Math.min(1, (60 - d) / 25, (d - 2.5) / 2));
+    /* A raider's name carries much further: you want to see them coming. */
+    const far = this.raider ? 160 : 60;
+    mat.opacity = Math.max(0, Math.min(1, (far - d) / 25, (d - this.nearFade) / 2));
     this.label.visible = this.labelled && mat.opacity > 0.02;
   }
 
@@ -492,7 +542,13 @@ export class Avatar {
     } else {
       /* Carrying something big: both hands on it, unless running. */
       const carry = (grip === "2h" || grip === "polearm") && clip !== "Running_A";
-      const arms = carry && lower.current !== "Jump_Idle" ? "Melee_2H_Idle" : clip;
+      const ranged = CARRY[grip];
+      const arms =
+        ranged && clip !== "Running_A" && this.clips?.has(ranged)
+          ? ranged
+          : carry && lower.current !== "Jump_Idle"
+            ? "Melee_2H_Idle"
+            : clip;
       upper.play(arms, { loop: true, rate: arms === clip ? rate : 1 });
       /* Arms in step with the legs. */
       if (arms === clip) upper.setTime(clip, lower.time(clip));

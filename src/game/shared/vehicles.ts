@@ -1034,7 +1034,9 @@ export function controlsOf(kind: VehicleKind) {
     case "row":
       return "W/S row · A/D turn";
     case "sail":
-      return "W/S set and take in sail · A/D steer";
+      return gunsOf(kind)
+        ? "W/S set and take in sail · A/D steer · click fires a broadside the way you look"
+        : "W/S set and take in sail · A/D steer";
     case "motor":
       return "W throttle · S astern · A/D steer";
     case "car":
@@ -1043,6 +1045,33 @@ export function controlsOf(kind: VehicleKind) {
       return "W walk on · Shift gallop · A/D turn · Space jump";
   }
 }
+
+/*
+ * How much battering a vehicle takes before it's wrecked (a boat goes down,
+ * a car is a write-off): ships are built to take a broadside or two, a
+ * rowboat a cannonball.
+ */
+export function hullOf(kind: VehicleKind) {
+  const d = VEHICLES[kind];
+  if (d.section === "Ships") return Math.round(60 * d.length);
+  if (afloat(kind)) return Math.round(35 * d.length);
+  return 300;
+}
+
+/*
+ * Cannons down each side of a sailing ship: two on the sloop, four on the
+ * galleon. Small boats and anything under power carry none.
+ */
+export function gunsOf(kind: VehicleKind) {
+  const d = VEHICLES[kind];
+  if (d.class !== "sail" || d.length < 7) return 0;
+  return d.length < 14 ? 2 : d.length < 20 ? 3 : 4;
+}
+
+/* Seconds between broadsides from one side of a ship. */
+export const BROADSIDE_RELOAD = 6;
+/* How fast a ship's cannonball leaves the gun. */
+export const BROADSIDE_SPEED = 62;
 
 /* Free for everyone, or bought once and kept. `owned` is what an inventory holds. */
 export const ownsVehicle = (owned: readonly VehicleKind[], kind: VehicleKind) =>

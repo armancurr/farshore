@@ -19,6 +19,7 @@ import {
   vehicleSolids,
 } from "../shared/drive";
 import { swamped } from "../shared/car";
+import type { CrewView, Order } from "../shared/crew";
 import { FEATURES } from "../shared/features";
 import { clamp, lerp, wrapAngle } from "../shared/math";
 import {
@@ -36,27 +37,20 @@ import {
   type HurtCause,
   type InteractKind,
   type PlayerSnap,
+  type PlotState,
   RIDE_FIELDS,
   type RosterEntry,
   type ServerMsg,
   type Spawn,
   type WorldInfo,
 } from "../shared/protocol";
-import {
-  BUILD_REACH,
-  checkPlacement,
-  overPrefab,
-  PREFABS,
-  type Prefab,
-  prefabBlocks,
-  type Verdict,
-} from "../shared/prefabs";
-import { SHOP, SHOP_REACH } from "../shared/shop";
 import { canWear, type SkinId, skinDef } from "../shared/skins";
 import {
   afloat,
+  BROADSIDE_RELOAD,
   BOARD_REACH as RIDE_REACH,
   controlsOf,
+  gunsOf,
   RIDER_HIP,
   VEHICLES,
   type VehicleKind,
@@ -64,17 +58,44 @@ import {
 } from "../shared/vehicles";
 import { windAt } from "../shared/wind";
 import { Archipelago } from "../shared/archipelago";
-import type { IslandInfo } from "../shared/islands";
+import type { IslandInfo, PlotShapeId } from "../shared/islands";
+import {
+  CATALOGUE,
+  type CatalogueId,
+  ITEM_STATE,
+  type ItemSnap,
+  type PlacedItem,
+  resale,
+  unpackItem,
+} from "../shared/catalogue";
+import { repairCost } from "../shared/siege";
+import {
+  checkItem,
+  FINE_ROT_STEP,
+  itemKey,
+  itemSolids,
+  overItem,
+  PLACE_REACH,
+  ROT_STEP,
+  type Snapped,
+  snapItem,
+  type Verdict,
+} from "../shared/placing";
+import {
+  checkPlotSpot,
+  PLOT_SIZES,
+  type PlotSizeId,
+  plotTeam,
+  type SpotCheck,
+} from "../shared/plots";
+import { CAPTURE_STATE, CAPTURE_TIME, type CaptureState } from "../shared/raids";
 import { type Role, SPECIES } from "../shared/species";
-import { blockSolid } from "../shared/terrain";
 import {
   emptyInventory,
   HOTBAR,
   heldTool,
   type Inventory,
   ITEMS,
-  KIT_IDS,
-  type KitId,
   type ItemId,
   TOOLS,
   type ToolKind,
@@ -83,7 +104,7 @@ import {
   COMBO_WINDOW,
   DAZE_SPEED,
   guardOf,
-  shotOf,
+  isThrown,
   type WeaponKind,
   weaponDef,
   weaponFromIndex,
@@ -105,15 +126,18 @@ import {
 } from "./net";
 import { Avatar } from "./scene/avatars";
 import { preloadCharacters } from "./scene/characters";
+import { CrewsView } from "./scene/crew";
 import { HerdView } from "./scene/herd";
-import { PrefabView } from "./scene/prefabs";
+import { type Blaze, Fx } from "./scene/fx";
+import { ItemsView } from "./scene/items";
+import { ShotsView } from "./scene/shots";
 import { createLand, OpenSea } from "./scene/land";
 import { PALETTE, shared } from "./scene/materials";
 import { PostPass } from "./scene/post";
+import { RaidView } from "./scene/raids";
 import { WorldProps } from "./scene/props";
 import { Clouds } from "./scene/clouds";
 import { NO_CAST, SunShadows } from "./scene/shadows";
-import { Shots } from "./scene/shots";
 import { Sky } from "./scene/sky";
 import { enclosed, stateFrom, VehicleView } from "./scene/vehicles";
 import { ViewModel } from "./scene/weapons";
@@ -123,25 +147,7 @@ export type Mode = "attract" | "online";
 
 export type FeedItem = { id: number; text: string; at: number };
 
-export type PanelKind = "inventory" | "board" | "shop" | "chest";
-
-export type ShopView = {
-  id: string;
-  section: string;
-  name: string;
-  note: string;
-  price: number;
-  owned: number;
-};
-
-export type BuildView = {
-  kits: { id: KitId; name: string; count: number }[];
-  index: number;
-  ok: boolean;
-  reason: string | null;
-  /* Aiming at something already built: right-click takes it back. */
-  target: string | null;
-};
+export type PanelKind = "inventory" | "board";
 
 export type ContractView = {
   id: number;
@@ -188,6 +194,8 @@ export type ToolView = {
   id: number;
   kind: ToolKind;
   name: string;
+  /* How many are left of a stack (kegs, smoke bombs). */
+  count: number | null;
 };
 
 export type InventoryView = {
@@ -195,11 +203,32 @@ export type InventoryView = {
   slot: number;
   hotbar: (ToolView | null)[];
   pack: ToolView[];
-  items: { id: ItemId; name: string; count: number; kind: string }[];
+  items: { id: ItemId; name: string; count: number }[];
 };
 
-/* Something you could press E on: in the room's world, or a panel to open here. */
-type Focus = { kind: InteractKind | "board" | "shop" | "chest"; id: number; label: string };
+/* Something you could press E on: in the room's world, a panel to open here, or something of yours to move. */
+type Focus = { kind: InteractKind | "board" | "item"; id: number; label: string };
+
+/* Setting something down: what it is, where the ghost is, and whether it can go there. */
+export type PlacingView = {
+  name: string;
+  price: number;
+  moving: boolean;
+  ok: boolean;
+  reason: string | null;
+  snapped: boolean;
+};
+
+/* Your land, as the marketplace's build shelves need to know it. */
+export type BuildView = {
+  /* Out in the world, able to build at all. */
+  ashore: boolean;
+  /* Your land: its name, what's on it of how much it holds, and how many men it houses. */
+  plot: { name: string; items: number; cap: number; crew: number } | null;
+  /* Standing on it. */
+  onPlot: boolean;
+  coins: number;
+};
 
 export type HudState = {
   mode: Mode;
@@ -237,19 +266,42 @@ export type HudState = {
   /* The Guild Board and coins are switched on. */
   economy: boolean;
   guild: GuildView;
-  shop: ShopView[];
-  nearShop: boolean;
-  /* The open chest's contents. */
-  chest: { id: ItemId; name: string; count: number }[] | null;
-  build: BuildView | null;
-  /* 0..1 while winding up a warhammer or greatsword. */
+  /* 0..1 while winding up a warhammer or greatsword, or drawing a bow. */
   charge: number | null;
+  /* Holding a bow or something to throw: the crosshair is a sight. */
+  ranged: boolean;
+  /* The vehicle you're in, once it's been battered: what's left of its hull, 0..1. */
+  hull: number | null;
+  /* At a ship's helm: seconds till each broadside is loaded again (0: ready). */
+  guns: { port: number; starboard: number } | null;
   blocking: boolean;
   /* Fades from 1 after you land a hit, with what it did. */
   hitMarker: number;
   hitText: string | null;
   prompt: string | null;
   target: { name: string; health: number | null } | null;
+  /* Setting something down on your land. */
+  placing: PlacingView | null;
+  /* Looking at something of yours: it can be moved or sold. */
+  ownItem: boolean;
+  /* What mending the thing of yours you're looking at would cost, if it needs it. */
+  repair: number | null;
+  /* The isle you're raiding, if you are. */
+  raid: string | null;
+  /* Raiders on your own land right now. */
+  besieged: number;
+  /* A Hearth being taken near you (yours, or the one you're taking): 0..1, and how it's going. */
+  capture: {
+    title: string;
+    progress: number;
+    state: "taking" | "contested" | "falling";
+    /* Your own Hearth. */
+    mine: boolean;
+  } | null;
+  /* Raiders landing on your land: a loud alert for a few seconds. */
+  alarm: { title: string; sub: string; at: number } | null;
+  /* Your crew, if you've hired any: what they've been told, how many, and how many are down. */
+  crew: { order: Order; men: number; down: number } | null;
 };
 
 type Sample = {
@@ -297,9 +349,14 @@ type World = {
 
 const STEP = 1 / 60;
 
-/* What bought tools are good for, for the shop. */
-const TOOL_NOTES: Partial<Record<ToolKind, string>> = {};
 const BASE_FOV = 76;
+
+/* The same ground: everything an island is raised from. */
+function sameLand(a: IslandInfo, b: IslandInfo) {
+  return (
+    a.shape === b.shape && a.seed === b.seed && a.x === b.x && a.z === b.z && a.size === b.size
+  );
+}
 
 function disposeTree(root: THREE.Object3D) {
   root.traverse((o) => {
@@ -324,8 +381,6 @@ export class Game {
   private shadows = new SunShadows();
   private audio = new TideAudio();
   private viewmodel = new ViewModel();
-  /* Arrows and bolts in flight. */
-  private shots = new Shots();
   private world: World | null = null;
   private conn: Connection | null = null;
   private mode: Mode = "attract";
@@ -347,8 +402,53 @@ export class Game {
   private panel: PanelKind | null = null;
   private focus: Focus | null = null;
   private herd = new HerdView();
-  private built = new PrefabView();
+  /* Everyone's crews near you, and your own as the room last told it. */
+  private crews = new CrewsView(this.scene, (plot) => this.crewLabel(plot));
+  private myCrew: { order: Order; men: CrewView[] } = { order: "home", men: [] };
   private vehicles = new VehicleView();
+  /* What's been bought for the plots, by plot, and drawn. */
+  private plotItems = new Map<number, Map<number, PlacedItem>>();
+  /* Which plot each thing stands on, and the ones on fire (or smouldering after), for the effects. */
+  private itemPlot = new Map<number, number>();
+  private blazes = new Map<number, Blaze & { burning: boolean }>();
+  private built = new ItemsView();
+  private fx = new Fx();
+  /* Arrows, cannonballs and kegs in flight (and stuck, and lying on their fuses). */
+  private shotsView = new ShotsView(this.fx, this.audio, {
+    near: (x, y, z) => {
+      const d = this.camera.position.distanceTo(this.tmpV.set(x, y, z));
+      return clamp(1 - d / 160, 0, 1) ** 1.5;
+    },
+    groundAt: (x, z) => this.world?.ground.heightAt(x, z) ?? 0,
+  });
+  /* Who let each shot in the air fly, for the hit marker. */
+  private shotBy = new Map<number, number>();
+  /* Hulls the room has said were battered: what's left of each. */
+  private hulls = new Map<number, { hp: number; max: number }>();
+  /* When each broadside (port, starboard) of the ship you're steering is loaded again. */
+  private broadsideAt: [number, number] = [0, 0];
+  /* Raids: every plot's shield and raiders (with when, on our clock, each shield drops), the Hearths being taken, and our own raid. */
+  private raids = new RaidView();
+  private plotStates = new Map<number, PlotState & { until: number }>();
+  private captures = new Map<number, { progress: number; state: CaptureState; by: number }>();
+  private raiding: number | null = null;
+  private alarm: HudState["alarm"] = null;
+  /* Your bucket has water in it. */
+  private water = false;
+  /*
+   * Setting something down: what, how it's turned, which of yours is being
+   * moved (null: a new one, paid for when it goes down), and where the ghost is.
+   */
+  private placing: {
+    kind: CatalogueId;
+    turn: number;
+    move: number | null;
+    at: (Snapped & { y: number }) | null;
+    verdict: Verdict | null;
+    reason: string | null;
+  } | null = null;
+  /* X pressed once on something of yours: a second press within a moment sells it. */
+  private sellArmed: { id: number; until: number } | null = null;
   /*
    * The vehicle you're in and your seat. At the helm (seat 0) you steer it:
    * `state` is where your own driving has it, reported to the room.
@@ -365,15 +465,6 @@ export class Game {
   } | null = null;
   private strokeAt = 0;
   private bumpAt = 0;
-  private chestId: number | null = null;
-  /* Build mode: which kit, how it's turned, and what's under the crosshair. */
-  private build: {
-    index: number;
-    turn: number;
-    aim: { x: number; y: number; z: number } | null;
-    verdict: Verdict | null;
-    target: Prefab | null;
-  } | null = null;
   private animalStates = new Map<number, number>();
   private banner: HudState["banner"] = null;
   private board: BoardState = {
@@ -479,9 +570,11 @@ export class Game {
     this.scene.add(new THREE.HemisphereLight(0xd9d3ff, PALETTE.land, 1.25));
     this.scene.fog = new THREE.FogExp2(PALETTE.horizon, shared.uFog.value);
     this.scene.add(this.herd.group);
-    this.scene.add(this.built.group);
     this.scene.add(this.vehicles.group);
-    this.scene.add(this.shots.group);
+    this.scene.add(this.built.group);
+    this.scene.add(this.fx.group);
+    this.scene.add(this.shotsView.group);
+    this.scene.add(this.raids.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -611,6 +704,8 @@ export class Game {
       r.avatar.dispose();
     }
     this.remotes.clear();
+    this.crews.clear();
+    this.myCrew = { order: "home", men: [] };
     this.roster = [];
     this.body = null;
     this.down = null;
@@ -620,8 +715,13 @@ export class Game {
     this.panel = null;
     this.focus = null;
     this.herd.clear();
-    this.built.reset([]);
     this.vehicles.clear();
+    this.shotsView.clear();
+    this.shotBy.clear();
+    this.hulls.clear();
+    this.broadsideAt = [0, 0];
+    this.clearItems();
+    this.endPlacing();
     this.ride = null;
     this.audio.motor(null);
     this.creative = false;
@@ -629,10 +729,12 @@ export class Game {
     this.safeFall = false;
     this.view = this.footView;
     if (this.self) this.self.group.visible = false;
-    this.build = null;
-    this.chestId = null;
     this.animalStates.clear();
     this.banner = null;
+    this.plotStates.clear();
+    this.captures.clear();
+    this.raiding = null;
+    this.alarm = null;
     this.board = { contracts: [], alpha: null, cull: null, nextAlpha: null, nextCull: null };
     this.chargeStart = null;
     this.blocking = false;
@@ -646,7 +748,7 @@ export class Game {
   /* The weapon you carry: what's in your pack once you're out there, or what this browser chose. */
   get armedWith(): WeaponKind | null {
     if (this.body) {
-      const tool = this.inv.tools.find((t) => TOOLS[t.kind].weapon);
+      const tool = this.inv.tools.find((t) => !isThrown(t.kind));
       return tool ? TOOLS[tool.kind].weapon : null;
     }
     return readWeapon() ?? null;
@@ -657,7 +759,8 @@ export class Game {
    * remembers it, and you arrive carrying it next time.
    */
   arm(kind: WeaponKind | null) {
-    keepWeapon(kind);
+    /* A keg or a smoke bomb is bought, not carried as your weapon. */
+    if (!isThrown(kind)) keepWeapon(kind);
     if (this.conn?.kind === "online") this.conn.send({ t: "arm", kind });
   }
 
@@ -669,6 +772,427 @@ export class Game {
   /* Put a vehicle you own in the water nearby, in place of the last one. */
   spawnVehicle(kind: VehicleKind) {
     if (this.canSpawn) this.conn?.send({ t: "spawn", kind });
+  }
+
+  /* ---------- land ---------- */
+
+  /* Coins in your purse: the marketplace's land is paid for from it. */
+  get coins(): number {
+    return this.inv.coins;
+  }
+
+  /* Land is sold out on the grand map, once you're there. */
+  get canBuyLand(): boolean {
+    return this.canSpawn;
+  }
+
+  /* Your own plot, if you have one. */
+  get myPlot(): IslandInfo | null {
+    for (const o of this.world?.islands.values() ?? []) if (o.info.plot?.mine) return o.info;
+    return null;
+  }
+
+  /* Whether a plot of this size could go at (x, z): the same check the room makes. */
+  checkPlot(size: PlotSizeId, x: number, z: number, ignore: number | null = null): SpotCheck {
+    const ground = this.world?.ground;
+    if (!ground) return { ok: false, reason: "The map isn't charted yet" };
+    return checkPlotSpot(ground.islands.values(), size, x, z, ignore);
+  }
+
+  buyPlot(size: PlotSizeId, shape: PlotShapeId, x: number, z: number) {
+    if (this.canBuyLand) this.conn?.send({ t: "buyplot", size, shape, x, z });
+  }
+
+  growPlot(size: PlotSizeId) {
+    if (this.canBuyLand) this.conn?.send({ t: "growplot", size });
+  }
+
+  /* Dev only: a purse full of coins (the dev server's room is the only one that pays out). */
+  /* ---------- crew ---------- */
+
+  /* Your crew, as the room last told it. */
+  get crew() {
+    return this.myCrew;
+  }
+
+  hireCrew() {
+    if (this.canSpawn) this.conn?.send({ t: "hire" });
+  }
+
+  dismissCrew(id: number) {
+    if (this.canSpawn) this.conn?.send({ t: "dismiss", id });
+  }
+
+  /* Buy one of your men a weapon (null: take his away). */
+  armCrew(id: number, kind: WeaponKind | null) {
+    if (this.canSpawn) this.conn?.send({ t: "crewarm", id, kind });
+  }
+
+  orderCrew(order: Order) {
+    if (!this.canSpawn) return;
+    if (!this.myCrew.men.length) {
+      this.pushFeed(
+        this.myPlot ? "Hire a crew in the marketplace first" : "Buy land, then hire a crew",
+      );
+      return;
+    }
+    this.conn?.send({ t: "order", order });
+  }
+
+  /* Whose men a plot's are, and in what colours. */
+  private crewLabel(plot: number) {
+    const info = this.world?.islands.get(plot)?.info.plot;
+    return info ? { owner: info.owner, team: plotTeam(plot), mine: !!info.mine } : null;
+  }
+
+  devCoins() {
+    if (CREATIVE) this.conn?.send({ t: "devcoins" });
+  }
+
+  /* ---------- building ---------- */
+
+  /* What stands on a plot, drawn and solid underfoot (rubble isn't). */
+  private setItem(plot: number, item: PlacedItem, burning = false) {
+    let list = this.plotItems.get(plot);
+    if (!list) this.plotItems.set(plot, (list = new Map()));
+    list.set(item.id, item);
+    this.itemPlot.set(item.id, plot);
+    this.built.set(item, plotTeam(plot), burning);
+    this.world?.ground.addSolids(itemKey(item.id), itemSolids(item), true);
+    this.setBlaze(item, burning);
+  }
+
+  /* A thing as the room sent it: where it stands, its health, and whether it's alight. */
+  private setSnap(plot: number, snap: ItemSnap) {
+    const item = unpackItem(snap);
+    if (item) this.setItem(plot, item, ((snap[7] ?? 0) & ITEM_STATE.burning) !== 0);
+    return item;
+  }
+
+  private removeItem(plot: number, id: number) {
+    this.plotItems.get(plot)?.delete(id);
+    this.itemPlot.delete(id);
+    this.blazes.delete(id);
+    this.built.remove(id);
+    this.world?.ground.removeSolids(itemKey(id));
+    if (this.placing?.move === id) this.endPlacing();
+  }
+
+  private clearItems() {
+    for (const list of this.plotItems.values())
+      for (const id of list.keys()) this.world?.ground.removeSolids(itemKey(id));
+    this.plotItems.clear();
+    this.itemPlot.clear();
+    this.blazes.clear();
+    this.built.clear();
+  }
+
+  /* The effects' view of a thing: its footprint, height and heading. */
+  private blazeOf(item: PlacedItem): Blaze {
+    const def = CATALOGUE[item.kind];
+    return {
+      x: item.x,
+      y: item.y,
+      z: item.z,
+      hx: def.hx,
+      hz: def.hz,
+      top: def.top,
+      rot: item.rot,
+      smoulder: 0,
+      acc: [Math.random(), Math.random(), Math.random(), Math.random()],
+    };
+  }
+
+  /* Alight or not: a fire that goes out leaves it smouldering a while. */
+  private setBlaze(item: PlacedItem, burning: boolean) {
+    const was = this.blazes.get(item.id);
+    if (burning) {
+      if (!was) this.blazes.set(item.id, { ...this.blazeOf(item), burning: true });
+      else Object.assign(was, { burning: true, smoulder: 0, x: item.x, z: item.z, y: item.y });
+    } else if (was?.burning) {
+      was.burning = false;
+      was.smoulder = 1;
+    }
+  }
+
+  /*
+   * Health and fire, changed on the plots: redrawn when that changes how
+   * something looks, solid again or not when it falls or stands up, with a
+   * crash, a hiss or a whoomph for whoever's near enough to hear.
+   */
+  private onItems(c: number[]) {
+    for (let i = 0; i + 2 < c.length; i += 3) {
+      const [id, hp, state] = [c[i], c[i + 1], c[i + 2]];
+      const plot = this.itemPlot.get(id);
+      const item = plot === undefined ? null : this.plotItems.get(plot)?.get(id);
+      if (plot === undefined || !item) continue;
+      const was = item.hp;
+      const burning = (state & ITEM_STATE.burning) !== 0;
+      const alight = this.blazes.get(id)?.burning ?? false;
+      item.hp = hp;
+      if (state & ITEM_STATE.burnt) item.burnt = true;
+      else delete item.burnt;
+      const near = this.body ? 1 - this.distanceTo(item.x, item.z) / 70 : 0;
+      if (was > 0 && hp <= 0) {
+        this.fx.collapse(this.blazeOf(item), !!item.burnt);
+        if (near > 0) this.audio.collapse(near);
+        if (item.burnt)
+          this.blazes.set(id, { ...this.blazeOf(item), burning: false, smoulder: 1.6 });
+      }
+      if (burning && !alight && near > 0) this.audio.ignite(near);
+      if (state & ITEM_STATE.doused) {
+        this.fx.steam(this.blazeOf(item));
+        if (near > 0) this.audio.hiss(near);
+      }
+      if (was > 0 !== hp > 0) this.setItem(plot, item, burning);
+      else {
+        this.built.set(item, plotTeam(plot), burning);
+        this.setBlaze(item, burning);
+      }
+    }
+  }
+
+  /* A blow landing on something built: splinters or sparks, and the knock of it. */
+  private onItemHit(msg: Extract<ServerMsg, { t: "ihit" }>) {
+    const plot = this.itemPlot.get(msg.id);
+    const item = plot === undefined ? null : this.plotItems.get(plot)?.get(msg.id);
+    if (!item) return;
+    const stone = CATALOGUE[item.kind].material === "stone";
+    this.fx.strike(msg.x, msg.y, msg.z, stone, msg.damage > 0 ? 1 : 0.4);
+    if (msg.by === this.myId) {
+      this.hitMarker = 1;
+      this.hitText = msg.damage > 0 ? `-${msg.damage}` : stone ? "Stone" : null;
+      this.viewmodel.impact(0.9);
+      this.audio.knock(stone);
+      return;
+    }
+    const near = 1 - this.distanceTo(msg.x, msg.z) / 40;
+    if (near > 0) this.audio.knock(stone, near);
+  }
+
+  /* Every fire's flames and smoke this frame, thinned with distance, and the crackle of the nearest. */
+  private updateFires(dt: number) {
+    const cam = this.camera.position;
+    const wind = windAt(this.worldTime());
+    this.fx.setWind(wind.x, wind.z);
+    let loud = 0;
+    for (const [id, b] of this.blazes) {
+      if (!b.burning) {
+        b.smoulder -= dt / 45;
+        if (b.smoulder <= 0) {
+          this.blazes.delete(id);
+          continue;
+        }
+      }
+      const d = Math.hypot(b.x - cam.x, b.y - cam.y, b.z - cam.z);
+      const lod = d < 70 ? 1 : d < 160 ? 0.45 : d < 280 ? 0.18 : 0;
+      this.fx.burn(b, dt, lod);
+      if (b.burning) loud += Math.min(1.5, (b.hx + b.hz) * 0.3) / (1 + (d / 9) ** 2);
+    }
+    this.fx.update(dt);
+    this.audio.crackle(loud);
+  }
+
+  /* Your land's terrain and what stands on it. */
+  private myLand() {
+    const info = this.myPlot;
+    const terrain = info ? this.world?.ground.islands.get(info.id)?.terrain : null;
+    if (!info || !terrain || !info.plot) return null;
+    return { info, terrain, items: this.plotItems.get(info.id) ?? new Map<number, PlacedItem>() };
+  }
+
+  /* Your land, for the marketplace's build shelves. */
+  buildView(): BuildView {
+    const land = this.myLand();
+    const b = this.body;
+    return {
+      ashore: this.canSpawn,
+      plot: land?.info.plot
+        ? {
+            name: land.info.name,
+            items: land.items.size,
+            cap: PLOT_SIZES[land.info.plot.size].items,
+            crew: PLOT_SIZES[land.info.plot.size].crew,
+          }
+        : null,
+      onPlot: !!land && !!b && land.terrain.contains(b.x, b.z),
+      coins: this.inv.coins,
+    };
+  }
+
+  /* Why this can't be bought and set down right now, if it can't. */
+  buildBlock(kind: CatalogueId, moving = false): string | null {
+    const v = this.buildView();
+    if (!v.ashore) return "Go ashore first";
+    if (!v.plot) return "Buy land first";
+    if (!v.onPlot) return "Stand on your land";
+    if (this.ride) return "Get off first";
+    if (moving) return null;
+    if (v.plot.items >= v.plot.cap) return `Your land holds ${v.plot.cap} things`;
+    const short = CATALOGUE[kind].price - v.coins;
+    if (short > 0) return `◎ ${short.toLocaleString("en-US")} more needed`;
+    return null;
+  }
+
+  /* Out of the marketplace with something to set down: the ghost follows the crosshair. */
+  startPlacing(kind: CatalogueId, move: number | null = null) {
+    const why = this.buildBlock(kind, move !== null);
+    if (why) {
+      this.say(why, 2.5);
+      return false;
+    }
+    const was = move === null ? null : this.built.get(move);
+    /* Its front toward you, square to the way you look; something moved keeps its turn. */
+    const turn = was ? was.rot : Math.round(this.input.yaw / ROT_STEP) * ROT_STEP;
+    this.placing = { kind, turn, move, at: null, verdict: null, reason: null };
+    this.built.hide(move);
+    this.sellArmed = null;
+    return true;
+  }
+
+  endPlacing() {
+    this.placing = null;
+    this.built.hide(null);
+    this.built.ghost.show(null, "blue");
+  }
+
+  /* Click places, R or the wheel turns it (Shift finer), right-click puts it away. */
+  private placeInput(b: Body) {
+    const pl = this.placing!;
+    const land = this.myLand();
+    if (!land || this.ride) {
+      this.endPlacing();
+      return;
+    }
+    const step = this.input.sprint ? FINE_ROT_STEP : ROT_STEP;
+    if (this.input.take("rotate")) pl.turn += step;
+    const wheel = this.input.takeWheel();
+    if (wheel) pl.turn += wheel * step;
+    this.input.takeDigit();
+    this.aimPlacing(b, land);
+    if (this.input.take("attack")) {
+      if (pl.at && pl.verdict?.ok && !pl.reason) {
+        this.conn?.send({
+          t: "place",
+          kind: pl.kind,
+          x: pl.at.x,
+          z: pl.at.z,
+          rot: pl.at.rot,
+          ...(pl.move !== null ? { move: pl.move } : {}),
+        });
+        /* A move is done; a purchase carries on, so a wall can be drawn piece after piece. */
+        if (pl.move !== null) this.endPlacing();
+      } else
+        this.say(
+          pl.reason ?? (pl.verdict && !pl.verdict.ok ? pl.verdict.reason : "Can't go there"),
+          2,
+        );
+    }
+    this.input.take("attackUp");
+    if (this.input.take("alt")) this.endPlacing();
+    this.input.take("altUp");
+  }
+
+  /*
+   * Walk a ray out from your eyes along the crosshair until it meets the
+   * ground (or the water, for a jetty), snap the ghost there, and judge it.
+   */
+  private aimPlacing(b: Body, land: NonNullable<ReturnType<Game["myLand"]>>) {
+    const pl = this.placing!;
+    const def = CATALOGUE[pl.kind];
+    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const p = this.tmpV.set(b.x, this.smoothEye, b.z);
+    const reach = PLACE_REACH + 4;
+    let hit: { x: number; z: number } | null = null;
+    for (let d = 0; d < reach; d += 0.25) {
+      p.addScaledVector(dir, d === 0 ? 0 : 0.25);
+      let ground = land.terrain.heightAt(p.x, p.z);
+      if (def.placing === "shore") ground = Math.max(ground, SEA_LEVEL);
+      if (p.y <= ground) {
+        hit = { x: p.x, z: p.z };
+        break;
+      }
+    }
+    /* Looking up: just clear of you, straight ahead (see below). */
+    hit ??= { x: b.x, z: b.z };
+    /* Something big is pushed out ahead of you, rather than swallowing you. */
+    const flat = Math.hypot(dir.x, dir.z);
+    const clear = Math.hypot(def.hx, def.hz) + 1;
+    const off = Math.hypot(hit.x - b.x, hit.z - b.z);
+    if (flat > 0.01 && off < clear) {
+      hit.x += (dir.x / flat) * (clear - off);
+      hit.z += (dir.z / flat) * (clear - off);
+    }
+    const items = land.items.values();
+    const snap = snapItem(items, pl.kind, hit.x, hit.z, pl.turn, this.input.sprint, pl.move);
+    const verdict = checkItem(
+      land.terrain,
+      land.items.values(),
+      pl.kind,
+      snap.x,
+      snap.z,
+      snap.rot,
+      pl.move,
+    );
+    pl.verdict = verdict;
+    pl.at = { ...snap, y: verdict.y };
+    pl.reason = !land.terrain.contains(b.x, b.z)
+      ? "Stand on your land"
+      : Math.hypot(snap.x - b.x, snap.z - b.z) > PLACE_REACH
+        ? "Too far away"
+        : pl.move === null
+          ? this.buildBlock(pl.kind)
+          : null;
+    this.built.ghost.show(pl.kind, plotTeam(land.info.id), pl.at, verdict.ok && !pl.reason);
+  }
+
+  /* The thing of yours under the crosshair, close enough to move, sell or mend. */
+  private ownItemAt(b: Body): PlacedItem | null {
+    return this.itemAt(b, 12, true);
+  }
+
+  /* The built thing under the crosshair within `reach` metres: on your land only, or anyone's. */
+  private itemAt(b: Body, reach: number, mine: boolean): PlacedItem | null {
+    const world = this.world;
+    if (!world) return null;
+    const lists: Map<number, PlacedItem>[] = [];
+    for (const [plot, list] of this.plotItems) {
+      const info = world.islands.get(plot)?.info;
+      if (!info || !list.size || (mine && !info.plot?.mine)) continue;
+      const half = info.size / 2 + reach;
+      if (Math.abs(info.x - b.x) > half || Math.abs(info.z - b.z) > half) continue;
+      lists.push(list);
+    }
+    if (!lists.length) return null;
+    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const p = this.tmpV.set(b.x, this.smoothEye, b.z);
+    for (let d = 0; d < reach; d += 0.3) {
+      p.addScaledVector(dir, d === 0 ? 0 : 0.3);
+      for (const list of lists)
+        for (const o of list.values()) {
+          /* Rubble is low: a pile or a stump. */
+          const top = o.y + (o.hp > 0 ? CATALOGUE[o.kind].top : 1.4);
+          if (p.y < o.y - 0.5 || p.y > top + 0.3 || !overItem(o, p.x, p.z, 0.2)) continue;
+          return o;
+        }
+      if (p.y < world.ground.heightAt(p.x, p.z) - 0.3) break;
+    }
+    return null;
+  }
+
+  private placingView(): PlacingView | null {
+    const pl = this.placing;
+    if (!pl) return null;
+    const def = CATALOGUE[pl.kind];
+    const bad = pl.reason ?? (pl.verdict && !pl.verdict.ok ? pl.verdict.reason : null);
+    return {
+      name: def.name,
+      price: def.price,
+      moving: pl.move !== null,
+      ok: !bad && !!pl.verdict,
+      reason: bad,
+      snapped: !!pl.at?.snapped,
+    };
   }
 
   /* Whether the marketplace can sell you anything: only out in the world, where coins are kept. */
@@ -685,17 +1209,37 @@ export class Game {
   mapView(): MapView {
     const world = this.world;
     const islands = world
-      ? [...world.islands.values()].map((o) => ({
-          info: o.info,
-          image: o.image,
-        }))
+      ? [...world.islands.values()].map((o) => {
+          const st = this.plotStates.get(o.info.id);
+          const shield = this.shieldLeft(o.info.id);
+          return {
+            info: o.info,
+            image: o.image,
+            raid: o.info.plot
+              ? {
+                  team: shield > 0 && st?.captor ? st.captor.team : plotTeam(o.info.id),
+                  shield,
+                  captor: shield > 0 ? (st?.captor?.name ?? null) : null,
+                  attacked: (st?.raiders ?? 0) > 0 || this.captures.has(o.info.id),
+                }
+              : undefined,
+          };
+        })
       : [];
     const players: MapView["players"] = [];
     for (const [id, r] of this.remotes) {
       const last = r.buf[r.buf.length - 1];
       if (!last || !r.avatar.group.visible) continue;
       const p = r.avatar.group.position;
-      players.push({ id, name: r.name, x: p.x, z: p.z, yaw: last.yaw, me: false });
+      players.push({
+        id,
+        name: r.name,
+        x: p.x,
+        z: p.z,
+        yaw: last.yaw,
+        me: false,
+        raider: (last.flags & FLAG.raider) !== 0,
+      });
     }
     if (this.body)
       players.push({
@@ -705,6 +1249,7 @@ export class Game {
         z: this.body.z,
         yaw: this.input.yaw,
         me: true,
+        raider: this.raiding !== null,
       });
     return { islands, players };
   }
@@ -728,8 +1273,8 @@ export class Game {
     this.conn?.setPaused(this.shouldPause());
     if (!this.input.locked) {
       this.input.clear();
-      /* Esc: out of build mode. */
-      this.endBuild();
+      /* Esc: put the ghost away. */
+      if (!this.touch && !this.forceActive) this.endPlacing();
     }
     this.emitHud();
   }
@@ -765,10 +1310,11 @@ export class Game {
     this.self = null;
     this.audio.close();
     this.viewmodel.dispose();
-    this.shots.dispose();
     this.herd.dispose();
-    this.built.dispose();
     this.vehicles.dispose();
+    this.built.dispose();
+    this.fx.dispose();
+    this.raids.dispose();
     this.dropWorld();
     this.sky.dispose();
     this.clouds.dispose();
@@ -792,6 +1338,7 @@ export class Game {
 
   private dropWorld() {
     if (!this.world) return;
+    this.raids.clear();
     this.scene.remove(this.world.group);
     for (const o of this.world.islands.values()) {
       o.props.dispose();
@@ -835,6 +1382,44 @@ export class Game {
     });
     world.seed ??= info.seed;
     world.sea.setTiles(world.ground.list());
+    const hearth = terrain.places.find((p) => p.kind === "hearth");
+    if (info.plot && terrain.hearth && hearth) {
+      this.raids.place(info.id, { ...terrain.hearth, rot: hearth.rot });
+      this.showRaid(info.id);
+    }
+  }
+
+  private removeIsland(id: number) {
+    const world = this.world;
+    const view = world?.islands.get(id);
+    if (!world || !view) return;
+    view.props.dispose();
+    view.group.remove(view.props.group);
+    world.group.remove(view.group);
+    disposeTree(view.group);
+    world.islands.delete(id);
+    this.raids.remove(id);
+    world.ground.remove(id);
+    world.sea.setTiles(world.ground.list());
+  }
+
+  /*
+   * An island raised while we're here: a plot just bought, or one grown in
+   * place (the same id, bigger), which takes the old one's place. One we
+   * already have only takes its new name and owner.
+   */
+  private onIsland(info: IslandInfo) {
+    const world = this.world;
+    if (!world) return;
+    const known = world.islands.get(info.id);
+    if (known && sameLand(known.info, info)) {
+      known.info = info;
+      const island = world.ground.islands.get(info.id);
+      if (island) island.info = { ...info };
+      return;
+    }
+    if (known) this.removeIsland(info.id);
+    this.addIsland(info);
   }
 
   /* Is the world we have drawn the same set of islands as this one, or a start on it? */
@@ -843,8 +1428,7 @@ export class Game {
     if (!world) return false;
     for (const [id, o] of world.islands) {
       const next = islands.find((i) => i.id === id);
-      if (!next || next.shape !== o.info.shape || next.seed !== o.info.seed) return false;
-      if (next.x !== o.info.x || next.z !== o.info.z) return false;
+      if (!next || !sameLand(next, o.info)) return false;
     }
     return true;
   }
@@ -879,6 +1463,24 @@ export class Game {
       case "world":
         this.onWorld(msg);
         break;
+      case "island":
+        this.onIsland(msg.info);
+        break;
+      case "item": {
+        const fresh = !this.plotItems.get(msg.plot)?.has(msg.item[0]);
+        const item = this.setSnap(msg.plot, msg.item);
+        if (item && fresh && this.body && this.distanceTo(item.x, item.z) < 40) this.audio.thud();
+        break;
+      }
+      case "items":
+        this.onItems(msg.c);
+        break;
+      case "ihit":
+        this.onItemHit(msg);
+        break;
+      case "unitem":
+        this.removeItem(msg.plot, msg.id);
+        break;
       case "roster":
         this.setRoster(msg.roster);
         break;
@@ -909,7 +1511,7 @@ export class Game {
         break;
       case "died":
         this.leaveRide();
-        this.endBuild();
+        this.endPlacing();
         this.down = msg.cause;
         this.dazeUntil = 0;
         if (msg.by) this.pushFeed(`${msg.by} knocked you out`);
@@ -926,7 +1528,7 @@ export class Game {
         break;
       case "warp":
         this.leaveRide();
-        this.endBuild();
+        this.endPlacing();
         this.chargeStart = null;
         this.place(msg);
         this.dazeUntil = 0;
@@ -937,14 +1539,12 @@ export class Game {
         this.pushFeed("You're dazed");
         break;
       case "swing": {
-        /* Yours too: the room has picked what it hits, and how far it flies. */
-        const shot = shotOf(msg.kind);
-        if (shot && msg.shot) this.shots.fire(shot, msg.shot);
         if (msg.by !== this.myId) {
-          const r = this.remotes.get(msg.by);
+          const r = this.remotes.get(msg.by) ?? this.crews.get(msg.by);
           r?.avatar.strike(msg.heavy);
           const s = r?.buf[r.buf.length - 1];
-          if (s && this.distanceTo(s.x, s.z) < 20) this.audio.swing(msg.kind, msg.heavy);
+          const shoots = msg.kind && (weaponDef(msg.kind).ranged || weaponDef(msg.kind).throws);
+          if (s && !shoots && this.distanceTo(s.x, s.z) < 20) this.audio.swing(msg.kind, msg.heavy);
         }
         break;
       }
@@ -955,16 +1555,12 @@ export class Game {
         this.inv = msg.inv;
         setPurse(msg.inv.coins, msg.inv.vehicles);
         break;
+      case "crew":
+        this.myCrew = { order: msg.order, men: msg.men };
+        break;
       case "board":
         this.board = msg.board;
         break;
-      case "prefab": {
-        const fresh = !this.built.get(msg.prefab.id);
-        this.addPrefab(msg.prefab);
-        if (fresh && this.body && this.distanceTo(msg.prefab.x, msg.prefab.z) < 30)
-          this.audio.thud();
-        break;
-      }
       case "aboard":
         this.onAboard(msg);
         break;
@@ -974,11 +1570,6 @@ export class Game {
         if (this.ride?.state && this.ride.id === v.id) Object.assign(this.ride.state, v.state);
         break;
       }
-      case "unprefab":
-        this.built.remove(msg.id);
-        this.world?.ground.removeSolids(msg.id);
-        if (this.chestId === msg.id && this.panel === "chest") this.closePanel();
-        break;
       case "paid": {
         const total = msg.payouts.reduce((n, p) => n + p.reward, 0);
         this.audio.reward();
@@ -1000,10 +1591,69 @@ export class Game {
       case "ahit":
         this.onAnimalHit(msg);
         break;
+      case "plots":
+        this.onPlots(msg.plots);
+        break;
+      case "alarm":
+        this.onAlarm(msg);
+        break;
       case "feed":
         this.pushFeed(msg.text);
         break;
+      case "shot":
+        this.shotsView.spawn(msg);
+        this.shotBy.set(msg.id, msg.by);
+        if (this.shotBy.size > 400) this.shotBy.delete(this.shotBy.keys().next().value as number);
+        break;
+      case "land":
+        this.onLand(msg);
+        break;
+      case "boom": {
+        this.shotsView.boom(msg);
+        this.shotBy.delete(msg.id);
+        const [x, y, z] = msg.p;
+        const d = this.camera.position.distanceTo(this.tmpV.set(x, y, z));
+        if (d < 40) {
+          this.kick = Math.max(this.kick, (1 - d / 40) * 1.2);
+          this.flash = Math.max(this.flash, (1 - d / 40) * 0.8);
+        }
+        break;
+      }
+      case "vhp":
+        this.hulls.set(msg.id, { hp: msg.hp, max: msg.max });
+        if (this.ride?.id === msg.id) {
+          this.kick = Math.max(this.kick, 0.5);
+          this.audio.knock(false, 0.8);
+        }
+        break;
+      case "sunk":
+        this.hulls.delete(msg.id);
+        if (this.ride?.id === msg.id) this.audio.collapse(1);
+        break;
     }
+  }
+
+  /*
+   * A shot came down: the view shows it where it lands, and if it was ours
+   * and hit someone (or something), the hit marker says what it did.
+   */
+  private onLand(msg: Extract<ServerMsg, { t: "land" }>) {
+    this.shotsView.land(msg);
+    const by = this.shotBy.get(msg.id);
+    this.shotBy.delete(msg.id);
+    if (msg.who === undefined) return;
+    if (msg.on === "body") {
+      const target = this.remotes.get(msg.who) ?? this.crews.get(msg.who);
+      target?.avatar.hurt();
+    }
+    if (by !== this.myId) return;
+    this.hitMarker = 1;
+    this.viewmodel.impact(0.5);
+    this.hitText = msg.dmg
+      ? `-${msg.dmg}`
+      : msg.on === "item" || msg.on === "ship"
+        ? "No harm"
+        : "Hit";
   }
 
   /*
@@ -1016,7 +1666,6 @@ export class Game {
     if (msg.id !== null) {
       const kind = this.vehicles.kindOf(msg.id);
       if (!kind) return;
-      this.endBuild();
       this.flying = false;
       const pose = this.vehicles.latest(msg.id) ?? this.vehicles.look(msg.id);
       const same = this.ride?.id === msg.id;
@@ -1248,15 +1897,6 @@ export class Game {
     if (this.ride && !this.vehicles.kindOf(this.ride.id)) this.leaveRide();
   }
 
-  /* Draw it, and make it solid for our own footsteps too. */
-  private addPrefab(p: Prefab) {
-    this.built.set(p);
-    const solids = prefabBlocks(p)
-      .filter((b) => b.solid)
-      .map(blockSolid);
-    if (solids.length) this.world?.ground.addSolids(p.id, solids);
-  }
-
   private onAnimalHit(msg: Extract<ServerMsg, { t: "ahit" }>) {
     const a = this.herd.list().get(msg.id);
     if (msg.by === this.myId) {
@@ -1288,13 +1928,14 @@ export class Game {
   private onWorld(info: WorldInfo) {
     if (!this.sameWorld(info.islands)) this.buildWorld();
     const world = this.world!;
-    for (const island of info.islands) this.addIsland(island);
+    for (const island of info.islands) this.onIsland(island);
     this.offset = info.time - performance.now() / 1000;
     this.haveClock = true;
     this.board = info.board;
-    for (const p of this.built.list()) world.ground.removeSolids(p.id);
-    this.built.reset([]);
-    for (const p of info.prefabs) this.addPrefab(p);
+    this.clearItems();
+    for (const [plot, list] of info.items) for (const snap of list) this.setSnap(plot, snap);
+    this.captures.clear();
+    this.onPlots(info.plots);
     this.setVehicles(info.vehicles, info.time);
     if (info.you) this.place(info.you);
     else this.body = null;
@@ -1342,11 +1983,14 @@ export class Game {
       const r = this.remotes.get(id);
       if (!r) continue;
       r.avatar.setGear(weaponFromIndex(weapon ?? 0), stagger ?? 0);
+      r.avatar.setRaider((flags & FLAG.raider) !== 0);
       r.buf.push({ t: msg.time, x, y, z, yaw, pitch, flags });
       if (r.buf.length > 12) r.buf.shift();
     }
 
     this.herd.set(msg.a);
+    this.crews.set(msg.c ?? [], msg.time);
+    this.built.aim(msg.d ?? []);
     this.setVehicles(msg.v, msg.time);
     /* Anything squaring up to you nearby snorts or growls before it comes. */
     for (const [id, kind, x, , z, , state] of msg.a) {
@@ -1360,7 +2004,103 @@ export class Game {
 
     if (msg.me) {
       this.health = msg.me.health;
+      this.water = msg.me.water;
+      this.raiding = msg.me.raid;
     }
+    this.captures.clear();
+    for (const [plot, progress, state, by] of msg.cap)
+      this.captures.set(plot, { progress, state, by });
+    for (const id of this.plotStates.keys()) this.showCapture(id);
+  }
+
+  /* ---------- raids ---------- */
+
+  /* Every plot's shield and raiders, as the room has them now. */
+  private onPlots(list: readonly PlotState[]) {
+    const now = performance.now() / 1000;
+    this.plotStates.clear();
+    for (const p of list) this.plotStates.set(p.id, { ...p, until: now + p.shield });
+    for (const p of list) {
+      this.showRaid(p.id);
+      this.showCapture(p.id);
+    }
+  }
+
+  /* The seconds left on a plot's shield (0: none). */
+  shieldLeft(id: number) {
+    const st = this.plotStates.get(id);
+    return st ? Math.max(0, st.until - performance.now() / 1000) : 0;
+  }
+
+  /* A plot's Hearth as it should look: whose colours fly there, and whether its shield is up. */
+  private showRaid(id: number) {
+    const st = this.plotStates.get(id);
+    const up = this.shieldLeft(id) > 0;
+    this.raids.setState(id, up && st?.captor ? st.captor.team : plotTeam(id), up);
+  }
+
+  /* Its ring: filling while it's taken, faint while raiders are only ashore, gone otherwise. */
+  private showCapture(id: number) {
+    const c = this.captures.get(id);
+    const raiders = this.plotStates.get(id)?.raiders ?? 0;
+    if (c) this.raids.setCapture(id, c.progress / CAPTURE_TIME, c.state);
+    else this.raids.setCapture(id, 0, raiders > 0 ? CAPTURE_STATE.falling : null);
+  }
+
+  /* Raiders on your land: a bell, wherever you are, and which way they came from. */
+  private onAlarm(msg: Extract<ServerMsg, { t: "alarm" }>) {
+    const at = performance.now() / 1000;
+    const more = msg.raiders > 1 ? `${msg.raiders} raiders on your isle` : "A raider on your isle";
+    this.alarm =
+      msg.at === "hearth"
+        ? { title: "Raiders are taking your Hearth!", sub: `${more} · get home and hold it`, at }
+        : {
+            title: `Raiders landing on your ${msg.side} shore`,
+            sub: `${more} · get home and drive them off`,
+            at,
+          };
+    this.audio.bell(msg.at === "hearth" ? 4 : 3);
+    this.pushFeed(this.alarm.title);
+  }
+
+  /* The capture nearest you worth showing: one you're taking, your own Hearth, or one close by. */
+  private captureView(): HudState["capture"] {
+    const b = this.body;
+    const world = this.world;
+    if (!b || !world) return null;
+    let best: HudState["capture"] = null;
+    let bestD = 80;
+    for (const [id, c] of this.captures) {
+      const info = world.islands.get(id)?.info;
+      const hearth = world.ground.islands.get(id)?.terrain.hearth;
+      if (!info || !hearth) continue;
+      const mine = !!info.plot?.mine;
+      const taking = this.raiding === id;
+      const d = Math.hypot(hearth.x - b.x, hearth.z - b.z);
+      if (!mine && !taking && d > bestD) continue;
+      bestD = mine || taking ? -1 : d;
+      const state =
+        c.state === CAPTURE_STATE.taking
+          ? "taking"
+          : c.state === CAPTURE_STATE.contested
+            ? "contested"
+            : "falling";
+      const title = mine
+        ? state === "taking"
+          ? "Your Hearth is being taken!"
+          : state === "contested"
+            ? "You're holding your Hearth"
+            : "Your Hearth is coming back to you"
+        : taking
+          ? state === "taking"
+            ? `Taking ${info.name}`
+            : state === "contested"
+              ? "Contested · the owner is holding the Hearth"
+              : "Back to the Hearth before it slips away"
+          : `${info.name} · its Hearth is being taken`;
+      best = { title, progress: Math.min(1, c.progress / CAPTURE_TIME), state, mine };
+    }
+    return best;
   }
 
   private onHit(msg: Extract<ServerMsg, { t: "hit" }>) {
@@ -1386,7 +2126,7 @@ export class Game {
       else this.audio.hit(msg.kind, msg.heavy);
       return;
     }
-    const target = this.remotes.get(msg.target);
+    const target = this.remotes.get(msg.target) ?? this.crews.get(msg.target);
     if (!msg.blocked && !msg.parry) target?.avatar.hurt();
     const s = target?.buf[target.buf.length - 1];
     if (!s) return;
@@ -1411,11 +2151,60 @@ export class Game {
       }
     }
     this.lastSwingAt = now;
-    this.conn?.send({ t: "attack", charge });
+    const shoots = !!def.ranged || !!def.throws;
+    this.conn?.send(
+      shoots ? { t: "attack", charge, aim: this.aimDir(b) } : { t: "attack", charge },
+    );
     this.viewmodel.swing(heavy);
     this.self?.strike(heavy);
-    this.audio.swing(kind, heavy);
-    this.kick = kind ? -0.3 : -0.6;
+    /* A bow's twang comes with its arrow, from the room. */
+    if (!shoots) this.audio.swing(kind, heavy);
+    this.kick = def.ranged ? -0.15 : kind ? -0.3 : -0.6;
+  }
+
+  /*
+   * Which way a shot from your eyes goes to hit whatever's under the
+   * crosshair: the same as the view in first person, but from behind it's
+   * the line from your head to where the view's ray meets the ground (or a
+   * long way off).
+   */
+  private aimDir(b: Body): [number, number, number] {
+    const fwd = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const cam = this.camera.position;
+    const ground = this.world?.ground;
+    let d = 200;
+    if (ground)
+      for (let t = 2; t < 200; t += 1.5) {
+        const x = cam.x + fwd.x * t;
+        const y = cam.y + fwd.y * t;
+        const z = cam.z + fwd.z * t;
+        if (y < Math.max(ground.heightAt(x, z), SEA_LEVEL)) {
+          d = t;
+          break;
+        }
+      }
+    const eye = this.tmpE.set(b.x, b.y + EYE_HEIGHT - 0.08, b.z);
+    const to = this.tmpV.copy(cam).addScaledVector(fwd, d).sub(eye).normalize();
+    const r = (v: number) => Math.round(v * 1000) / 1000;
+    return [r(to.x), r(to.y), r(to.z)];
+  }
+
+  /*
+   * At a ship's helm, a click fires the broadside on whichever side you're
+   * looking, raised as far as you're looking up.
+   */
+  private fireBroadside() {
+    const ride = this.ride;
+    const look = ride ? (ride.state ?? this.vehicles.look(ride.id)) : null;
+    if (!ride || !look) return;
+    const now = performance.now() / 1000;
+    const side = Math.sin(look.rot - this.input.yaw) > 0 ? 1 : -1;
+    const k = side < 0 ? 0 : 1;
+    if (now < this.broadsideAt[k]) return;
+    this.broadsideAt[k] = now + BROADSIDE_RELOAD;
+    const lift = clamp(this.input.pitch + 0.12, -0.05, 0.35);
+    this.conn?.send({ t: "broadside", side, lift });
+    this.kick = 0.8;
   }
 
   private distanceTo(x: number, z: number) {
@@ -1458,6 +2247,7 @@ export class Game {
     this.engineSound();
 
     if (this.world) {
+      this.world.sea.follow(this.camera.position.x, this.camera.position.z);
       for (const o of this.world.islands.values()) {
         o.props.update(t, this.camera.position);
         /* Far islands draw a coarser ground. */
@@ -1495,10 +2285,18 @@ export class Game {
     });
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
+    this.crews.update(
+      dt,
+      this.worldTime() - this.renderDelay(),
+      this.camera.position,
+      this.vehicles,
+    );
     if (this.devAvatars.length) this.updateDevAvatars(dt);
     this.herd.update(dt, this.camera.position);
-    this.shots.update(dt);
-    this.built.update(t);
+    this.built.update(dt);
+    this.shotsView.update(dt);
+    this.raids.update(t);
+    this.updateFires(dt);
     this.sky.follow(this.camera);
     this.clouds.update(this.worldTime(), this.camera.position);
     this.camera.updateMatrixWorld();
@@ -1540,7 +2338,11 @@ export class Game {
       b.yaw = this.input.yaw;
       const def = weaponDef(this.weapon);
       this.blocking =
-        guardOf(this.weapon) !== null && active && this.input.altHeld && !this.build && !this.ride;
+        guardOf(this.weapon) !== null &&
+        active &&
+        this.input.altHeld &&
+        !this.ride &&
+        !this.placing;
       const charging = this.chargeStart !== null;
       if (active && this.input.take("creative") && !this.ride && CREATIVE) this.toggleCreative(b);
       if (active && this.input.take("view")) this.toggleView();
@@ -1612,9 +2414,14 @@ export class Game {
 
       /* Attack: instant swings on press; the warhammer and greatsword charge until release. */
       const now = performance.now() / 1000;
-      if (this.build) this.buildInput(b);
-      else if (this.input.take("attack") && !this.blocking && !this.ride) {
-        if (def.charge) {
+      /* A passenger can shoot a bow or throw a keg; at a ship's helm, a click is a broadside. */
+      const shoots = !!def.ranged || !!def.throws;
+      const helm = this.ride?.seat === 0 && gunsOf(this.ride.kind) > 0;
+      const free = !this.ride || (this.ride.seat > 0 && shoots);
+      if (this.placing) this.placeInput(b);
+      else if (this.input.take("attack") && !this.blocking && (free || helm)) {
+        if (helm) this.fireBroadside();
+        else if (def.charge) {
           if (now >= this.attackReadyAt) this.chargeStart = now;
         } else this.tryAttack(b, 0);
       }
@@ -1625,19 +2432,34 @@ export class Game {
       if (!def.charge) this.chargeStart = null;
       this.input.take("alt");
       this.input.take("altUp");
-      if (!this.build) this.hotbarInput();
-      this.focus = this.build ? null : this.findFocus(b);
+      this.input.take("rotate");
+      if (!this.placing) this.hotbarInput();
+      this.focus = this.placing ? null : this.findFocus(b);
       if (this.input.take("interact") && this.focus) {
         const f = this.focus;
-        if (f.kind === "board" || f.kind === "shop") this.openPanel(f.kind);
-        else if (f.kind === "chest") {
-          this.chestId = f.id;
-          this.openPanel("chest");
+        if (f.kind === "board") this.openPanel(f.kind);
+        else if (f.kind === "item") {
+          const item = this.built.get(f.id);
+          if (item && item.hp > 0) this.startPlacing(item.kind, item.id);
         } else this.conn?.send({ t: "interact", kind: f.kind, id: f.id });
       }
+      if (this.input.take("repair") && this.focus?.kind === "item") {
+        const item = this.built.get(this.focus.id);
+        if (item && repairCost(item.kind, item.hp) > 0)
+          this.conn?.send({ t: "repair", id: item.id });
+      }
+      if (this.input.take("sell") && this.focus?.kind === "item") {
+        const id = this.focus.id;
+        if (this.sellArmed?.id === id && now < this.sellArmed.until) {
+          this.conn?.send({ t: "sell", id });
+          this.sellArmed = null;
+        } else this.sellArmed = { id, until: now + 2.5 };
+      }
       if (this.input.take("inventory")) this.openPanel("inventory");
-      if (this.input.take("build")) this.toggleBuild();
-      this.input.take("rotate");
+      /* G calls your crew to you (or sends them home); H has them hold where you stand. */
+      if (this.input.take("crew"))
+        this.orderCrew(this.myCrew.order === "follow" ? "home" : "follow");
+      if (this.input.take("hold")) this.orderCrew("hold");
       const stance = { block: this.blocking, charge: this.chargeStart !== null };
       if (stance.block !== this.sentStance.block || stance.charge !== this.sentStance.charge) {
         this.sentStance = stance;
@@ -1726,12 +2548,14 @@ export class Game {
       "altUp",
       "interact",
       "inventory",
-      "build",
-      "rotate",
       "jump",
       "creative",
       "fly",
       "view",
+      "rotate",
+      "sell",
+      "crew",
+      "hold",
     ] as const)
       this.input.take(a);
     this.input.takeDigit();
@@ -1773,13 +2597,6 @@ export class Game {
     const bd = world.ground.primary?.board;
     if (FEATURES.board && bd)
       consider(bd.x, bd.y, bd.z, 3.6, () => ({ kind: "board", id: 0, label: "E · Guild Board" }));
-    const sh = world.ground.primary?.shop;
-    if (FEATURES.shop && sh)
-      consider(sh.x, sh.y, sh.z, 3.4, () => ({
-        kind: "shop",
-        id: 0,
-        label: "E · The keeper's stall",
-      }));
     /* A vehicle: measured from its side, so a galleon is as easy to board as a rowboat. */
     for (const v of this.vehicles.list()) {
       const reach = distanceTo(v.kind, v.look, b.x, b.z);
@@ -1792,169 +2609,26 @@ export class Game {
         best = { kind: "vehicle", id: v.id, label: boardLabel(v.kind) };
       }
     }
-    for (const p of this.built.list()) {
-      if (p.kind === "chest")
-        consider(p.x, p.y, p.z, 2.4, () => ({
-          kind: "chest",
-          id: p.id,
-          label: "E · Open the chest",
-        }));
-      else if (p.kind === "bed")
-        consider(p.x, p.y, p.z, 2.6, () => ({
-          kind: "prefab",
-          id: p.id,
-          label: "E · Rest (you'll wake here)",
-        }));
+    /* Something of yours, right under the crosshair, if nothing else is closer to hand. */
+    if (!best) {
+      const item = this.ownItemAt(b);
+      const name = item ? CATALOGUE[item.kind].name.toLowerCase() : "";
+      if (item)
+        return {
+          kind: "item",
+          id: item.id,
+          label:
+            item.hp > 0
+              ? `E · Move the ${name}`
+              : `R · Rebuild the ${name} for ◎ ${repairCost(item.kind, 0)}`,
+        };
     }
     return best;
-  }
-
-  /* ---------- building ---------- */
-
-  private ownedKits() {
-    return KIT_IDS.filter((k) => (this.inv.items[k] ?? 0) > 0);
-  }
-
-  private toggleBuild() {
-    if (this.build) {
-      this.endBuild();
-      return;
-    }
-    if (this.ride) {
-      this.say("Get off before building", 2);
-      return;
-    }
-    if (!this.ownedKits().length) {
-      this.say(
-        FEATURES.shop
-          ? "Nothing to build yet. The keeper's stall at the lighthouse sells kits."
-          : "Nothing to build yet.",
-        3,
-      );
-      return;
-    }
-    this.build = { index: 0, turn: 0, aim: null, verdict: null, target: null };
-  }
-
-  private endBuild() {
-    this.build = null;
-    this.built.ghost.show(null);
-  }
-
-  /* Number keys or the wheel pick a kit, R turns it, click places, right-click takes back. */
-  private buildInput(b: Body) {
-    const build = this.build!;
-    const kits = this.ownedKits();
-    if (!kits.length) {
-      this.endBuild();
-      return;
-    }
-    const digit = this.input.takeDigit();
-    const wheel = this.input.takeWheel();
-    if (digit !== null && digit < kits.length) build.index = digit;
-    else if (wheel)
-      build.index = (((build.index + wheel) % kits.length) + kits.length) % kits.length;
-    build.index = Math.min(build.index, kits.length - 1);
-    if (this.input.take("rotate")) build.turn += Math.PI / 4;
-    const kind = kits[build.index];
-    const rot = b.yaw + build.turn;
-    this.aimBuild(b, kind, rot);
-
-    if (this.input.take("attack")) {
-      if (build.target) this.say("Right-click to take that back first", 2);
-      else if (build.aim && build.verdict?.ok)
-        this.conn?.send({ t: "place", kind, x: build.aim.x, z: build.aim.z, rot });
-      else if (build.verdict?.reason) this.say(build.verdict.reason, 2);
-    }
-    this.input.take("attackUp");
-    if (this.input.take("alt") && build.target)
-      this.conn?.send({ t: "pickup", id: build.target.id });
-  }
-
-  /*
-   * Walk a ray out from the eye until it meets the ground (or a floor, or the
-   * sea for things that go on water), and judge the spot.
-   */
-  private aimBuild(b: Body, kind: KitId, rot: number) {
-    const build = this.build!;
-    const world = this.world!;
-    const def = PREFABS[kind];
-    const dir = this.tmpF.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    /* From your eyes, not the camera, which may be behind you. */
-    const p = this.tmpV.set(b.x, this.smoothEye, b.z);
-    let hit: { x: number; y: number; z: number } | null = null;
-    for (let d = 0; d < BUILD_REACH + 2; d += 0.25) {
-      p.addScaledVector(dir, d === 0 ? 0 : 0.25);
-      let ground = def.onFloors
-        ? world.ground.groundAt(p.x, p.z, p.y).ground
-        : world.ground.heightAt(p.x, p.z);
-      if (def.placing !== "land") ground = Math.max(ground, SEA_LEVEL);
-      if (p.y <= ground) {
-        hit = { x: p.x, y: ground, z: p.z };
-        break;
-      }
-    }
-    if (!hit) {
-      const reach = BUILD_REACH - 0.5;
-      const flat = Math.hypot(dir.x, dir.z) || 1;
-      const x = b.x + (dir.x / flat) * reach;
-      const z = b.z + (dir.z / flat) * reach;
-      hit = { x, y: world.ground.heightAt(x, z), z };
-    }
-    /* Something already built under the crosshair? Then that's what you're pointing at. */
-    let target: Prefab | null = null;
-    let best = Number.POSITIVE_INFINITY;
-    for (const q of this.built.list()) {
-      if (!overPrefab(q, hit.x, hit.z, 0.25) || Math.abs(hit.y - q.y) > 4) continue;
-      const d = Math.hypot(q.x - hit.x, q.z - hit.z);
-      if (d < best) {
-        best = d;
-        target = q;
-      }
-    }
-    /* A bed in a hut is pointed at the bed, not the hut. */
-    if (
-      target &&
-      def.onFloors &&
-      (target.kind === "hut" || target.kind === "cabin" || target.kind === "dock")
-    )
-      target = this.smallestAt(hit.x, hit.z) ?? null;
-    build.target = target;
-    build.aim = hit;
-    if (target) {
-      build.verdict = null;
-      this.built.ghost.show(target.kind, target.x, target.y, target.z, target.rot, "pick");
-      return;
-    }
-    build.verdict = checkPlacement(world.ground, kind, hit.x, hit.z, rot, b);
-    this.built.ghost.show(kind, hit.x, build.verdict.y, hit.z, rot, build.verdict.ok ? "ok" : "no");
-  }
-
-  /* The small things (chest, bed, campfire) at a spot, if any. */
-  private smallestAt(x: number, z: number) {
-    for (const q of this.built.list()) {
-      if (PREFABS[q.kind].onFloors && overPrefab(q, x, z, 0.25)) return q;
-    }
-    return null;
-  }
-
-  private buildView(): BuildView | null {
-    const build = this.build;
-    if (!build) return null;
-    const kits = this.ownedKits();
-    return {
-      kits: kits.map((k) => ({ id: k, name: ITEMS[k].name, count: this.inv.items[k] ?? 0 })),
-      index: Math.min(build.index, kits.length - 1),
-      ok: !!build.verdict?.ok,
-      reason: build.verdict?.reason ?? null,
-      target: build.target ? ITEMS[build.target.kind].name : null,
-    };
   }
 
   /* ---------- panels ---------- */
 
   openPanel(kind: PanelKind) {
-    this.endBuild();
     this.panel = kind;
     this.input.clear();
     this.input.unlock();
@@ -1966,10 +2640,6 @@ export class Game {
     this.panel = null;
     this.emitHud();
     this.lock();
-  }
-
-  buy(item: string) {
-    this.conn?.send({ t: "buy", item });
   }
 
   /* What you wear, as others see you. */
@@ -1986,42 +2656,6 @@ export class Game {
     keepSkin(skin);
     this.self?.setSkin(skin);
     if (this.conn?.kind === "online") this.conn.send({ t: "skin", skin });
-  }
-
-  /* Into the open chest (n > 0) or out of it (n < 0). */
-  stash(item: ItemId, n: number) {
-    if (this.chestId !== null) this.conn?.send({ t: "stash", chest: this.chestId, item, n });
-  }
-
-  private shopView(): ShopView[] {
-    return SHOP.map((e) => {
-      const kit = "kit" in e.give ? e.give.kit : null;
-      const tool = "tool" in e.give ? e.give.tool : null;
-      return {
-        id: e.id,
-        section: e.section,
-        name: kit ? ITEMS[kit].name : TOOLS[tool!].name,
-        note: kit ? ITEMS[kit].note : (TOOL_NOTES[tool!] ?? ""),
-        price: e.price,
-        owned: kit
-          ? (this.inv.items[kit] ?? 0) + [...this.built.list()].filter((p) => p.kind === kit).length
-          : this.inv.tools.filter((t) => t.kind === tool).length,
-      };
-    });
-  }
-
-  private nearShop() {
-    const b = this.body;
-    const s = this.world?.ground.primary?.shop;
-    return !!b && !!s && Math.hypot(s.x - b.x, s.z - b.z) < SHOP_REACH && Math.abs(s.y - b.y) < 3;
-  }
-
-  private chestView() {
-    if (this.panel !== "chest" || this.chestId === null) return null;
-    const store = this.built.get(this.chestId)?.store ?? {};
-    return (Object.entries(store) as [ItemId, number][])
-      .filter(([, n]) => n > 0)
-      .map(([id, count]) => ({ id, name: ITEMS[id].name, count }));
   }
 
   acceptContract(id: number) {
@@ -2122,7 +2756,12 @@ export class Game {
   private toolView(id: number | null): ToolView | null {
     const tool = id == null ? null : this.inv.tools.find((t) => t.id === id);
     if (!tool) return null;
-    return { id: tool.id, kind: tool.kind, name: TOOLS[tool.kind].name };
+    return {
+      id: tool.id,
+      kind: tool.kind,
+      name: TOOLS[tool.kind].name,
+      count: isThrown(tool.kind) ? tool.uses : null,
+    };
   }
 
   private inventoryView(): InventoryView {
@@ -2131,7 +2770,7 @@ export class Game {
     for (const [id, n] of Object.entries(inv.items) as [ItemId, number][]) {
       if (!n) continue;
       const def = ITEMS[id];
-      items.push({ id, name: def.name, count: n, kind: def.kind });
+      items.push({ id, name: def.name, count: n });
     }
     return {
       coins: inv.coins,
@@ -2405,6 +3044,12 @@ export class Game {
 
   /* ---------- HUD ---------- */
 
+  /* What's left of the hull you're riding in, if it's been hit. */
+  private hullView() {
+    const h = this.ride ? this.hulls.get(this.ride.id) : null;
+    return h ? h.hp / h.max : null;
+  }
+
   private emitHud() {
     const now = performance.now() / 1000;
     if (this.notice && now > this.noticeUntil) this.notice = null;
@@ -2419,7 +3064,7 @@ export class Game {
       /* Measured from your eyes, which the camera may be behind. */
       const eye = this.tmpE.set(this.body.x, this.smoothEye, this.body.z);
       let best = 0.985;
-      for (const r of this.remotes.values()) {
+      for (const r of [...this.remotes.values(), ...this.crews.list()]) {
         if (!r.avatar.group.visible) continue;
         const to = this.tmpV.copy(r.avatar.group.position);
         to.y += 1.2;
@@ -2429,7 +3074,7 @@ export class Game {
         const dot = to.normalize().dot(fwd);
         if (dot > best) {
           best = dot;
-          target = { name: r.name, health: null };
+          target = { name: "name" in r ? r.name : r.label, health: null };
         }
       }
       for (const a of this.herd.list().values()) {
@@ -2444,9 +3089,30 @@ export class Game {
           target = { name: this.herd.nameOf(a), health: a.health };
         }
       }
+      /* Otherwise something built, close enough to swing at: how much of it is left. */
+      if (!target && !this.ride) {
+        const item = this.itemAt(this.body, 8, false);
+        if (item) {
+          const def = CATALOGUE[item.kind];
+          const owner = this.world?.islands.get(this.itemPlot.get(item.id) ?? -1)?.info.plot;
+          const whose = owner ? (owner.mine ? "Your" : `${owner.owner}'s`) : "";
+          const fire = this.blazes.get(item.id)?.burning ? " · on fire" : "";
+          target =
+            item.hp > 0
+              ? {
+                  name: `${whose} ${def.name.toLowerCase()}${fire}`,
+                  health: Math.max(1, Math.round((item.hp / def.health) * 100)),
+                }
+              : { name: `${whose} ${def.name.toLowerCase()} · rubble`, health: null };
+        }
+      }
     }
     const prompt = playing && this.focus ? this.focus.label : null;
     const held = heldTool(this.inv);
+    const ownItem = playing && this.focus?.kind === "item" ? this.built.get(this.focus.id) : null;
+    const armed = !!ownItem && this.sellArmed?.id === ownItem.id && now < this.sellArmed.until;
+    const mend = ownItem ? repairCost(ownItem.kind, ownItem.hp) : 0;
+    const bucket = held && TOOLS[held.kind].weapon === "bucket";
 
     this.onHud({
       mode: this.mode,
@@ -2470,29 +3136,67 @@ export class Game {
       locked: this.touch || this.input.locked || this.forceActive,
       inv: this.inventoryView(),
       panel: this.panel,
-      hint: this.flying
-        ? "Space up · Shift down · double-tap W to rush · double-tap Space to drop"
-        : this.ride
-          ? this.rideHint(this.ride)
-          : held
-            ? def.hint
-            : null,
+      hint: this.placing
+        ? this.touch
+          ? "Aim to move it · Turn · Place · Cancel"
+          : "Click to place · R or wheel turns it · hold Shift for fine steps · right-click to cancel"
+        : ownItem
+          ? ownItem.hp <= 0
+            ? armed
+              ? "X again to clear the rubble"
+              : "X clear the rubble away"
+            : `${mend ? `R mend for ◎ ${mend} · ` : ""}${
+                armed
+                  ? `X again to sell for ◎ ${resale(ownItem.kind)}`
+                  : `X sell for ◎ ${resale(ownItem.kind)}`
+              }`
+          : this.flying
+            ? "Space up · Shift down · double-tap W to rush · double-tap Space to drop"
+            : this.ride
+              ? this.rideHint(this.ride)
+              : held
+                ? bucket && !this.water
+                  ? "Your bucket is empty · fill it in the sea or at a well"
+                  : def.hint
+                : null,
       banner: this.banner && now - this.banner.at < 4 ? this.banner : null,
       economy: FEATURES.board,
       guild: this.guildView(now),
-      shop: this.panel === "shop" ? this.shopView() : [],
-      nearShop: this.nearShop(),
-      chest: this.chestView(),
-      build: this.buildView(),
       charge:
         this.chargeStart !== null && def.charge
           ? Math.min(1, (now - this.chargeStart) / def.charge.max)
+          : null,
+      ranged: playing && !!(def.ranged || def.throws) && (!this.ride || this.ride.seat > 0),
+      hull: this.hullView(),
+      guns:
+        playing && this.ride?.seat === 0 && gunsOf(this.ride.kind)
+          ? {
+              port: Math.max(0, this.broadsideAt[0] - now),
+              starboard: Math.max(0, this.broadsideAt[1] - now),
+            }
           : null,
       blocking: this.blocking,
       hitMarker: this.hitMarker,
       hitText: this.hitText,
       prompt,
       target,
+      placing: playing ? this.placingView() : null,
+      ownItem: !!ownItem,
+      repair: mend > 0 ? mend : null,
+      raid:
+        playing && this.raiding !== null
+          ? (this.world?.islands.get(this.raiding)?.info.name ?? null)
+          : null,
+      besieged: this.myPlot ? (this.plotStates.get(this.myPlot.id)?.raiders ?? 0) : 0,
+      capture: playing ? this.captureView() : null,
+      alarm: this.alarm && now - this.alarm.at < 7 ? this.alarm : null,
+      crew: this.myCrew.men.length
+        ? {
+            order: this.myCrew.order,
+            men: this.myCrew.men.length,
+            down: this.myCrew.men.filter((c) => c.down).length,
+          }
+        : null,
     });
   }
 }

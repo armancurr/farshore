@@ -15,15 +15,6 @@ import { packMaterial } from "./packs";
 const charUrl = (c: CharacterId) => `/models/characters/${c}.glb`;
 const textureUrl = (name: string) => `/models/characters/${name}.png`;
 export const PLAYER_ANIMS = "/models/anims/player.glb";
-/* KayKit's ranged set, as it comes: the bow and spell clips are taken from it. */
-const RANGED_ANIMS = "/models/anims/combat-ranged.glb";
-const RANGED_CLIPS = new Set([
-  "Ranged_Bow_Idle",
-  "Ranged_Bow_Draw",
-  "Ranged_Bow_Release",
-  "Ranged_Magic_Raise",
-  "Ranged_Magic_Shoot",
-]);
 
 /*
  * How much the KayKit rig is scaled to make a person PLAYER_HEIGHT tall. The
@@ -128,16 +119,40 @@ export type ClipHalves = { lower: THREE.AnimationClip; upper: THREE.AnimationCli
 
 let clips: Promise<Map<string, ClipHalves>> | null = null;
 
+/*
+ * More of the rig's clips, from KayKit's own sets as they come: drawing and
+ * loosing a bow, a crossbow's shot, a spell raised and cast, and a throw.
+ * Only the ones named are kept; without a set (it failed to load), what
+ * would use it just swings like the rest.
+ */
+const EXTRA_ANIMS: [string, readonly string[]][] = [
+  [
+    "/models/anims/combat-ranged.glb",
+    [
+      "Ranged_Bow_Draw",
+      "Ranged_Bow_Release",
+      "Ranged_Bow_Idle",
+      "Ranged_Bow_Aiming_Idle",
+      "Ranged_2H_Aiming",
+      "Ranged_2H_Shoot",
+      "Ranged_Magic_Raise",
+      "Ranged_Magic_Shoot",
+    ],
+  ],
+  ["/models/anims/general.glb", ["Throw"]],
+];
+
 export function playerClips(): Promise<Map<string, ClipHalves>> {
   if (!clips) {
-    /* Without the ranged set (it failed to load), bows and wands just swing like the rest. */
-    const ranged = loadModel(RANGED_ANIMS).then(
-      (gltf) => gltf.animations.filter((c) => RANGED_CLIPS.has(c.name)),
-      () => [] as THREE.AnimationClip[],
+    const extras = EXTRA_ANIMS.map(([url, names]) =>
+      loadModel(url).then(
+        (gltf) => gltf.animations.filter((a) => names.includes(a.name)),
+        () => [] as THREE.AnimationClip[],
+      ),
     );
-    clips = Promise.all([loadModel(PLAYER_ANIMS), ranged]).then(([gltf, extra]) => {
+    clips = Promise.all([loadModel(PLAYER_ANIMS), ...extras]).then(([gltf, ...more]) => {
       const out = new Map<string, ClipHalves>();
-      for (const clip of [...gltf.animations, ...extra]) {
+      for (const clip of [...gltf.animations, ...more.flat()]) {
         /* Scale never changes on this rig (player.glb has it stripped already). */
         const tracks = clip.tracks.filter((t) => !t.name.endsWith(".scale"));
         const lower = tracks.filter((t) => LOWER.has(t.name.split(".")[0]));

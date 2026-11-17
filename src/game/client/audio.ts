@@ -21,6 +21,8 @@ export class TideAudio {
   private motorOscillator: OscillatorNode | null = null;
   private motorGain: GainNode | null = null;
   private motorFilter: BiquadFilterNode | null = null;
+  /* The crackle of fires nearby: a loop of pops and hiss, louder the nearer the flames. */
+  private fireGain: GainNode | null = null;
 
   get isMuted() {
     return this.muted;
@@ -105,6 +107,127 @@ export class TideAudio {
     this.motorOscillator = null;
     this.motorGain = null;
     this.motorFilter = null;
+    this.fireGain = null;
+  }
+
+  /*
+   * Fires nearby, 0 (none) to 1 (standing in one). The loop is made once:
+   * two seconds of sparse pops and snaps over a low roar, played on repeat.
+   */
+  crackle(level: number) {
+    const ctx = this.ctx;
+    if (!ctx || (level <= 0 && !this.fireGain)) return;
+    if (!this.fireGain) {
+      const len = ctx.sampleRate * 2;
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      let roar = 0;
+      for (let i = 0; i < len; i++) {
+        roar = (roar + 0.04 * (Math.random() * 2 - 1)) / 1.04;
+        data[i] = roar * 2.2;
+      }
+      /* Pops: a few hundred little decaying clicks, some of them sharp snaps. */
+      for (let k = 0; k < 260; k++) {
+        const at = Math.floor(Math.random() * (len - 2000));
+        const snap = Math.random() < 0.12;
+        const amp = snap ? 0.9 : 0.15 + Math.random() * 0.35;
+        const decay = snap ? 0.0015 : 0.0006;
+        for (let i = 0; i < 1800; i++)
+          data[at + i] += (Math.random() * 2 - 1) * amp * Math.exp(-i * decay * 40);
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      const filter = ctx.createBiquadFilter();
+      filter.type = "highpass";
+      filter.frequency.value = 180;
+      this.fireGain = ctx.createGain();
+      this.fireGain.gain.value = 0;
+      src.connect(filter).connect(this.fireGain).connect(this.muffle);
+      src.start();
+    }
+    this.fireGain.gain.setTargetAtTime(Math.min(1, level) * 0.32, ctx.currentTime, 0.25);
+  }
+
+  /* Something built coming down: a deep crash, then the rubble settling. */
+  collapse(near = 1) {
+    const k = Math.max(0.1, near);
+    this.tone(60, 28, 0.6 * k, 0.01, 1.1, "triangle");
+    this.noiseBurst({
+      type: "lowpass",
+      freq: 700,
+      to: 90,
+      peak: 0.6 * k,
+      attack: 0.01,
+      decay: 1.4,
+      rate: 0.6,
+    });
+    for (const [i, at] of [140, 330, 520, 760].entries())
+      setTimeout(
+        () =>
+          this.noiseBurst({
+            type: "bandpass",
+            freq: 600 + i * 250,
+            to: 200,
+            q: 1.2,
+            peak: 0.22 * k,
+            attack: 0.004,
+            decay: 0.25,
+            rate: 1.3,
+          }),
+        at,
+      );
+  }
+
+  /* A blow on something built: a dry crack off timber, a dull knock and a chip of grit off stone. */
+  knock(stone: boolean, near = 1) {
+    const k = Math.max(0.12, near);
+    if (stone) {
+      this.tone(160, 90, 0.35 * k, 0.003, 0.14, "triangle");
+      this.noiseBurst({ type: "highpass", freq: 2400, peak: 0.16 * k, attack: 0.002, decay: 0.09 });
+      this.ring(2300, 0.025 * k, 0.08);
+    } else {
+      this.tone(130, 70, 0.32 * k, 0.003, 0.16, "triangle");
+      this.noiseBurst({
+        type: "bandpass",
+        freq: 1700,
+        to: 700,
+        q: 1.6,
+        peak: 0.35 * k,
+        attack: 0.002,
+        decay: 0.11,
+        rate: 1.6,
+      });
+    }
+  }
+
+  /* Water on flames: a long falling hiss. */
+  hiss(near = 1) {
+    const k = Math.max(0.1, near);
+    this.noiseBurst({
+      type: "highpass",
+      freq: 3800,
+      to: 1500,
+      peak: 0.3 * k,
+      attack: 0.02,
+      decay: 1.2,
+      rate: 2,
+    });
+    this.splash(0.5 * k);
+  }
+
+  /* Something catching: a soft rushing whoomph. */
+  ignite(near = 1) {
+    const k = Math.max(0.1, near);
+    this.noiseBurst({
+      type: "lowpass",
+      freq: 180,
+      to: 1400,
+      peak: 0.4 * k,
+      attack: 0.08,
+      decay: 0.5,
+      rate: 0.8,
+    });
   }
 
   /*
@@ -274,7 +397,7 @@ export class TideAudio {
     this.noiseBurst({ type: "lowpass", freq: 900, to: 200, peak: 0.3, attack: 0.005, decay: 0.3 });
   }
 
-  /* Something heavy set down: a placed prefab. */
+  /* Something heavy set down: a house, a wall, a tower on your land. */
   thud() {
     this.noiseBurst({
       type: "lowpass",
@@ -339,28 +462,6 @@ export class TideAudio {
 
   /* The whoosh of a swing: heavier weapons are lower and slower. */
   swing(kind: WeaponKind | null, heavy = false) {
-    const shot = kind ? weaponDef(kind).shot : undefined;
-    if (shot?.flies === "bolt") {
-      /* A spell: a falling zap with a hiss behind it. */
-      this.tone(980, 260, 0.16, 0.004, 0.22, "triangle");
-      this.noiseBurst({ type: "highpass", freq: 3000, peak: 0.08, attack: 0.01, decay: 0.2 });
-      return;
-    }
-    if (shot) {
-      /* A bowstring: a low twang and the whip of the arrow leaving. */
-      this.tone(190, 110, 0.22, 0.002, 0.18, "triangle");
-      this.noiseBurst({
-        type: "bandpass",
-        freq: 2200,
-        to: 5200,
-        q: 1.2,
-        peak: 0.12,
-        attack: 0.01,
-        decay: 0.1,
-        rate: 2,
-      });
-      return;
-    }
     const low = heavy || heftOf(kind) === "heavy";
     const quick = heftOf(kind) === "quick";
     this.noiseBurst({
@@ -390,6 +491,145 @@ export class TideAudio {
     });
     /* Edges ring; blunt heads and shields only thud. */
     if (kind && !weaponDef(kind).blunt) this.ring(1800, 0.06 * k, 0.12);
+  }
+
+  /* A bowstring let go: a low twang (a crossbow's is a hard clack), and the hiss of the shaft. */
+  loose(crossbow: boolean, near = 1) {
+    const k = Math.max(0.1, near);
+    if (crossbow) {
+      this.tone(220, 90, 0.3 * k, 0.002, 0.1, "square");
+      this.noiseBurst({ type: "highpass", freq: 1800, peak: 0.2 * k, attack: 0.002, decay: 0.06 });
+    } else this.tone(150, 110, 0.25 * k, 0.003, 0.22, "triangle");
+    this.noiseBurst({
+      type: "bandpass",
+      freq: 2600,
+      to: 5200,
+      q: 2,
+      peak: 0.1 * k,
+      attack: 0.01,
+      decay: 0.18,
+      rate: 2,
+    });
+  }
+
+  /* A spell cast: a falling zap with a hiss behind it. */
+  zap(near = 1) {
+    const k = Math.max(0.1, near);
+    this.tone(980, 260, 0.16 * k, 0.004, 0.22, "triangle");
+    this.noiseBurst({ type: "highpass", freq: 3000, peak: 0.08 * k, attack: 0.01, decay: 0.2 });
+  }
+
+  /* An arrow striking home: a dull thock in timber or flesh, a dry tick off stone, a plip in the sea. */
+  thock(on: "soft" | "hard" | "water", near = 1) {
+    const k = Math.max(0.08, near);
+    if (on === "water") {
+      this.splash(0.25 * k);
+      return;
+    }
+    if (on === "hard") {
+      this.noiseBurst({ type: "highpass", freq: 3000, peak: 0.12 * k, attack: 0.001, decay: 0.05 });
+      this.ring(2600, 0.02 * k, 0.06);
+      return;
+    }
+    this.tone(180, 90, 0.25 * k, 0.002, 0.09, "triangle");
+    this.noiseBurst({
+      type: "bandpass",
+      freq: 900,
+      q: 2,
+      peak: 0.12 * k,
+      attack: 0.001,
+      decay: 0.06,
+    });
+  }
+
+  /* A gun going off: a hard crack, then the boom rolling away. Further off it's mostly the boom. */
+  cannon(near = 1) {
+    const k = Math.max(0.06, near);
+    this.noiseBurst({
+      type: "lowpass",
+      freq: 2400,
+      to: 300,
+      peak: 0.5 * k * k,
+      attack: 0.002,
+      decay: 0.25,
+    });
+    this.tone(70, 32, 0.6 * k, 0.004, 0.9, "triangle");
+    this.noiseBurst({
+      type: "lowpass",
+      freq: 500,
+      to: 80,
+      peak: 0.45 * k,
+      attack: 0.01,
+      decay: 1.6,
+      rate: 0.5,
+    });
+  }
+
+  /* A siege engine's arm swinging up and over: a creak and a whoosh. */
+  heave(near = 1) {
+    const k = Math.max(0.06, near);
+    this.tone(90, 140, 0.15 * k, 0.05, 0.3, "sawtooth");
+    this.noiseBurst({
+      type: "bandpass",
+      freq: 300,
+      to: 1400,
+      q: 1,
+      peak: 0.25 * k,
+      attack: 0.15,
+      decay: 0.35,
+      rate: 0.8,
+    });
+  }
+
+  /* A keg going up: a deep blast and the debris coming down after it. */
+  blast(near = 1) {
+    const k = Math.max(0.05, near);
+    this.noiseBurst({
+      type: "lowpass",
+      freq: 3000,
+      to: 200,
+      peak: 0.7 * k,
+      attack: 0.002,
+      decay: 0.5,
+    });
+    this.tone(55, 24, 0.8 * k, 0.005, 1.4, "triangle");
+    this.noiseBurst({
+      type: "lowpass",
+      freq: 400,
+      to: 60,
+      peak: 0.6 * k,
+      attack: 0.02,
+      decay: 2.2,
+      rate: 0.4,
+    });
+    for (const [i, at] of [350, 600, 900].entries())
+      setTimeout(
+        () =>
+          this.noiseBurst({
+            type: "bandpass",
+            freq: 900 + i * 300,
+            to: 300,
+            q: 1.2,
+            peak: 0.15 * k,
+            attack: 0.004,
+            decay: 0.2,
+            rate: 1.3,
+          }),
+        at,
+      );
+  }
+
+  /* A fuse spitting: a short sizzle, called again and again while it burns. */
+  sizzle(near = 1) {
+    const k = Math.max(0.05, near);
+    this.noiseBurst({
+      type: "highpass",
+      freq: 4200,
+      peak: 0.09 * k,
+      attack: 0.01,
+      decay: 0.12,
+      rate: 2,
+    });
   }
 
   /* Steel on a shield. */
@@ -427,6 +667,27 @@ export class TideAudio {
     ]) {
       this.tone(freq * mul, freq * mul * 0.995, peak * amp, 0.002, decay);
     }
+  }
+
+  /*
+   * The alarm: a bronze bell rung three times, its partials inharmonic as a
+   * real bell's (hum, prime, tierce, quint, nominal), each dying slowly.
+   */
+  bell(times = 3) {
+    for (let k = 0; k < times; k++)
+      setTimeout(() => {
+        for (const [mul, amp, decay] of [
+          [0.5, 0.22, 3.2],
+          [1, 0.26, 2.6],
+          [1.183, 0.16, 2.2],
+          [1.506, 0.1, 1.8],
+          [2, 0.14, 1.6],
+          [2.514, 0.06, 1.1],
+          [3.011, 0.04, 0.8],
+        ])
+          this.tone(392 * mul, 392 * mul * 0.998, amp, 0.004, decay);
+        this.noiseBurst({ type: "highpass", freq: 3000, peak: 0.08, attack: 0.001, decay: 0.05 });
+      }, k * 700);
   }
 
   /* A bounty paid out. */
