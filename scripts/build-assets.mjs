@@ -17,6 +17,7 @@ import { ALL_EXTENSIONS, EXTMeshoptCompression } from "@gltf-transform/extension
 import { dedup, getBounds, meshopt, prune, quantize, reorder } from "@gltf-transform/functions";
 import { MeshoptEncoder } from "meshoptimizer";
 import sharp from "sharp";
+import { buildLiveries, buildPlayerAnims } from "./characters.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const SRC = join(ROOT, "assets-src");
@@ -223,6 +224,9 @@ const fresh = (pack) => {
     join(OUT, "characters/skeleton.png"),
   );
 
+  /* Recoloured copies of those textures, for the skins. */
+  counts.liveries = await buildLiveries(join(OUT, "characters"));
+
   /* The shared animation set: every clip on the medium rig, meshes dropped. */
   const anim = join(
     SRC,
@@ -236,6 +240,18 @@ const fresh = (pack) => {
       meshless: true,
     });
   counts.anims = gltfs(anim).length;
+
+  /* And the clips the players play, gathered into one file with a swim and a drive added. */
+  const player = await buildPlayerAnims(
+    io,
+    anim,
+    join(SRC, "ual/Universal Animation Library[Standard]/Unreal-Godot/UAL1_Standard.glb"),
+  );
+  await player.transform(dedup(), prune({ keepLeaves: true }));
+  player.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({
+    method: EXTMeshoptCompression.EncoderMethod.QUANTIZE,
+  });
+  await io.write(join(OUT, "anims/player.glb"), player);
 }
 
 /* Weapons and tools: KayKit weapon bits, the adventurers' and skeletons' arms, and the tool bits. */
@@ -501,6 +517,8 @@ writeFileSync(
   forest, characters, anims, weapons, gear, tools
     KayKit by Kay Lousberg (kaylousberg.itch.io): Forest Nature Pack, Adventurers,
     Skeletons, Character Animations, Fantasy Weapons Bits, RPG Tools Bits.
+  anims/player.glb (swim, drive, sit)
+    Universal Animation Library by Quaternius (quaternius.com), moved onto the KayKit rig.
   boats, ships, cars, camp, coast, town
     Kenney (kenney.nl): Watercraft Kit, Pirate Kit, Car Kit, Survival Kit, Fantasy Town Kit.
   animals

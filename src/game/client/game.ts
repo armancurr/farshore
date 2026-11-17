@@ -41,7 +41,7 @@ import {
   type Verdict,
 } from "../shared/prefabs";
 import { SHOP, SHOP_REACH } from "../shared/shop";
-import { canWear, type SkinId } from "../shared/skins";
+import { canWear, type SkinId, skinDef } from "../shared/skins";
 import type { VehicleKind } from "../shared/vehicles";
 import { Archipelago } from "../shared/archipelago";
 import type { IslandInfo } from "../shared/islands";
@@ -80,6 +80,7 @@ import {
   WsConnection,
 } from "./net";
 import { Avatar } from "./scene/avatars";
+import { preloadCharacters } from "./scene/characters";
 import { BoatView } from "./scene/boats";
 import { BikeView } from "./scene/bikes";
 import { HerdView } from "./scene/herd";
@@ -232,6 +233,21 @@ type Sample = {
   pitch: number;
   flags: number;
 };
+type DevAvatarSpec = {
+  skin: SkinId;
+  x: number;
+  y: number;
+  z: number;
+  yaw?: number;
+  pitch?: number;
+  flags?: number;
+  vx?: number;
+  vz?: number;
+  weapon?: WeaponKind | null;
+  stagger?: number;
+  name?: string;
+};
+
 type Remote = { avatar: Avatar; buf: Sample[]; name: string; skin: SkinId };
 
 /* One island as drawn: its meshes, its props, and its picture for the map. */
@@ -426,6 +442,54 @@ export class Game {
   /* Dev/test only: hold the camera at a fixed spot (x, y, z, yaw, pitch in radians), or null to let go. */
   devCamera: { x: number; y: number; z: number; yaw: number; pitch: number } | null = null;
 
+  /*
+   * Dev/test only: a stand-in player to look at, holding still flags and
+   * gliding at (vx, vz) m/s, back to its start every three seconds. `strike`
+   * swings, `hurt` flinches; null clears them all.
+   */
+  private devAvatars: { avatar: Avatar; spec: DevAvatarSpec; t: number }[] = [];
+  devAvatar(spec: DevAvatarSpec | null) {
+    if (!spec) {
+      for (const d of this.devAvatars) {
+        this.scene.remove(d.avatar.group);
+        d.avatar.dispose();
+      }
+      this.devAvatars = [];
+      return null;
+    }
+    const avatar = new Avatar(-1 - this.devAvatars.length, spec.name ?? "Stand-in", spec.skin);
+    avatar.setGear(spec.weapon ?? null, spec.stagger ?? 0);
+    this.scene.add(avatar.group);
+    const d = { avatar, spec, t: 0 };
+    this.devAvatars.push(d);
+    return {
+      strike: (heavy = false) => avatar.strike(heavy),
+      hurt: () => avatar.hurt(),
+      set: (more: Partial<DevAvatarSpec>) => {
+        Object.assign(spec, more);
+        if (more.skin) avatar.setSkin(more.skin);
+        avatar.setGear(spec.weapon ?? null, spec.stagger ?? 0);
+      },
+    };
+  }
+
+  private updateDevAvatars(dt: number) {
+    for (const d of this.devAvatars) {
+      const s = d.spec;
+      d.t = (d.t + dt) % 3;
+      d.avatar.setPose(
+        s.x + (s.vx ?? 0) * d.t,
+        s.y,
+        s.z + (s.vz ?? 0) * d.t,
+        s.yaw ?? 0,
+        s.pitch ?? 0,
+        s.flags ?? FLAG.alive | FLAG.grounded,
+        dt,
+        this.camera.position,
+      );
+    }
+  }
+
   /* Dev/test only: treat input as live without pointer lock. */
   get forceActive() {
     return this.forced;
@@ -469,6 +533,7 @@ export class Game {
 
     if (mode === "online") {
       this.herd.preload();
+      preloadCharacters([skinDef(this.skin).character]);
       const base = serverBase();
       if (!base) {
         this.input.unlock();
@@ -798,7 +863,7 @@ export class Game {
       case "swing":
         if (msg.by !== this.myId) {
           const r = this.remotes.get(msg.by);
-          r?.avatar.strike();
+          r?.avatar.strike(msg.heavy);
           const s = r?.buf[r.buf.length - 1];
           if (s && this.distanceTo(s.x, s.z) < 20) this.audio.swing(msg.kind, msg.heavy);
         }
@@ -1109,6 +1174,7 @@ export class Game {
       return;
     }
     const target = this.remotes.get(msg.target);
+    if (!msg.blocked && !msg.parry) target?.avatar.hurt();
     const s = target?.buf[target.buf.length - 1];
     if (!s) return;
     const near = 1 - this.distanceTo(s.x, s.z) / 30;
@@ -1182,6 +1248,7 @@ export class Game {
     });
     this.hitMarker = Math.max(0, this.hitMarker - dt * 2.2);
     this.updateRemotes(dt);
+    if (this.devAvatars.length) this.updateDevAvatars(dt);
     this.herd.update(dt, this.camera.position);
     this.built.update(t);
     this.boats.update(t, dt);
