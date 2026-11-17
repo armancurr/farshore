@@ -4,6 +4,7 @@ import { KIT_IDS, type KitId } from "../../shared/items";
 import { localBlocks, type Prefab } from "../../shared/prefabs";
 import type { Block } from "../../shared/structures";
 import { compose } from "./batch";
+import { buildDesertBike } from "./bikes";
 import { InstancedModel, type Part } from "./instanced";
 import { edges, flatten } from "./materials";
 
@@ -197,6 +198,16 @@ class Ghost {
   }
 
   private build(kind: KitId) {
+    if (kind === "desertbike") {
+      const bike = buildDesertBike();
+      bike.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).material = this.fill;
+        else if ((o as THREE.LineSegments).isLineSegments)
+          (o as THREE.LineSegments).material = this.line;
+        o.renderOrder = 4;
+      });
+      return bike;
+    }
     const fills: THREE.BufferGeometry[] = [];
     const lines: THREE.BufferGeometry[] = [];
     for (const parts of partsOf(kind).values()) {
@@ -312,7 +323,7 @@ export class PrefabView {
     this.dirty = false;
     /* Rebuild the instance lists only when something was built or taken down. */
     for (const kind of KIT_IDS) {
-      if (kind === "rowboat") continue;
+      if (kind === "rowboat" || kind === "desertbike") continue;
       let n = 0;
       for (const p of this.prefabs.values()) {
         if (p.kind !== kind) continue;

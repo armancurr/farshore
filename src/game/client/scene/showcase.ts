@@ -3,6 +3,7 @@ import type { SkinId } from "../../shared/skins";
 import type { VehicleKind } from "../../shared/vehicles";
 import type { WeaponKind } from "../../shared/weapons";
 import { buildRowboat } from "./boats";
+import { buildDesertBike } from "./bikes";
 import { edges, flatten, inkMaterial, lineMaterial } from "./materials";
 import { buildRig, disposeRig, type Rig } from "./skins";
 import { buildWeapon, WEAPON_SPAN } from "./weapons";
@@ -57,6 +58,12 @@ function displayWeapon(kind: WeaponKind) {
 function displayVehicle(kind: VehicleKind) {
   const root = new THREE.Group();
   switch (kind) {
+    case "desertbike": {
+      const bike = buildDesertBike();
+      bike.scale.setScalar(0.78);
+      root.add(bike);
+      break;
+    }
     case "rowboat": {
       const boat = buildRowboat();
       /* Oar tip to oar tip it's nearly six metres; the plinth is two across. */
