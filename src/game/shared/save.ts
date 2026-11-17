@@ -11,7 +11,7 @@ import {
 } from "./items";
 import { parseMission, parsePayouts } from "./missions";
 import { isSkinId, type SkinId } from "./skins";
-import { migrateKind, type VehicleKind } from "./vehicles";
+import { migrateKind, VEHICLES, type VehicleKind } from "./vehicles";
 
 /*
  * What an online host stores: everyone who's been on the grand map, and what
@@ -100,7 +100,22 @@ function inventory(v: unknown): Inventory | null {
     mission,
     payouts: parsePayouts(v.payouts),
     bed,
+    vehicles: ownedVehicles(v.vehicles),
   };
+}
+
+/*
+ * The vehicles someone has bought. Older saves have none (everything was
+ * free then); anything since retired, or now in the free tier, is dropped.
+ */
+function ownedVehicles(v: unknown): VehicleKind[] {
+  if (!Array.isArray(v)) return [];
+  const out: VehicleKind[] = [];
+  for (const k of v) {
+    const kind = migrateKind(k);
+    if (kind && VEHICLES[kind].tier !== "free" && !out.includes(kind)) out.push(kind);
+  }
+  return out;
 }
 
 /*
@@ -125,7 +140,7 @@ function vehicle(v: Obj): SavedVehicle | null {
   }
   if (id(v.boat))
     return {
-      kind: "rowboat",
+      kind: "skiff",
       x: v.x as number,
       y: 0,
       z: v.z as number,

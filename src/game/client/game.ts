@@ -83,10 +83,12 @@ import {
   COMBO_WINDOW,
   DAZE_SPEED,
   guardOf,
+  shotOf,
   type WeaponKind,
   weaponDef,
   weaponFromIndex,
 } from "../shared/weapons";
+import { setPurse } from "./arsenal";
 import { TideAudio } from "./audio";
 import { Input } from "./input";
 import { drawRoutes, islandImage, type MapView } from "./map";
@@ -111,6 +113,7 @@ import { PostPass } from "./scene/post";
 import { WorldProps } from "./scene/props";
 import { Clouds } from "./scene/clouds";
 import { NO_CAST, SunShadows } from "./scene/shadows";
+import { Shots } from "./scene/shots";
 import { Sky } from "./scene/sky";
 import { enclosed, stateFrom, VehicleView } from "./scene/vehicles";
 import { ViewModel } from "./scene/weapons";
@@ -321,6 +324,8 @@ export class Game {
   private shadows = new SunShadows();
   private audio = new TideAudio();
   private viewmodel = new ViewModel();
+  /* Arrows and bolts in flight. */
+  private shots = new Shots();
   private world: World | null = null;
   private conn: Connection | null = null;
   private mode: Mode = "attract";
@@ -476,6 +481,7 @@ export class Game {
     this.scene.add(this.herd.group);
     this.scene.add(this.built.group);
     this.scene.add(this.vehicles.group);
+    this.scene.add(this.shots.group);
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
@@ -610,6 +616,7 @@ export class Game {
     this.down = null;
     this.health = HEALTH_MAX;
     this.inv = emptyInventory();
+    setPurse(0, []);
     this.panel = null;
     this.focus = null;
     this.herd.clear();
@@ -659,9 +666,19 @@ export class Game {
     return !!this.body && this.conn?.kind === "online";
   }
 
-  /* Put a vehicle from the marketplace in the water nearby, in place of the last one. */
+  /* Put a vehicle you own in the water nearby, in place of the last one. */
   spawnVehicle(kind: VehicleKind) {
     if (this.canSpawn) this.conn?.send({ t: "spawn", kind });
+  }
+
+  /* Whether the marketplace can sell you anything: only out in the world, where coins are kept. */
+  get canBuy(): boolean {
+    return this.conn?.kind === "online";
+  }
+
+  /* Buy a vehicle with coins; the room answers with your inventory (or says what's short). */
+  buyVehicle(kind: VehicleKind) {
+    if (this.canBuy) this.conn?.send({ t: "buyVehicle", kind });
   }
 
   /* Everything the grand map shows, as it is right now. */
@@ -748,6 +765,7 @@ export class Game {
     this.self = null;
     this.audio.close();
     this.viewmodel.dispose();
+    this.shots.dispose();
     this.herd.dispose();
     this.built.dispose();
     this.vehicles.dispose();
@@ -846,7 +864,11 @@ export class Game {
         if (this.mode === "online") {
           this.pushFeed(`You are ${msg.name}`);
           if (readWeapon() === undefined)
-            this.pushFeed("Choose a weapon in the marketplace. The Harbor is safe ground");
+            this.pushFeed(
+              this.touch
+                ? "Get a weapon in the Marketplace, then draw it from your Arsenal. The Harbor is safe ground"
+                : "Get a weapon in the Marketplace (K), then draw it with Q. The Harbor is safe ground",
+            );
         }
         break;
       case "full":
@@ -914,7 +936,10 @@ export class Game {
         this.dazeUntil = performance.now() / 1000 + msg.seconds;
         this.pushFeed("You're dazed");
         break;
-      case "swing":
+      case "swing": {
+        /* Yours too: the room has picked what it hits, and how far it flies. */
+        const shot = shotOf(msg.kind);
+        if (shot && msg.shot) this.shots.fire(shot, msg.shot);
         if (msg.by !== this.myId) {
           const r = this.remotes.get(msg.by);
           r?.avatar.strike(msg.heavy);
@@ -922,11 +947,13 @@ export class Game {
           if (s && this.distanceTo(s.x, s.z) < 20) this.audio.swing(msg.kind, msg.heavy);
         }
         break;
+      }
       case "hit":
         this.onHit(msg);
         break;
       case "inv":
         this.inv = msg.inv;
+        setPurse(msg.inv.coins, msg.inv.vehicles);
         break;
       case "board":
         this.board = msg.board;
@@ -1470,6 +1497,7 @@ export class Game {
     this.updateRemotes(dt);
     if (this.devAvatars.length) this.updateDevAvatars(dt);
     this.herd.update(dt, this.camera.position);
+    this.shots.update(dt);
     this.built.update(t);
     this.sky.follow(this.camera);
     this.clouds.update(this.worldTime(), this.camera.position);

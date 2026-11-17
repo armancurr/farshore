@@ -113,7 +113,18 @@ export type ServerMsg =
   | { t: "daze"; seconds: number }
   | { t: "impulse"; vx: number; vy: number; vz: number }
   | ({ t: "respawn" } & Spawn)
-  | { t: "swing"; by: number; kind: WeaponKind | null; heavy: boolean }
+  | {
+      t: "swing";
+      by: number;
+      kind: WeaponKind | null;
+      heavy: boolean;
+      /*
+       * A bow or a spell: what was loosed, from where, which way (a unit
+       * vector) and how far it flies before it strikes something or the
+       * ground, or runs out of reach.
+       */
+      shot?: { x: number; y: number; z: number; dx: number; dy: number; dz: number; dist: number };
+    }
   | {
       t: "hit";
       by: number;
@@ -153,8 +164,10 @@ export type ClientMsg =
   | { t: "skin"; skin: SkinId }
   /* Take up a weapon from the marketplace, in place of the one you carry (null: put it away). */
   | { t: "arm"; kind: WeaponKind | null }
-  /* Put a vehicle from the marketplace in the water or on the ground nearby, in place of your last one. */
+  /* Put a vehicle you own in the water or on the ground nearby, in place of your last one. */
   | { t: "spawn"; kind: VehicleKind }
+  /* Buy a vehicle from the marketplace with coins: yours to spawn from then on. */
+  | { t: "buyVehicle"; kind: VehicleKind }
   | {
       t: "move";
       x: number;
@@ -261,6 +274,8 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     }
     case "spawn":
       return isVehicleKind(m.kind) ? { t: "spawn", kind: m.kind } : null;
+    case "buyVehicle":
+      return isVehicleKind(m.kind) ? { t: "buyVehicle", kind: m.kind } : null;
     case "attack":
       return { t: "attack", charge: finite(m.charge, 10) ? Math.max(0, m.charge) : 0 };
     case "stance":

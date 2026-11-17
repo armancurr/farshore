@@ -129,7 +129,7 @@ test("a car drives off the quay, along the deck and out to the end of a pier", (
   const sz = Math.cos(d.rot);
   /* On the quay, facing out to sea (a car's forward is -z in its own frame). */
   const v = createVehicle(pier.quay.x, DECK, pier.quay.z, Math.atan2(-sx, -sz));
-  const spec = VEHICLES.sedan.car;
+  const spec = VEHICLES.coupe.car;
   for (let i = 0; i < 60 * 6; i++)
     stepCar(
       v,
@@ -149,7 +149,7 @@ test("a boat launched on a pier is tied up in a berth alongside, bow to the sea"
   const t = world.islands.get(HARBOR_ID).terrain;
   const pier = piersOf(t)[1];
   const d = pier.deck;
-  /* Two people on the quay each launch a brigantine there. */
+  /* Two people on the quay each launch a day cruiser there. */
   const ships = [];
   for (let k = 0; k < 2; k++) {
     const messages = [];
@@ -167,22 +167,24 @@ test("a boat launched on a pier is tied up in a berth alongside, bow to the sea"
       vz: 0,
       flags: 0,
     });
-    room.handle(id, { t: "spawn", kind: "brigantine" });
+    room.members.get(id).inv.coins = VEHICLES.daycruiser.price;
+    room.handle(id, { t: "buyVehicle", kind: "daycruiser" });
+    room.handle(id, { t: "spawn", kind: "daycruiser" });
     room.tick();
     const feed = messages.filter((m) => m.t === "feed").map((m) => m.text);
     assert(feed.at(-1).includes("tied up at the pier"), feed.join(" | "));
     const mine = messages
       .findLast((m) => m.t === "snap")
       .v.map(unpackVehicle)
-      .filter((v) => vehicleFromIndex(v.index) === "brigantine")
+      .filter((v) => vehicleFromIndex(v.index) === "daycruiser")
       .find((v) => !ships.some((s) => s.id === v.id));
-    assert(mine, "a brigantine in the snapshot");
+    assert(mine, "a day cruiser in the snapshot");
     ships.push(mine);
   }
   for (const { state: ship } of ships) {
     /* Beside the deck, not on it, heading out along the pier. */
     const lx = (ship.x - d.x) * Math.cos(d.rot) - (ship.z - d.z) * Math.sin(d.rot);
-    const beam = VEHICLES.brigantine.beam;
+    const beam = VEHICLES.daycruiser.beam;
     assert(Math.abs(lx) > d.hx && Math.abs(lx) < d.hx + beam, `alongside (${lx.toFixed(2)})`);
     const fx = -Math.sin(ship.rot);
     const fz = -Math.cos(ship.rot);
@@ -193,7 +195,7 @@ test("a boat launched on a pier is tied up in a berth alongside, bow to the sea"
   const along = (a.x - b.x) * Math.sin(d.rot) + (a.z - b.z) * Math.cos(d.rot);
   const across = (a.x - b.x) * Math.cos(d.rot) - (a.z - b.z) * Math.sin(d.rot);
   assert(
-    Math.abs(along) >= VEHICLES.brigantine.length - 0.5 || Math.abs(across) > d.hx * 2,
+    Math.abs(along) >= VEHICLES.daycruiser.length - 0.5 || Math.abs(across) > d.hx * 2,
     `clear of each other (along ${along.toFixed(1)}, across ${across.toFixed(1)})`,
   );
 });

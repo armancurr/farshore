@@ -1,5 +1,6 @@
 import type { Contract, Payout } from "./missions";
 import { SPECIES, SPECIES_IDS, type SpeciesId } from "./species";
+import type { VehicleKind } from "./vehicles";
 import { toWeaponKind, WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
@@ -107,6 +108,8 @@ export type Inventory = {
   payouts: Payout[];
   /* The bed you last slept in or set down: where you wake after blacking out. */
   bed: number | null;
+  /* Vehicles bought from the marketplace, in the order bought. The free tier isn't listed: it's everyone's. */
+  vehicles: VehicleKind[];
 };
 
 export function emptyInventory(): Inventory {
@@ -119,6 +122,7 @@ export function emptyInventory(): Inventory {
     mission: null,
     payouts: [],
     bed: null,
+    vehicles: [],
   };
 }
 

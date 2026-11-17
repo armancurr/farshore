@@ -18,6 +18,7 @@ import { parseWorldSave, WORLD_SAVE_VERSION } from "../src/game/shared/save.ts";
 import {
   RIDER_HIP,
   VEHICLE_KINDS,
+  VEHICLE_TIERS,
   VEHICLES,
   vehicleFromIndex,
   vehicleIndex,
@@ -53,8 +54,8 @@ function ground(height = () => 2, solids = []) {
   };
 }
 
-/* The sedan: a sensible car to test the wheels with. */
-const SEDAN = VEHICLES.sedan.car;
+/* The touring SUV: the nearest to the old sedan's pace, a sensible car to test the wheels with. */
+const SEDAN = VEHICLES.touring.car;
 const car = (y = 2) => createVehicle(0, y, 0, 0);
 function drive(b, input, seconds, terrain = ground(), hz = 60, spec = SEDAN) {
   for (let i = 0; i < Math.round(seconds * hz); i++) stepCar(b, input, 1 / hz, terrain, spec);
@@ -63,11 +64,12 @@ function drive(b, input, seconds, terrain = ground(), hz = 60, spec = SEDAN) {
 /* ---------- the catalogue ---------- */
 
 test("every vehicle has a class, a model, seats and a spec for its class", () => {
-  assert(VEHICLE_KINDS.length >= 20);
+  assert(VEHICLE_KINDS.length >= 15);
   for (const kind of VEHICLE_KINDS) {
     const d = VEHICLES[kind];
     assert(d.seats.length >= 1, kind);
-    assert(d.price > 0 && d.name && d.blurb, kind);
+    assert(d.name && d.blurb && VEHICLE_TIERS.includes(d.tier), kind);
+    assert(d.tier === "free" ? d.price === 0 : d.price > 0, `${kind} costs coins unless free`);
     const spec = { row: d.hull, sail: d.hull, motor: d.hull, car: d.car, mount: d.mount }[d.class];
     assert(spec, `${kind} has a ${d.class} spec`);
     assert(vehicleFromIndex(vehicleIndex(kind)) === kind);
@@ -78,13 +80,19 @@ test("every vehicle has a class, a model, seats and a spec for its class", () =>
     }
   }
   /* Real-world sizes, roughly. */
-  assert(Math.abs(VEHICLES.rowboat.length - 3.6) < 0.1);
-  assert(Math.abs(VEHICLES.pirate_sloop.length - 11) < 0.1);
-  assert(VEHICLES.pirate_galleon.length >= 25);
-  assert(VEHICLES.sedan.length > 3.8 && VEHICLES.sedan.length < 4.6);
+  assert(Math.abs(VEHICLES.skiff.length - 4.3) < 0.1);
+  assert(VEHICLES.galleon.length >= 25 && VEHICLES.liner.length >= 35);
+  assert(VEHICLES.coupe.length > 3.8 && VEHICLES.coupe.length < 4.6);
+  assert(VEHICLES.kart.length > 2 && VEHICLES.kart.length < 2.6);
   /* Ships carry a crew. */
-  for (const k of ["pirate_sloop", "pirate_brig", "pirate_galleon", "trading_sloop", "galleon"])
-    assert(VEHICLES[k].seats.length >= 3, k);
+  for (const k of ["galleon", "liner"]) assert(VEHICLES[k].seats.length >= 3, k);
+  /* Premium costs more than anything cheap. */
+  const priced = (tier) =>
+    VEHICLE_KINDS.filter((k) => VEHICLES[k].tier === tier).map((k) => VEHICLES[k].price);
+  assert(Math.max(...priced("cheap")) < Math.min(...priced("premium")));
+  /* Something free for the land, and something free for the water. */
+  const free = VEHICLE_KINDS.filter((k) => VEHICLES[k].tier === "free");
+  assert(free.some((k) => VEHICLES[k].class === "car") && free.some((k) => VEHICLES[k].hull));
   /* The hand-built ones are gone. */
   assert(!("desertbike" in VEHICLES));
 });
@@ -100,8 +108,8 @@ test("a rider's avatar sits RIDER_HIP below the seat, which tilts with the vehic
   const level = seatWorld("galleon", { ...v, rot: 0 }, 1);
   const heeled = seatWorld("galleon", { ...v, rot: 0, roll: -0.2 }, 1);
   assert(VEHICLES.galleon.seats[1].x < 0 && heeled.y > level.y);
-  assert.equal(distanceTo("sedan", createVehicle(0, 0, 0, 0), 0, 0), 0);
-  assert(distanceTo("sedan", createVehicle(0, 0, 0, 0), 5, 0) > 3);
+  assert.equal(distanceTo("coupe", createVehicle(0, 0, 0, 0), 0, 0), 0);
+  assert(distanceTo("coupe", createVehicle(0, 0, 0, 0), 5, 0) > 3);
 });
 
 /* ---------- cars ---------- */
@@ -470,8 +478,8 @@ test("getting out finds a dry, clear side", () => {
 
 const sea = () => ground(() => -10);
 
-test("a rowboat rows on water, pivots on its oars and runs aground in the shallows", () => {
-  const spec = VEHICLES.rowboat.hull;
+test("a skiff rows on water, pivots on its oars and runs aground in the shallows", () => {
+  const spec = VEHICLES.skiff.hull;
   const b = createVehicle(0, 0, 0, 0);
   for (let i = 0; i < 300; i++) stepHull(b, throttle, 1 / 60, sea(), spec, 0);
   assert(b.z < -10 && b.speed <= spec.speed + 1e-9);
@@ -485,7 +493,7 @@ test("a rowboat rows on water, pivots on its oars and runs aground in the shallo
 });
 
 test("a motorboat planes, banks into a turn and backs slowly astern", () => {
-  const spec = VEHICLES.runabout.hull;
+  const spec = VEHICLES.wakeboat.hull;
   const b = createVehicle(0, 0, 0, 0);
   for (let i = 0; i < 600; i++) stepHull(b, throttle, 1 / 60, sea(), spec, 0);
   assert(Math.abs(b.speed - spec.speed) < 0.5);
@@ -510,7 +518,7 @@ test("the wind is one pure function of time, and sails make way by it", () => {
   assert(sailPolar(0) > sailPolar(Math.PI * 0.9));
   assert(sailPolar(Math.PI) > 0);
 
-  const spec = VEHICLES.daysailer.hull;
+  const spec = VEHICLES.sloop.hull;
   const t = 500;
   const w = windAt(t);
   const sail = (rot, seconds = 30) => {
@@ -530,9 +538,9 @@ test("the wind is one pure function of time, and sails make way by it", () => {
   assert(reach.aux === 0 && reach.speed < 1);
 });
 
-test("a galleon needs deep water; a rowboat floats in the shallows", () => {
+test("a galleon needs deep water; a skiff floats in the shallows", () => {
   const shallow = ground(() => -1);
-  assert.equal(placeAt("rowboat", shallow, 0, 0, 0), SEA_LEVEL);
+  assert.equal(placeAt("skiff", shallow, 0, 0, 0), SEA_LEVEL);
   assert.equal(placeAt("galleon", shallow, 0, 0, 0), null);
   assert.equal(
     placeAt(
@@ -544,7 +552,7 @@ test("a galleon needs deep water; a rowboat floats in the shallows", () => {
     ),
     SEA_LEVEL,
   );
-  assert.equal(placeAt("sedan", sea(), 0, 0, 0), null);
+  assert.equal(placeAt("coupe", sea(), 0, 0, 0), null);
 });
 
 /* ---------- mounts ---------- */
@@ -607,10 +615,10 @@ test.skip("a horse walks on, gallops, jumps, climbs a step and won't swim", () =
 test("a vehicle packs into a snapshot and back, seats and all", () => {
   const v = createVehicle(1.234, 2.5, -3, 0.5);
   v.speed = 4.567;
-  const snap = packVehicle(7, vehicleIndex("brigantine"), v, [3, null, 9, null, null]);
+  const snap = packVehicle(7, vehicleIndex("galleon"), v, [3, null, 9, null, null]);
   const out = unpackVehicle(JSON.parse(JSON.stringify(snap)));
   assert.equal(out.id, 7);
-  assert.equal(vehicleFromIndex(out.index), "brigantine");
+  assert.equal(vehicleFromIndex(out.index), "galleon");
   assert.deepEqual(out.seats, [3, 0, 9, 0, 0]);
   assert(Math.abs(out.state.speed - 4.57) < 1e-9 && out.state.x === 1.23);
 });
@@ -632,7 +640,7 @@ test("saves from before the islands were reshaped wake on the Harbor, without th
   assert.equal(save.players[0].saved.relocate, true);
 });
 
-test("old saves: a rowboat comes back as a rowboat, a desert bike as nothing", () => {
+test("old saves: a rowboat comes back as the skiff, a desert bike as nothing", () => {
   const inv = { coins: 0, slot: 0, items: {}, tools: [], hotbar: [] };
   const player = (extra) => ({ x: 5, y: 1, z: 6, yaw: 0.5, health: 80, inv, ...extra });
   const save = parseWorldSave({
@@ -653,7 +661,7 @@ test("old saves: a rowboat comes back as a rowboat, a desert bike as nothing", (
     ],
   });
   assert.deepEqual(save.players[0].saved.vehicle, {
-    kind: "rowboat",
+    kind: "skiff",
     x: 5,
     y: 0,
     z: 6,
@@ -670,6 +678,12 @@ function member(room) {
   const messages = [];
   const id = room.join({ send: (m) => messages.push(m) });
   return { id, messages, last: (t) => messages.findLast((m) => m.t === t) };
+}
+
+/* Earn the coins for a vehicle (as if from the board) and buy it. */
+function buy(room, id, kind) {
+  room.members.get(id).inv.coins += VEHICLES[kind].price;
+  room.handle(id, { t: "buyVehicle", kind });
 }
 
 const moveAt = (x, y, z, extra = {}) => ({
@@ -694,15 +708,16 @@ test("the room spawns, seats a helmsman and a passenger, takes plausible reports
   room.tick();
   /* Out to sea from the middle of the island, for a ship. */
   const spawn = a.last("world").you;
+  buy(room, a.id, "galleon");
   let found = null;
   for (let r = 40; r < 600 && !found; r += 4) {
     room.handle(a.id, moveAt(spawn.x + r, 0.2, spawn.z, { yaw: -Math.PI / 2 }));
-    room.handle(a.id, { t: "spawn", kind: "brigantine" });
+    room.handle(a.id, { t: "spawn", kind: "galleon" });
     now += 0.05;
     room.tick();
-    found = a.last("snap")?.v.find((v) => vehicleFromIndex(v[1]) === "brigantine") ?? null;
+    found = a.last("snap")?.v.find((v) => vehicleFromIndex(v[1]) === "galleon") ?? null;
   }
-  assert(found, "a brigantine launched somewhere off the island");
+  assert(found, "a galleon launched somewhere off the island");
   const ship = unpackVehicle(found);
   /* Both swim up to it: the first takes the helm, the second a deck seat. */
   for (const m of [a, b]) {
@@ -725,7 +740,7 @@ test("the room spawns, seats a helmsman and a passenger, takes plausible reports
   assert(Math.abs(v.state.x - state.x) < 0.01);
   assert.deepEqual(v.seats.slice(0, 2), [a.id, b.id]);
   const passenger = snap.p.find((p) => p[0] === b.id);
-  const seat = riderPose("brigantine", v.state, 1);
+  const seat = riderPose("galleon", v.state, 1);
   assert(Math.hypot(passenger[1] - seat.x, passenger[3] - seat.z) < 0.05);
   assert(passenger[6] & 512, "riding");
   /* A teleport isn't taken. */
@@ -756,9 +771,9 @@ test("a land vehicle is put down on dry ground near you, never in the sea", () =
   const room = new Room({ online: true, now: () => 100 });
   const a = member(room);
   room.tick();
-  room.handle(a.id, { t: "spawn", kind: "fourbyfour" });
+  room.handle(a.id, { t: "spawn", kind: "pickup" });
   room.tick();
-  const snap = a.last("snap").v.find((v) => vehicleFromIndex(v[1]) === "fourbyfour");
+  const snap = a.last("snap").v.find((v) => vehicleFromIndex(v[1]) === "pickup");
   assert(
     snap,
     a.messages
@@ -788,13 +803,13 @@ test("leaving at the helm keeps your vehicle: you come back in it, where you lef
   let boat = null;
   for (let r = 20; r < 700 && !boat; r += 5) {
     room.handle(a.id, moveAt(you.x + r, 0.2, you.z, { yaw: -Math.PI / 2 }));
-    room.handle(a.id, { t: "spawn", kind: "rowboat" });
+    room.handle(a.id, { t: "spawn", kind: "skiff" });
     now += 0.05;
     room.tick();
-    const snap = a.last("snap")?.v.find((v) => vehicleFromIndex(v[1]) === "rowboat");
+    const snap = a.last("snap")?.v.find((v) => vehicleFromIndex(v[1]) === "skiff");
     boat = snap ? unpackVehicle(snap) : null;
   }
-  assert(boat, "a rowboat launched off the Harbor");
+  assert(boat, "a skiff launched off the Harbor");
   room.handle(a.id, moveAt(boat.state.x, -0.4, boat.state.z));
   room.handle(a.id, { t: "interact", kind: "vehicle", id: boat.id });
   assert.equal(a.last("aboard").seat, 0);
@@ -806,9 +821,69 @@ test("leaving at the helm keeps your vehicle: you come back in it, where you lef
   const aboard = back.last("aboard");
   assert(aboard && aboard.id !== null && aboard.seat === 0, "back at the oars");
   const v = unpackVehicle(back.last("snap").v.find((s) => s[0] === aboard.id));
-  assert.equal(vehicleFromIndex(v.index), "rowboat");
+  assert.equal(vehicleFromIndex(v.index), "skiff");
   assert(Math.hypot(v.state.x - boat.state.x, v.state.z - boat.state.z) < 0.1);
   room.leave(back.id);
+});
+
+test("vehicles cost coins: free ones are everyone's, the rest are bought once and kept", () => {
+  const room = new Room({ online: true, now: () => 100 });
+  const a = member(room);
+  room.tick();
+  const inv = () => a.last("inv").inv;
+  const feed = () => a.last("feed")?.text ?? "";
+  /* Not bought: no spawning it. */
+  room.handle(a.id, { t: "spawn", kind: "coupe" });
+  room.tick();
+  assert(feed().startsWith("Buy the coupé"), feed());
+  assert(!a.last("snap").v.some((v) => vehicleFromIndex(v[1]) === "coupe"));
+  /* Short of coins: told how many more, and nothing changes hands. */
+  const price = VEHICLES.coupe.price;
+  room.members.get(a.id).inv.coins = price - 100;
+  room.handle(a.id, { t: "buyVehicle", kind: "coupe" });
+  room.tick();
+  assert(feed().startsWith("100 more coins"), feed());
+  assert.deepEqual(inv().vehicles, []);
+  /* Enough: paid for, kept, and it spawns. */
+  room.members.get(a.id).inv.coins = price + 40;
+  room.handle(a.id, { t: "buyVehicle", kind: "coupe" });
+  room.tick();
+  assert.equal(inv().coins, 40);
+  assert.deepEqual(inv().vehicles, ["coupe"]);
+  /* Buying it again costs nothing more. */
+  room.handle(a.id, { t: "buyVehicle", kind: "coupe" });
+  room.tick();
+  assert.equal(inv().coins, 40);
+  room.handle(a.id, { t: "spawn", kind: "coupe" });
+  room.tick();
+  assert(
+    a.last("snap").v.some((v) => vehicleFromIndex(v[1]) === "coupe"),
+    feed(),
+  );
+  /* The free tier is never bought or listed. */
+  room.handle(a.id, { t: "buyVehicle", kind: "pickup" });
+  room.tick();
+  assert.deepEqual(inv().vehicles, ["coupe"]);
+  room.leave(a.id);
+});
+
+test("saves keep what you've bought, and drop what's free or retired", () => {
+  const inv = {
+    coins: 0,
+    slot: 0,
+    items: {},
+    tools: [],
+    hotbar: [],
+    vehicles: ["coupe", "skiff", "brigantine", "coupe", "liner"],
+  };
+  const save = parseWorldSave({
+    v: WORLD_SAVE_VERSION,
+    ids: { tool: 1 },
+    players: [
+      { token: "aaaaaaaa", name: "a", saved: { x: 5, y: 1, z: 6, yaw: 0, health: 80, inv } },
+    ],
+  });
+  assert.deepEqual(save.players[0].saved.inv.vehicles, ["coupe", "liner"]);
 });
 
 test("creative and flying only count where the room allows creative (the dev server)", () => {
@@ -834,9 +909,9 @@ test("sat in a car under the sea you drown, a few seconds after it goes under", 
   const room = new Room({ online: true, now: () => now });
   const a = member(room);
   room.tick();
-  room.handle(a.id, { t: "spawn", kind: "fourbyfour" });
+  room.handle(a.id, { t: "spawn", kind: "pickup" });
   room.tick();
-  const snap = a.last("snap").v.find((v) => vehicleFromIndex(v[1]) === "fourbyfour");
+  const snap = a.last("snap").v.find((v) => vehicleFromIndex(v[1]) === "pickup");
   const { id, state } = unpackVehicle(snap);
   room.handle(a.id, moveAt(state.x, state.y, state.z));
   room.handle(a.id, { t: "interact", kind: "vehicle", id });

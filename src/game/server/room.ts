@@ -2,6 +2,7 @@ import {
   BASE_CELL,
   BASE_TILE,
   BOUNDARY,
+  EYE_HEIGHT,
   FALL_DAMAGE,
   FALL_SAFE_SPEED,
   FLY_CEILING,
@@ -106,6 +107,7 @@ import {
 } from "../shared/species";
 import {
   afloat,
+  ownsVehicle,
   BOARD_REACH as RIDE_REACH,
   VEHICLES,
   type VehicleKind,
@@ -121,6 +123,7 @@ import {
   STAGGER_GRACE,
   STAGGER_MAX,
   STAGGER_RECOVER,
+  type Shot,
   type WeaponDef,
   type WeaponKind,
   weaponDef,
@@ -203,7 +206,11 @@ type PendingHit = {
   /* 0..1: how far a charged weapon was wound up. */
   power: number;
   yaw: number;
+  /* A shot: who it's flying at, or null for nobody. A swung blow leaves this out. */
+  shot?: Aimed | null;
 };
+
+type Aimed = { member: number } | { animal: number };
 
 export type RoomOptions = {
   online: boolean;
@@ -224,6 +231,11 @@ export type RoomOptions = {
    * server turns it on. Otherwise a client's creative and fly flags are dropped.
    */
   creative?: boolean;
+  /*
+   * Everyone who joins is topped up to at least this many coins: only the
+   * local dev server sets it, for trying out the marketplace.
+   */
+  devCoins?: number;
 };
 
 /* Points round a body's centre, to test whether it fits somewhere. */
@@ -513,6 +525,8 @@ export class Room {
       this.welcomeBack(member, profile.saved);
       profile.saved = null;
     }
+    const purse = this.opts.devCoins ?? 0;
+    if (member.inv.coins < purse) member.inv.coins = purse;
     /* The browser's choice of weapon wins, as with skins. */
     if (placed && hello.weapon !== undefined && hello.weapon !== this.carried(member))
       this.arm(member, hello.weapon, false);
@@ -657,6 +671,9 @@ export class Room {
         return;
       case "spawn":
         this.spawnVehicle(m, msg.kind);
+        return;
+      case "buyVehicle":
+        this.buyVehicle(m, msg.kind);
         return;
       case "pickup":
         this.pickupPrefab(m, msg.id);
@@ -868,8 +885,29 @@ export class Room {
 
   /* ---------- vehicles ---------- */
 
-  /* A vehicle from the marketplace, near you. The one you spawned before goes. */
+  /* A vehicle from the marketplace, paid for once with coins and kept. */
+  private buyVehicle(m: Member, kind: VehicleKind) {
+    const def = VEHICLES[kind];
+    if (ownsVehicle(m.inv.vehicles, kind)) return;
+    if (m.inv.coins < def.price) {
+      m.peer.send({
+        t: "feed",
+        text: `${(def.price - m.inv.coins).toLocaleString("en")} more coins for the ${def.name.toLowerCase()}`,
+      });
+      return;
+    }
+    m.inv.coins -= def.price;
+    m.inv.vehicles.push(kind);
+    m.invDirty = true;
+    m.peer.send({ t: "feed", text: `The ${def.name.toLowerCase()} is yours` });
+  }
+
+  /* A vehicle you own, near you. The one you spawned before goes. */
   private spawnVehicle(m: Member, kind: VehicleKind) {
+    if (!ownsVehicle(m.inv.vehicles, kind)) {
+      m.peer.send({ t: "feed", text: `Buy the ${VEHICLES[kind].name.toLowerCase()} first` });
+      return;
+    }
     if (m.ride) {
       m.peer.send({ t: "feed", text: "Get off before spawning another" });
       return;
@@ -1204,6 +1242,8 @@ export class Room {
    * for it, and you at its helm if that's where you were. True if you're seated.
    */
   private restoreVehicle(m: Member, saved: SavedVehicle) {
+    /* From before vehicles cost coins: one that was never bought doesn't come back. */
+    if (!ownsVehicle(m.inv.vehicles, saved.kind)) return false;
     const y = placeAt(saved.kind, this.world, saved.x, saved.z, saved.rot);
     if (y === null || this.rides.size >= MAX_RIDES) return false;
     const r = this.addRide(saved.kind, saved.x, y, saved.z, saved.rot);
@@ -1789,15 +1829,67 @@ export class Room {
       }
     }
     m.lastSwingAt = now;
-    this.broadcast({ t: "swing", by: m.id, kind, heavy });
+    /* A shot picks its mark as it's loosed, and lands once it has flown there. */
+    const aim = def.shot ? this.aim(m, def.reach, def.shot) : null;
+    this.broadcast({ t: "swing", by: m.id, kind, heavy, shot: aim?.line });
     this.pending.push({
-      at: now + def.windup,
+      at: now + def.windup + (aim && def.shot ? aim.line.dist / def.shot.speed : 0),
       by: m.id,
       kind,
       heavy,
       power: chargePower(def, charge),
       yaw: m.body.yaw,
+      shot: aim ? aim.target : undefined,
     });
+  }
+
+  /*
+   * A shot down the line the shooter looks along, from their eye: the first
+   * person or animal it passes within reach of, unless the ground comes first.
+   */
+  private aim(m: Member, reach: number, shot: Shot) {
+    const cp = Math.cos(m.pitch);
+    const dx = -Math.sin(m.body.yaw) * cp;
+    const dy = Math.sin(m.pitch);
+    const dz = -Math.cos(m.body.yaw) * cp;
+    const x = m.body.x;
+    const y = m.body.y + EYE_HEIGHT;
+    const z = m.body.z;
+    /* Where it would bury itself in the ground, stepping out along the line. */
+    let dist = reach;
+    for (let t = 1; t < reach; t += 0.75) {
+      if (y + dy * t < this.world.heightAt(x + dx * t, z + dz * t)) {
+        dist = t;
+        break;
+      }
+    }
+    /*
+     * Whether it passes through a body standing at (bx, by, bz), `wide` round
+     * and `tall` high: nearer than anything so far, it's the new mark.
+     */
+    const passes = (bx: number, by: number, bz: number, wide: number, tall: number) => {
+      const t = (bx - x) * dx + (by + tall / 2 - y) * dy + (bz - z) * dz;
+      if (t < 0.3 || t > dist) return false;
+      const px = x + dx * t;
+      const py = y + dy * t;
+      const pz = z + dz * t;
+      const r = wide + shot.radius;
+      if (Math.hypot(px - bx, pz - bz) > r) return false;
+      if (py < by - shot.radius * 0.5 || py > by + tall + shot.radius * 0.5) return false;
+      dist = t;
+      return true;
+    };
+    let target: Aimed | null = null;
+    for (const o of this.members.values()) {
+      if (o === m || !this.present(o) || o.respawnAt !== null) continue;
+      if (passes(o.body.x, o.body.y, o.body.z, 0.45, 1.8)) target = { member: o.id };
+    }
+    for (const a of this.herd?.animals ?? []) {
+      if (a.respawnAt !== null || a.state === "dead") continue;
+      const size = a.alpha ? 1.7 : 1;
+      if (passes(a.x, a.y, a.z, 0.6 * size, 1.4 * size)) target = { animal: a.id };
+    }
+    return { target, line: { x, y, z, dx, dy, dz, dist } };
   }
 
   private push(o: Member, ix: number, iz: number, speed: number, lift: number) {
@@ -1815,6 +1907,10 @@ export class Room {
       const def = weaponDef(p.kind);
       const fx = -Math.sin(p.yaw);
       const fz = -Math.cos(p.yaw);
+      if (p.shot !== undefined) {
+        this.landShot(m, p, def, fx, fz, now);
+        continue;
+      }
       this.hitAnimals(m, p, now);
       for (const o of this.members.values()) {
         if (o === m || !this.present(o) || o.respawnAt !== null) continue;
@@ -1943,6 +2039,23 @@ export class Room {
     this.hurt(o, damage, "hit", m);
   }
 
+  /* A shot arriving at its mark, if its mark is still there to be hit. */
+  private landShot(m: Member, p: PendingHit, def: WeaponDef, fx: number, fz: number, now: number) {
+    const aimed = p.shot;
+    if (!aimed) return;
+    if ("member" in aimed) {
+      const o = this.members.get(aimed.member);
+      if (!o || o === m || !this.present(o) || o.respawnAt !== null) return;
+      const dx = o.body.x - m.body.x;
+      const dz = o.body.z - m.body.z;
+      const d = Math.hypot(dx, dz) || 1;
+      this.strike(m, o, p, def, dx / d, dz / d, fx, fz, now);
+      return;
+    }
+    const a = this.herd?.animals.find((b) => b.id === aimed.animal);
+    if (a && a.respawnAt === null && a.state !== "dead") this.hitAnimal(m, p, def, a, now);
+  }
+
   private hitAnimals(m: Member, p: PendingHit, now: number) {
     const def = weaponDef(p.kind);
     const fx = -Math.sin(p.yaw);
@@ -1957,20 +2070,28 @@ export class Room {
       if (d > def.reach + 0.7 * size || Math.abs(a.y + 0.6 * size - m.body.y) > 2.4 * size)
         continue;
       if (def.arc > -1 && d > 0.9 && (dx * fx + dz * fz) / d < def.arc - 0.15) continue;
-      /* An animal facing away takes it in the back. */
-      const behind = (-Math.sin(a.yaw) * dx + -Math.cos(a.yaw) * dz) / (d || 1) > 0.4;
-      const damage = this.damageOf(def, p, behind, false) + (def.bleed ?? 0);
-      const dead = this.herd.strike(a, this.asPrey(m), damage, now);
-      if (dead) this.killed(m, a);
-      this.broadcast({
-        t: "ahit",
-        id: a.id,
-        kind: a.species,
-        by: m.id,
-        damage: Math.round(damage),
-        dead,
-      });
+      this.hitAnimal(m, p, def, a, now);
     }
+  }
+
+  private hitAnimal(m: Member, p: PendingHit, def: WeaponDef, a: Animal, now: number) {
+    if (!this.herd) return;
+    const dx = a.x - m.body.x;
+    const dz = a.z - m.body.z;
+    const d = Math.hypot(dx, dz);
+    /* An animal facing away takes it in the back. */
+    const behind = (-Math.sin(a.yaw) * dx + -Math.cos(a.yaw) * dz) / (d || 1) > 0.4;
+    const damage = this.damageOf(def, p, behind, false) + (def.bleed ?? 0);
+    const dead = this.herd.strike(a, this.asPrey(m), damage, now);
+    if (dead) this.killed(m, a);
+    this.broadcast({
+      t: "ahit",
+      id: a.id,
+      kind: a.species,
+      by: m.id,
+      damage: Math.round(damage),
+      dead,
+    });
   }
 
   /* A kill: the carcass goes in your pack, and the board hears of it. */

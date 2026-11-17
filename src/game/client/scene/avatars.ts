@@ -45,6 +45,8 @@ const ATTACKS: Record<Grip, readonly string[]> = {
   ],
   polearm: ["Melee_2H_Attack_Stab", "Melee_1H_Attack_Stab"],
   shield: ["Melee_Block_Attack"],
+  bow: ["Ranged_Bow_Release"],
+  magic: ["Ranged_Magic_Shoot"],
 };
 /* A combo's finisher. */
 const HEAVY: Record<Grip, string> = {
@@ -54,12 +56,21 @@ const HEAVY: Record<Grip, string> = {
   dual: "Melee_Dualwield_Attack_Chop",
   polearm: "Melee_2H_Attack_Stab",
   shield: "Melee_Block_Attack",
+  bow: "Ranged_Bow_Release",
+  magic: "Ranged_Magic_Shoot",
+};
+/* What a wind-up holds, where it isn't the drawn-back top of a swing: drawing a bow, raising a spell. */
+const DRAW: Partial<Record<Grip, string>> = {
+  bow: "Ranged_Bow_Draw",
+  magic: "Ranged_Magic_Raise",
 };
 /* How far into each swing the weapon is drawn back furthest: a charge holds there, then lets go. */
 const WINDUP: Record<string, number> = {
   Melee_2H_Attack_Chop: 0.38,
   Melee_2H_Attack_Slice: 0.3,
   Melee_2H_Attack_Stab: 0.3,
+  Ranged_Bow_Draw: 0.95,
+  Ranged_Magic_Raise: 0.9,
 };
 
 /*
@@ -285,7 +296,7 @@ export class Avatar {
     if (!c || !kind) return;
     const grip = gripOf(kind);
     const hands =
-      grip === "shield"
+      grip === "shield" || grip === "bow"
         ? [c.bones.handL]
         : grip === "dual"
           ? [c.bones.handR, c.bones.handL]
@@ -448,6 +459,8 @@ export class Avatar {
       rate = Math.min(1.8, Math.max(0.6, rate));
     } else if (grip === "2h" || grip === "polearm") {
       clip = "Melee_2H_Idle";
+    } else if (grip === "bow" && this.clips?.has("Ranged_Bow_Idle")) {
+      clip = "Ranged_Bow_Idle";
     } else if (grip !== "unarmed") {
       clip = "Idle_A";
     }
@@ -462,7 +475,11 @@ export class Avatar {
     } else if (this.swing) {
       /* Already playing: it was started by strike(). */
     } else if (f & FLAG.charge) {
-      const wind = ATTACKS[grip].find((a) => WINDUP[a] !== undefined) ?? ATTACKS[grip][0];
+      const draw = DRAW[grip];
+      const wind =
+        (draw && this.clips?.has(draw) ? draw : undefined) ??
+        ATTACKS[grip].find((a) => WINDUP[a] !== undefined) ??
+        ATTACKS[grip][0];
       const half = this.clips?.get(wind);
       const at = (WINDUP[wind] ?? 0.25) * (half?.upper.duration ?? 1);
       /* Draw it back, then hold. */
