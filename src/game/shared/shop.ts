@@ -1,8 +1,8 @@
 import { type KitId, type ToolKind, TOOLS } from "./items";
 
 /*
- * The keeper's stall by the lighthouse. Coins only come from bounties, and
- * this is the only place to spend them.
+ * The keeper's stall by the lighthouse. Coins only come from the Guild Board,
+ * and this is the only place to spend them.
  */
 
 export type ShopSection = "Shelter" | "Amenities" | "Gear" | "Vehicles";
@@ -21,7 +21,6 @@ const CATALOG: readonly ShopEntry[] = [
   { id: "chest", section: "Amenities", price: 40, give: { kit: "chest" } },
   { id: "bed", section: "Amenities", price: 60, give: { kit: "bed" } },
   { id: "dock", section: "Amenities", price: 150, give: { kit: "dock" } },
-  { id: "rod2", section: "Gear", price: 90, give: { tool: "rod2" } },
   { id: "rowboat", section: "Vehicles", price: 220, give: { kit: "rowboat" } },
 ];
 

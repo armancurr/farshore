@@ -1,10 +1,8 @@
 import * as THREE from "three";
-import { GRID, SEA_LEVEL, TILE_SIZE } from "../../shared/constants";
+import { SEA_LEVEL } from "../../shared/constants";
 
 /* The shore field is sampled this many times finer than the heightmap. */
 export const SHORE_SUB = 4;
-export const SHORE_GRID = (GRID - 1) * SHORE_SUB + 1;
-export const SHORE_CELL = TILE_SIZE / (SHORE_GRID - 1);
 
 /* Uniform cubic B-spline weights at t in [0, 1): the same smoothing the shaders use. */
 function bspline(t: number): [number, number, number, number] {
@@ -75,9 +73,9 @@ function boxBlur(src: Float32Array, dst: Float32Array, m: number, r: number, alo
  * from the smoothed heightmap: an exact distance transform on a fine grid, then
  * softened a touch so the lines don't stair-step.
  */
-export function bakeShoreDistance(heights: Float32Array) {
-  const n = GRID;
-  const m = SHORE_GRID;
+export function bakeShoreDistance(heights: Float32Array, n: number, size: number) {
+  const m = (n - 1) * SHORE_SUB + 1;
+  const SHORE_CELL = size / (m - 1);
   const sub = SHORE_SUB;
   const weights = Array.from({ length: sub }, (_, s) => bspline(s / sub));
   const clampN = (i: number) => (i < 0 ? 0 : i > n - 1 ? n - 1 : i);
@@ -137,5 +135,5 @@ export function bakeShoreDistance(heights: Float32Array) {
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.needsUpdate = true;
-  return tex;
+  return { tex, grid: m, cell: SHORE_CELL };
 }

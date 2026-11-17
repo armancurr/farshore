@@ -1,4 +1,3 @@
-import { ISLAND_RADIUS } from "./constants";
 import { mulberry32, type Rng, range } from "./math";
 
 /*
@@ -76,6 +75,8 @@ export type Footprint = { x: number; z: number; r: number };
 export interface Site {
   readonly half: number;
   readonly cell: number;
+  /* How far out the land reaches, roughly. */
+  readonly radius: number;
   readonly heights: Float32Array;
   readonly lighthouse: Point;
   heightAt(x: number, z: number): number;
@@ -376,8 +377,8 @@ function arcRoute(
 
 export type Plan = { structures: Structure[]; perches: Perch[]; footprints: Footprint[] };
 
-/* Which buildings to raise: the lighthouse, and/or everything else, and the Harbor's jetties. */
-export type PlanOptions = { lighthouse: boolean; landmarks: boolean; harbor?: boolean };
+/* Which buildings to raise: the lighthouse, and/or everything else. */
+export type PlanOptions = { lighthouse: boolean; landmarks: boolean };
 
 export function planStructures(
   site: Site,
@@ -444,63 +445,6 @@ export function planStructures(
   const lhRot = rng() * Math.PI * 2;
   if (only.lighthouse) build(site, add("lighthouse", lh.x, lh.y, lh.z, lhRot), perches, rng);
 
-  /* ---------- the Harbor's two jetties, facing each other across the bay ---------- */
-  if (only.harbor) {
-    const wet = (x: number, z: number) => site.heightAt(x, z) < 0.7;
-    /* The bay's middle: the centre of the water held in the horseshoe. */
-    let cx = 0;
-    let cz = 0;
-    let n = 0;
-    for (let x = -150; x <= 150; x += 5)
-      for (let z = -150; z <= 150; z += 5)
-        if (Math.hypot(x, z) < 150 && site.heightAt(x, z) < -1) {
-          cx += x;
-          cz += z;
-          n++;
-        }
-    if (n) {
-      cx /= n;
-      cz /= n;
-    }
-    /* How far you can sail from the middle in direction a before land (or the open sea). */
-    const reach = (a: number) => {
-      let d = 0;
-      while (d < ISLAND_RADIUS && wet(cx + Math.cos(a) * d, cz + Math.sin(a) * d)) d += 1;
-      return d;
-    };
-    /*
-     * The mouth: the average of every way out to open water. The two sides of
-     * the bay are square to it.
-     */
-    let mx = 0;
-    let mz = 0;
-    for (let k = 0; k < 72; k++) {
-      const a = (k / 72) * Math.PI * 2;
-      if (reach(a) < ISLAND_RADIUS) continue;
-      mx += Math.cos(a);
-      mz += Math.sin(a);
-    }
-    const mouth = Math.atan2(mz, mx);
-    for (const side of [1, -1]) {
-      const a = mouth + (side * Math.PI) / 2;
-      const ox = Math.cos(a);
-      const oz = Math.sin(a);
-      const d = reach(a);
-      if (d >= ISLAND_RADIUS) continue;
-      /* Where the shore starts; the jetty runs from there back toward the middle. */
-      const x = cx + ox * d;
-      const z = cz + oz * d;
-      const h = Math.max(0.7, site.heightAt(x, z));
-      const len = 28;
-      const st = add("jetty", x - ox * (len / 2), h + 0.45, z - oz * (len / 2), Math.PI - a, {
-        w: len / 2,
-        d: 1.2,
-      });
-      build(site, st, perches, rng);
-      footprints.push({ x: x - ox * 14, z: z - oz * 14, r: 15 });
-    }
-  }
-
   if (!only.landmarks) return { structures, perches, footprints };
 
   /* ---------- landmarks on the secondary summits ---------- */
@@ -523,7 +467,7 @@ export function planStructures(
   /* ---------- villages on gentle mid-height ground ---------- */
   for (let v = 0, tries = 0; v < 3 && tries < 600; tries++) {
     const a = rng() * Math.PI * 2;
-    const dist = Math.sqrt(rng()) * ISLAND_RADIUS * 0.85;
+    const dist = Math.sqrt(rng()) * site.radius * 0.85;
     const cx = Math.cos(a) * dist;
     const cz = Math.sin(a) * dist;
     const h = site.heightAt(cx, cz);
@@ -566,7 +510,7 @@ export function planStructures(
   /* ---------- watchtowers scattered over the slopes ---------- */
   for (let n = 0, tries = 0; n < 4 && tries < 500; tries++) {
     const a = rng() * Math.PI * 2;
-    const dist = Math.sqrt(rng()) * ISLAND_RADIUS * 0.9;
+    const dist = Math.sqrt(rng()) * site.radius * 0.9;
     const x = Math.cos(a) * dist;
     const z = Math.sin(a) * dist;
     const h = site.heightAt(x, z);
@@ -584,7 +528,7 @@ export function planStructures(
   /* ---------- an aqueduct across a valley ---------- */
   aqueduct: for (let tries = 0; tries < 900; tries++) {
     const a = rng() * Math.PI * 2;
-    const dist = Math.sqrt(rng()) * ISLAND_RADIUS * 0.8;
+    const dist = Math.sqrt(rng()) * site.radius * 0.8;
     const x0 = Math.cos(a) * dist;
     const z0 = Math.sin(a) * dist;
     const h0 = site.heightAt(x0, z0);
@@ -621,7 +565,7 @@ export function planStructures(
   /* ---------- shipwrecks on the beach, jetties into the sea ---------- */
   for (let n = 0, tries = 0; n < 2 && tries < 800; tries++) {
     const a = rng() * Math.PI * 2;
-    const d = range(rng, ISLAND_RADIUS * 0.6, ISLAND_RADIUS * 1.05);
+    const d = range(rng, site.radius * 0.6, site.radius * 1.05);
     const x = Math.cos(a) * d;
     const z = Math.sin(a) * d;
     const h = site.heightAt(x, z);
@@ -636,7 +580,7 @@ export function planStructures(
   }
   for (let n = 0, tries = 0; n < 2 && tries < 800; tries++) {
     const a = rng() * Math.PI * 2;
-    const d = range(rng, ISLAND_RADIUS * 0.6, ISLAND_RADIUS * 1.05);
+    const d = range(rng, site.radius * 0.6, site.radius * 1.05);
     const x = Math.cos(a) * d;
     const z = Math.sin(a) * d;
     const h = site.heightAt(x, z);

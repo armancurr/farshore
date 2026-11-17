@@ -1,8 +1,8 @@
 import * as THREE from "three";
-import { CONTOUR, GRAND_SIZE, GRID, MAX_ISLANDS, TILE_SIZE } from "../../shared/constants";
+import { CONTOUR, GRAND_SIZE, MAX_ISLANDS } from "../../shared/constants";
 import type { Terrain } from "../../shared/terrain";
-import { GLSL_COMMON, shared } from "./materials";
-import { bakeShoreDistance, SHORE_CELL, SHORE_GRID } from "./shore";
+import { GLSL_COMMON, PALETTE, shared } from "./materials";
+import { bakeShoreDistance } from "./shore";
 
 /*
  * Swash: every period a wave runs up the beach quickly, then drains back
@@ -100,6 +100,35 @@ const GLSL_FIELD = /* glsl */ `
 
 `;
 
+/* The palette as the land and sea shaders see it. */
+const hex = (h: number) => new THREE.Color(h);
+const colors = {
+  uLand: { value: hex(PALETTE.land) },
+  uLandLine: { value: hex(PALETTE.landLine) },
+  uLandMajor: { value: hex(PALETTE.landMajor) },
+  uWetLand: { value: hex(PALETTE.wetLand) },
+  uLandMeadow: { value: hex(PALETTE.landMeadow) },
+  uLandForest: { value: hex(PALETTE.landForest) },
+  uSeabed: { value: hex(PALETTE.seabed) },
+  uFoam: { value: hex(PALETTE.foam) },
+  uSea: { value: hex(PALETTE.sea) },
+  uSeaLine: { value: hex(PALETTE.seaLine) },
+  uSeaDeep: { value: hex(PALETTE.seaDeep) },
+};
+const GLSL_COLORS = /* glsl */ `
+  uniform vec3 uLand;
+  uniform vec3 uLandLine;
+  uniform vec3 uLandMajor;
+  uniform vec3 uWetLand;
+  uniform vec3 uLandMeadow;
+  uniform vec3 uLandForest;
+  uniform vec3 uSeabed;
+  uniform vec3 uFoam;
+  uniform vec3 uSea;
+  uniform vec3 uSeaLine;
+  uniform vec3 uSeaDeep;
+`;
+
 const TERRAIN_VERTEX = /* glsl */ `
   varying vec3 vWorld;
   void main() {
@@ -110,17 +139,20 @@ const TERRAIN_VERTEX = /* glsl */ `
 `;
 
 /*
- * The island is drawn as a survey map: grey ground, a white contour every
- * 2.5 m and a heavier index contour every 10 m, all traced from the smooth
- * field so they curve cleanly and hold one width. At the water's edge the
- * ground draws the swash itself: wet sand, a sheen as the wave drains, and
- * foam lace in thin lines.
+ * The island in flat colour: one even ground, softly lit by the sun, with a
+ * faint contour every 2.5 m and a stronger index contour every 10 m, traced
+ * from the smooth field so they curve cleanly and hold one width. At the
+ * water's edge the ground draws the swash itself: wet ground, a sheen as the
+ * wave drains, and foam lace in thin lines.
  */
 const TERRAIN_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
+  ${GLSL_COLORS}
   ${GLSL_SWASH}
   ${GLSL_FIELD}
   uniform float uContour;
+  /* The island's meadows (r) and groves (g), over its tile. */
+  uniform sampler2D uFlora;
   varying vec3 vWorld;
   void main() {
     vec3 hf = field(vWorld.xz);
@@ -134,21 +166,19 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     float gpx = max(length(dh), 1e-6);
 
     float dist = length(cameraPosition - vWorld);
-    float weight = mix(1.4, 0.95, smoothstep(15.0, 220.0, dist));
-    float minor = isoPx(h / uContour, dh / uContour, 1.25 * weight);
-    float major = isoPx(h / (uContour * 4.0), dh / (uContour * 4.0), 2.3 * weight);
+    float weight = mix(1.3, 0.9, smoothstep(15.0, 220.0, dist));
+    float minor = isoPx(h / uContour, dh / uContour, 1.1 * weight);
+    float major = isoPx(h / (uContour * 4.0), dh / (uContour * 4.0), 2.0 * weight);
     /* On level ground a contour would wander; let it go instead. */
-    float lines = max(minor * 0.5, major * 0.9) * smoothstep(0.004, 0.03, slope);
+    float fade = smoothstep(0.004, 0.03, slope);
 
     float steep = smoothstep(0.9, 0.62, n.y);
-
-    /* Fine stipple on flat ground so it doesn't read as a void. */
-    float grain = hash2(floor(vWorld.xz * 2.0));
-    vec2 cellPos = fract(vWorld.xz * 2.0) - 0.5;
-    float dotMask = 1.0 - smoothstep(0.05, 0.09, length(cellPos));
-    float dots = step(0.94, grain) * dotMask * 0.1 * (1.0 - steep) * (1.0 - smoothstep(0.08, 0.25, gpx * 4.0));
-
-    float c = lift(0.04 + 0.12 * diff) * mix(1.0, 0.86, steep) + lines * (0.55 + 0.45 * diff) + dots;
+    vec2 flora = texture2D(uFlora, (vWorld.xz - uOrigin + uHalf) / (2.0 * uHalf)).rg;
+    vec3 ground = mix(uLand, uLandMeadow, flora.r * 0.9);
+    ground = mix(ground, uLandForest, flora.g * 0.6);
+    vec3 c = ground * (0.78 + 0.34 * diff) * mix(1.0, 0.9, steep);
+    c = mix(c, uLandLine * (0.85 + 0.2 * diff), minor * 0.55 * fade);
+    c = mix(c, uLandMajor * (0.85 + 0.2 * diff), major * 0.7 * fade);
 
     /* The shore. */
     float waterY = swashLevel();
@@ -157,10 +187,12 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     float mpp = gpx / max(slope, 1e-4); /* metres per pixel, across the slope */
 
     float wet = 1.0 - smoothstep(SWASH_HIGH - 0.02, SWASH_HIGH + 0.06, h);
-    c *= mix(1.0, 0.62, wet * (1.0 - smoothstep(0.0, 0.4, under)));
+    c = mix(c, uWetLand, wet * (1.0 - smoothstep(0.0, 0.4, under)) * 0.8);
     float sheen = exp(-max(-under, 0.0) / 0.035) * step(under, 0.0) * recede;
-    c += sheen * 0.07;
-    c = mix(c, 0.085 + lines * 0.12, smoothstep(0.0, 0.7, under));
+    c += sheen * 0.08;
+    /* Under the water the ground takes the sea's colour, darker as it deepens. */
+    vec3 bed = mix(uSeabed * 1.08, uSeabed * 0.7, smoothstep(0.5, 8.0, under));
+    c = mix(c, bed, smoothstep(0.0, 0.7, under));
 
     float edge = zeroPx(under, gpx, max(1.8, 0.22 / mpp));
     float lace = 0.0;
@@ -172,9 +204,9 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     }
     float wrack = zeroPx(h - SWASH_HIGH - 0.01, gpx, max(1.0, 0.05 / mpp)) * smoothstep(0.45, 0.7, vnoise(vWorld.xz * 2.5)) * 0.45;
     float foam = max(max(edge * (1.0 - 0.45 * recede), lace * 0.7 * (1.0 - 0.55 * recede)), wrack);
-    c = mix(c, 0.97, foam);
+    c = mix(c, uFoam, foam);
 
-    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), 1.0);
+    gl_FragColor = vec4(applyFog(c, vWorld), 1.0);
   }
 `;
 
@@ -198,6 +230,7 @@ const WATER_VERTEX = /* glsl */ `
  */
 const WATER_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
+  ${GLSL_COLORS}
   ${GLSL_SWASH}
   ${GLSL_FIELD}
   uniform sampler2D uShore;
@@ -231,7 +264,8 @@ const WATER_FRAGMENT = /* glsl */ `
     line *= 1.0 - smoothstep(95.0, 165.0, s);
     /* Toward the tile's edge the lines let go, so it meets the open sea (or a neighbour) without a seam. */
     line *= 1.0 - smoothstep(uHalf - 80.0, uHalf - 8.0, edge);
-    float tone = mix(0.17, 0.6, near) + 0.3 * exp(-s / 2.5);
+    /* Lines brighten toward the beach, where each one is a wave about to run up it. */
+    vec3 lineColor = mix(mix(uSea, uSeaLine, 0.55), uSeaLine, near) + 0.12 * exp(-s / 2.5);
 
     /* The sun's path on the water. */
     vec3 view = normalize(vWorld - cameraPosition);
@@ -241,23 +275,47 @@ const WATER_FRAGMENT = /* glsl */ `
     float sparkle = vnoise(xz * 0.9 + uTime * vec2(0.4, 0.25)) * vnoise(xz * vec2(1.7, 2.3) - uTime * vec2(0.3, 0.5));
     glint *= 0.15 + 0.85 * smoothstep(0.12, 0.45, sparkle);
 
-    float c = mix(0.075 + glint * 0.9, tone, line);
+    /* A touch lighter over the shelf, the open sea's own colour beyond it. */
+    vec3 water = mix(uSea, mix(uSea, uSeaLine, 0.18), exp(-s / 40.0)) + glint * 0.9;
+    vec3 c = mix(water, lineColor, line);
     /* Clear in the shallows, so the ground's edge shows; solid once it's deep. */
     float alpha = 0.93 * smoothstep(0.25, 1.6, depth) + 0.07 * smoothstep(2.0, 6.0, depth);
     alpha = max(alpha, line * smoothstep(0.02, 0.25, depth));
     if (depth < 0.0) alpha = 0.0;
 
-    if (!gl_FrontFacing) { c = 0.12 + line * 0.15; alpha = 0.85; }
+    if (!gl_FrontFacing) { c = uSeaDeep * 0.8 + line * 0.1; alpha = 0.85; }
 
-    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), alpha);
+    gl_FragColor = vec4(applyFog(c, vWorld), alpha);
   }
 `;
+
+/* The island's meadow and forest fields, baked small for the ground to tint by. */
+function floraTexture(terrain: Terrain) {
+  const n = 256;
+  const data = new Uint8Array(n * n * 4);
+  const f = terrain.flora;
+  for (let i = 0; i < n; i++) {
+    const z = ((i + 0.5) / n - 0.5) * terrain.size;
+    for (let j = 0; j < n; j++) {
+      const x = ((j + 0.5) / n - 0.5) * terrain.size;
+      const k = (i * n + j) * 4;
+      data[k] = Math.round(f.meadow(x, z) * 255);
+      data[k + 1] = Math.round(f.forest(x, z) * 255);
+      data[k + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, n, n, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 function heightTexture(terrain: Terrain) {
   const tex = new THREE.DataTexture(
     new Float32Array(terrain.heights),
-    GRID,
-    GRID,
+    terrain.grid,
+    terrain.grid,
     THREE.RedFormat,
     THREE.FloatType,
   );
@@ -273,16 +331,22 @@ function heightTexture(terrain: Terrain) {
  */
 export function createLand(terrain: Terrain) {
   const heights = heightTexture(terrain);
-  const shore = bakeShoreDistance(terrain.heights);
+  const shore = bakeShoreDistance(terrain.heights, terrain.grid, terrain.size);
+  const flora = floraTexture(terrain);
   const field = {
     uHeights: { value: heights },
     uOrigin: { value: new THREE.Vector2(terrain.ox, terrain.oz) },
-    uHalf: { value: TILE_SIZE / 2 },
-    uCell: { value: TILE_SIZE / (GRID - 1) },
-    uGrid: { value: GRID },
+    uHalf: { value: terrain.half },
+    uCell: { value: terrain.cell },
+    uGrid: { value: terrain.grid },
   };
 
-  const geo = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, GRID - 1, GRID - 1);
+  const geo = new THREE.PlaneGeometry(
+    terrain.size,
+    terrain.size,
+    terrain.grid - 1,
+    terrain.grid - 1,
+  );
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   for (let k = 0; k < pos.count; k++) pos.setY(k, terrain.heights[k]);
@@ -290,7 +354,13 @@ export function createLand(terrain: Terrain) {
   geo.deleteAttribute("normal");
   geo.computeBoundingSphere();
   const groundMat = new THREE.ShaderMaterial({
-    uniforms: { ...shared, ...field, uContour: { value: CONTOUR } },
+    uniforms: {
+      ...shared,
+      ...colors,
+      ...field,
+      uContour: { value: CONTOUR },
+      uFlora: { value: flora },
+    },
     vertexShader: TERRAIN_VERTEX,
     fragmentShader: TERRAIN_FRAGMENT,
   });
@@ -299,15 +369,16 @@ export function createLand(terrain: Terrain) {
   ground.position.set(terrain.ox, 0, terrain.oz);
 
   /* A touch wider than the tile, so it overlaps the open sea rather than leaving a crack. */
-  const seaGeo = new THREE.PlaneGeometry(TILE_SIZE + 1, TILE_SIZE + 1, 1, 1);
+  const seaGeo = new THREE.PlaneGeometry(terrain.size + 1, terrain.size + 1, 1, 1);
   seaGeo.rotateX(-Math.PI / 2);
   const seaMat = new THREE.ShaderMaterial({
     uniforms: {
       ...shared,
+      ...colors,
       ...field,
-      uShore: { value: shore },
-      uShoreGrid: { value: SHORE_GRID },
-      uShoreCell: { value: SHORE_CELL },
+      uShore: { value: shore.tex },
+      uShoreGrid: { value: shore.grid },
+      uShoreCell: { value: shore.cell },
     },
     vertexShader: WATER_VERTEX,
     fragmentShader: WATER_FRAGMENT,
@@ -323,7 +394,8 @@ export function createLand(terrain: Terrain) {
   /* The textures go when the ground does: the world tears down by disposing materials. */
   groundMat.addEventListener("dispose", () => {
     heights.dispose();
-    shore.dispose();
+    shore.tex.dispose();
+    flora.dispose();
   });
 
   return [ground, sea] as const;
@@ -335,6 +407,7 @@ export function createLand(terrain: Terrain) {
  */
 const OPEN_SEA_FRAGMENT = /* glsl */ `
   ${GLSL_COMMON}
+  ${GLSL_COLORS}
   ${GLSL_SWASH}
   uniform vec4 uTiles[${MAX_ISLANDS}];
   uniform int uTileCount;
@@ -363,10 +436,10 @@ const OPEN_SEA_FRAGMENT = /* glsl */ `
     float glint = pow(max(dot(r, uSun), 0.0), 60.0) * uLight;
     float sparkle = vnoise(xz * 0.9 + uTime * vec2(0.4, 0.25)) * vnoise(xz * vec2(1.7, 2.3) - uTime * vec2(0.3, 0.5));
     glint *= 0.15 + 0.85 * smoothstep(0.12, 0.45, sparkle);
-    float c = 0.075 + glint * 0.9;
+    vec3 c = uSea + glint * 0.9;
     float alpha = 1.0;
-    if (!gl_FrontFacing) { c = 0.12; alpha = 0.85; }
-    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), alpha);
+    if (!gl_FrontFacing) { c = uSeaDeep * 0.8; alpha = 0.85; }
+    gl_FragColor = vec4(applyFog(c, vWorld), alpha);
   }
 `;
 
@@ -379,7 +452,7 @@ export class OpenSea {
     const geo = new THREE.PlaneGeometry(GRAND_SIZE + 6400, GRAND_SIZE + 6400, 1, 1);
     geo.rotateX(-Math.PI / 2);
     const mat = new THREE.ShaderMaterial({
-      uniforms: { ...shared, uTiles: { value: this.tiles }, uTileCount: this.count },
+      uniforms: { ...shared, ...colors, uTiles: { value: this.tiles }, uTileCount: this.count },
       vertexShader: WATER_VERTEX,
       fragmentShader: OPEN_SEA_FRAGMENT,
       transparent: true,
@@ -393,9 +466,9 @@ export class OpenSea {
   }
 
   /* Where the islands' own seas are. */
-  setTiles(centres: readonly { x: number; z: number }[]) {
-    const n = Math.min(centres.length, MAX_ISLANDS);
-    for (let i = 0; i < n; i++) this.tiles[i].set(centres[i].x, centres[i].z, TILE_SIZE / 2, 0);
+  setTiles(tiles: readonly { x: number; z: number; size: number }[]) {
+    const n = Math.min(tiles.length, MAX_ISLANDS);
+    for (let i = 0; i < n; i++) this.tiles[i].set(tiles[i].x, tiles[i].z, tiles[i].size / 2, 0);
     this.count.value = n;
   }
 }

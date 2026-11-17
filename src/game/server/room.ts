@@ -1,4 +1,6 @@
 import {
+  BASE_CELL,
+  BASE_TILE,
   BOUNDARY,
   FALL_DAMAGE,
   FALL_SAFE_SPEED,
@@ -12,17 +14,29 @@ import {
   SEA_LEVEL,
   TICK_HZ,
 } from "../shared/constants";
+import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
+import { FEATURES } from "../shared/features";
+import { clamp, mulberry32, type Rng } from "../shared/math";
 import {
+  ALPHA_GAP,
+  ALPHA_TIME,
+  type AlphaHunt,
   BOARD_REACH,
   BOARD_REFRESH,
   BOARD_SIZE,
-  type Bounty,
+  type BoardState,
+  CULL_FAIL_SHARE,
+  CULL_GAP,
+  CULL_TIME,
+  type Contract,
   consume,
-  isEasy,
-  makeBounty,
+  contractTitle,
+  type Cull,
+  MAX_PAYOUTS,
+  makeContract,
+  type Payout,
   progress,
-} from "../shared/bounties";
-import { BOARD_REACH as BOAT_REACH, DRAFT, SEAT } from "../shared/boat";
+} from "../shared/missions";
 import {
   BIKE_SEAT,
   bikeExit,
@@ -33,18 +47,6 @@ import {
   type BikeIntent,
   type BikeState,
 } from "../shared/bike";
-import { FEATURES } from "../shared/features";
-import {
-  BITE_WINDOW,
-  depthAt,
-  MIN_CAST_DEPTH,
-  pickFish,
-  type Strike,
-  strikeFor,
-  struck,
-} from "../shared/fishing";
-import { clamp, mulberry32, type Rng } from "../shared/math";
-import { randomName } from "../shared/names";
 import { type Body, createBody } from "../shared/physics";
 import {
   type ClientMsg,
@@ -56,12 +58,10 @@ import {
   round2,
   type ServerMsg,
   type Spawn,
-  type TravelTarget,
   type WorldInfo,
 } from "../shared/protocol";
 import {
   emptyInventory,
-  type FishId,
   HOTBAR,
   heldTool,
   type Inventory,
@@ -74,6 +74,7 @@ import {
   WEAPON_SLOT,
 } from "../shared/items";
 import {
+  BUILD_REACH,
   CAMPFIRE_WARMTH,
   checkPlacement,
   MAX_PREFABS,
@@ -81,7 +82,7 @@ import {
   prefabBlocks,
 } from "../shared/prefabs";
 import { Archipelago } from "../shared/archipelago";
-import { HARBOR, type IslandInfo, placementProblem, type ShapeId } from "../shared/islands";
+import { HARBOR_ID, WORLD } from "../shared/islands";
 import {
   type SavedPlayer,
   type SavedProfile,
@@ -90,6 +91,15 @@ import {
 } from "../shared/save";
 import { SHOP_REACH, shopEntry } from "../shared/shop";
 import { canWear, DEFAULT_SKIN, type SkinId } from "../shared/skins";
+import {
+  ALPHAS,
+  BIOME_HERDS,
+  CULLS,
+  GROUP,
+  HARBOR_HERD,
+  SPECIES,
+  type SpeciesId,
+} from "../shared/species";
 import { VEHICLES, type VehicleKind } from "../shared/vehicles";
 import { blockSolid, overSolid, type Terrain } from "../shared/terrain";
 import {
@@ -107,7 +117,7 @@ import {
   weaponIndex,
 } from "../shared/weapons";
 
-import { Herd, type Prey } from "./animals";
+import { type Animal, Herd, type Prey } from "./animals";
 
 export interface Peer {
   send(msg: ServerMsg): void;
@@ -125,9 +135,9 @@ type Member = {
   skin: SkinId;
   peer: Peer;
   spectator: boolean; // joined only to watch
-  /* Online: who this is across visits, and their island. */
+  /* Online: who this is across visits. */
   profile: Profile | null;
-  /* In the world with a body. Online, that's once you've settled an island. */
+  /* In the world with a body (not just watching). */
   placed: boolean;
   body: Body;
   pitch: number;
@@ -141,7 +151,6 @@ type Member = {
   attackReadyAt: number;
   shoveFlagUntil: number;
   inv: Inventory;
-  line: Line | null;
   /* The rowboat you're in. */
   boat: number | null;
   /* The vehicle you last spawned from the marketplace. */
@@ -157,16 +166,6 @@ type Member = {
   charging: boolean;
   /* A sickle's cut: damage still to come, a second at a time, and whose it is. */
   bleed: { left: number; per: number; nextAt: number; by: number } | null;
-};
-
-/* A line in the water: waiting for a bite, then a fish on, waiting for the strike. */
-type Line = {
-  x: number;
-  z: number;
-  depth: number;
-  biteAt: number;
-  fish: FishId | null;
-  strike: Strike | null;
 };
 
 /* A swing in flight: it lands after the weapon's wind-up. */
@@ -187,10 +186,10 @@ export type RoomOptions = {
   maxHumans?: number;
   seed?: number;
   /*
-   * The game: the grand map, where everyone settles an island of their own.
+   * The game: the grand map, the Harbor and the hunting islands round it.
    * Otherwise (the title screen) there's one island in the middle to look at.
    */
-  settle?: boolean;
+  grand?: boolean;
   /* The grand map as it was left (online). */
   world?: WorldSave | null;
   /* The grand map changed in a way worth keeping: the host should store exportWorld(). */
@@ -206,10 +205,10 @@ const PROBES = [
   [0, -0.4],
 ] as const;
 
-/* Seconds after you last hit or were hit before you can fast travel. */
-const TRAVEL_CALM = 5;
 /* How far from you a vehicle from the marketplace may be launched, in metres. */
 const LAUNCH_RANGE = 32;
+/* How far round each player the animals are sent: a little past what fog lets you see. */
+const ANIMAL_VIEW = 320;
 
 /*
  * The world. Transport-agnostic: the Cloudflare Durable Object and the Vite dev
@@ -223,7 +222,6 @@ export class Room {
   private readonly world: Archipelago;
   private readonly seed: number;
   private profiles = new Map<string, Profile>();
-  private islandId = 1;
   /* World clock in seconds; it only advances while the room ticks. */
   private time = 0;
   private lastTick: number | null = null;
@@ -233,9 +231,19 @@ export class Room {
   private pending: PendingHit[] = [];
   /* Animals, when they're switched on. */
   private herd: Herd | null = null;
-  /* The bounty board: offers, and when each was posted (world time). */
-  private board: Bounty[] = [];
+  /* The Guild Board: contracts (and when each was posted, world time), the alpha hunt and the cull. */
+  private board: BoardState = {
+    contracts: [],
+    alpha: null,
+    cull: null,
+    nextAlpha: null,
+    nextCull: null,
+  };
   private posted = new Map<number, number>();
+  /* Who has killed how many of the cull's animals, by profile token (or member id offline). */
+  private cullKills = new Map<string, { name: string; kills: number }>();
+  /* The board changed in a way everyone should see. */
+  private boardDirty = false;
   private prefabs = new Map<number, Prefab>();
   private boatSpeed = new Map<number, number>();
   private bikes = new Map<number, BikeState>();
@@ -243,7 +251,7 @@ export class Room {
   /* Prefabs that came from the marketplace rather than out of someone's pack. */
   private spawned = new Set<number>();
   private prefabId = 1;
-  private bountyId = 1;
+  private missionId = 1;
   private prey: Prey[] = [];
   private rng: Rng;
   private readonly now: () => number;
@@ -253,36 +261,67 @@ export class Room {
     this.rng = mulberry32((Math.random() * 2 ** 32) >>> 0);
     this.seed = opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
     this.world = new Archipelago();
-    if (opts.settle) {
-      /* The Harbor goes in first: it's the primary island, where the shop and herd would be. */
-      this.harbor = this.world.add(HARBOR).terrain;
+    if (opts.grand) {
+      /* The Harbor goes in first: it's the primary island, where the lighthouse and the board are. */
+      for (const info of WORLD) this.world.add(info);
+      this.harbor = this.world.islands.get(HARBOR_ID)?.terrain ?? null;
       const w = opts.world;
       if (w) {
-        for (const info of w.islands) this.world.add(info);
         for (const p of w.players) this.profiles.set(p.token, structuredClone(p));
-        this.islandId = w.ids.island;
         this.toolId = w.ids.tool;
       }
-    } else this.world.add({ id: 0, shape: "headland", seed: this.seed, x: 0, z: 0, name: "" });
-    const t = this.world.primary;
-    if (FEATURES.animals && t)
-      this.herd = new Herd(
-        {
-          terrain: this.world,
-          rng: this.rng,
-          gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
-          blocked: (id) => {
-            this.members
-              .get(id)
-              ?.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
-          },
-        },
-        [
-          { x: t.home.x, z: t.home.z, r: 45 },
-          { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
+    } else
+      this.world.add({
+        id: 0,
+        shape: "headland",
+        seed: this.seed,
+        x: 0,
+        z: 0,
+        size: BASE_TILE,
+        cell: BASE_CELL,
+        lift: 1,
+        name: "",
+      });
+    if (FEATURES.animals) this.raiseHerds();
+    if (opts.grand && FEATURES.board) {
+      this.fillBoard();
+      this.board.nextAlpha = 90;
+      this.board.nextCull = 240;
+    }
+  }
+
+  /* Every hunting island gets its herd. */
+  private raiseHerds() {
+    const herd = new Herd({
+      rng: this.rng,
+      maul: (id, damage, dx, dz) => this.mauled(id, damage, dx, dz),
+      blocked: (id) => {
+        this.members.get(id)?.peer.send({ t: "feed", text: "Your shield turns it aside" });
+      },
+    });
+    for (const { info, terrain } of this.world.islands.values()) {
+      const counts = info.biome ? BIOME_HERDS[info.biome] : info.harbor ? HARBOR_HERD : null;
+      if (!counts) continue;
+      herd.addRange({
+        island: info.id,
+        terrain,
+        quiet: [
+          { x: terrain.home.x, z: terrain.home.z, r: 30 },
+          { x: terrain.lighthouse.x, z: terrain.lighthouse.z, r: 20 },
         ],
-      );
-    this.fillBoard();
+      });
+      /* In herds and packs: the first of each group anywhere, the rest close by it. */
+      for (const [species, n] of Object.entries(counts) as [SpeciesId, number][]) {
+        const [lo, hi] = GROUP[species];
+        for (let left = n; left > 0; ) {
+          const size = Math.min(left, lo + Math.floor(this.rng() * (hi - lo + 1)));
+          const lead = herd.spawn(species, info.id);
+          for (let i = 1; i < size && lead; i++) herd.spawn(species, info.id, [], { near: lead });
+          left -= size;
+        }
+      }
+    }
+    this.herd = herd;
   }
 
   /* ---------- saving ---------- */
@@ -313,6 +352,12 @@ export class Room {
     if (kept) this.arm(m, kept, false);
     m.health = saved.health;
     m.invDirty = true;
+    /* The map changed under them: back to the Harbor, with everything they had. */
+    if (saved.relocate) {
+      const h = this.spawnPoint(m);
+      m.body = createBody(h.x, h.y, h.z, h.yaw);
+      return;
+    }
     const boat = saved.boat === null ? null : this.prefabs.get(saved.boat);
     if (boat?.kind === "rowboat") {
       m.boat = boat.id;
@@ -338,7 +383,7 @@ export class Room {
     return n;
   }
 
-  /* In the world with a body: not just watching, and (online) settled. */
+  /* In the world with a body: not just watching. */
   private present(m: Member) {
     return !m.spectator && m.placed;
   }
@@ -349,21 +394,24 @@ export class Room {
    * another tab that's still connected gets a new identity instead, so two
    * tabs in one browser are two players.
    */
-  private claim(token: string | undefined, own: boolean): Profile {
+  private claim(token: string | undefined, own: boolean, name: string): Profile {
     const known = token ? this.profiles.get(token) : undefined;
     if (known) {
       const using = [...this.members.values()].find((o) => o.profile === known);
-      if (!using) return known;
+      if (!using) {
+        known.name = name;
+        return known;
+      }
       if (own) {
         this.leave(using.id);
         using.peer.close?.();
+        known.name = name;
         return known;
       }
     }
     const fresh: Profile = {
       token: token && !known ? token : crypto.randomUUID(),
-      name: randomName(Math.random),
-      island: null,
+      name,
       saved: null,
     };
     this.profiles.set(fresh.token, fresh);
@@ -373,6 +421,7 @@ export class Room {
   join(
     peer: Peer,
     hello: {
+      name?: string;
       spectate?: boolean;
       token?: string;
       own?: boolean;
@@ -381,21 +430,24 @@ export class Room {
     } = {},
   ) {
     const spectator = !!hello.spectate;
-    const profile = this.opts.settle && !spectator ? this.claim(hello.token, !!hello.own) : null;
+    /* You're called what you picked on the title screen. */
+    const name = hello.name ?? "Guest";
+    const profile =
+      this.opts.grand && !spectator ? this.claim(hello.token, !!hello.own, name) : null;
     if (!spectator && this.humans() >= (this.opts.maxHumans ?? MAX_PLAYERS)) {
       peer.send({ t: "full" });
       return -1;
     }
     const id = this.nextId++;
-    /* Everyone arrives with a body: on their own island, or on the Harbor. */
+    /* Everyone arrives with a body, on the Harbor. */
     const placed = !spectator;
-    const h = this.homeFor(profile);
+    const h = this.home();
     /* The browser's choice wins: you may have changed skins on the title screen. */
     const skin = hello.skin && canWear(hello.skin) ? hello.skin : (profile?.skin ?? DEFAULT_SKIN);
     if (profile) profile.skin = skin;
     const member: Member = {
       id,
-      name: profile?.name ?? randomName(Math.random),
+      name,
       skin,
       peer,
       spectator,
@@ -411,7 +463,6 @@ export class Room {
       attackReadyAt: 0,
       shoveFlagUntil: 0,
       inv: emptyInventory(),
-      line: null,
       boat: null,
       vehicle: null,
       invDirty: true,
@@ -427,7 +478,7 @@ export class Room {
     if (placed && profile?.saved) {
       this.welcomeBack(member, profile.saved);
       profile.saved = null;
-    } else if (!spectator) this.giveTool(member, "rod", WEAPON_SLOT + 1);
+    }
     /* The browser's choice of weapon wins, as with skins. */
     if (placed && hello.weapon !== undefined && hello.weapon !== this.carried(member))
       this.arm(member, hello.weapon, false);
@@ -452,7 +503,7 @@ export class Room {
   leave(id: number) {
     const m = this.members.get(id);
     if (!m) return;
-    /* Online, your island keeps your place: you come back where you left off. */
+    /* Online, the map keeps your place: you come back where you left off. */
     if (m.profile && m.placed) {
       m.profile.saved = this.playerState(m);
       /* A rowboat may have been taken apart by the time you're back. */
@@ -471,10 +522,6 @@ export class Room {
   handle(id: number, msg: ClientMsg) {
     const m = this.members.get(id);
     if (!m || m.spectator) return;
-    if (msg.t === "settle") {
-      this.settle(m, msg.shape, msg.seed, msg.x, msg.z);
-      return;
-    }
     /* What you wear and carry can change anywhere, even while down. */
     if (msg.t === "skin") {
       this.dress(m, msg.skin);
@@ -502,70 +549,9 @@ export class Room {
 
   /* ---------- the grand map ---------- */
 
-  /* Put a new island on the map for someone who hasn't got one, and take them to it. */
-  private settle(m: Member, shape: ShapeId, seed: number, x: number, z: number) {
-    const p = m.profile;
-    if (!p || p.island !== null) {
-      m.peer.send({ t: "unsettled", reason: "You already have an island" });
-      return;
-    }
-    const at = { x: round2(x), z: round2(z) };
-    const problem = placementProblem(this.world.list(), at.x, at.z);
-    if (problem) {
-      m.peer.send({ t: "unsettled", reason: problem });
-      return;
-    }
-    const info: IslandInfo = { id: this.islandId++, shape, seed: seed >>> 0, ...at, name: m.name };
-    this.world.add(info);
-    p.island = info.id;
-    this.broadcast({ t: "island", island: info });
-    m.peer.send({ t: "world", ...this.worldInfo(m) });
-    /* Down or not, you wake on your new land. */
-    if (m.respawnAt !== null) this.respawn(m);
-    else this.warp(m, this.homeFor(p));
-    this.feed(`${m.name} settled a new island`);
-    this.opts.onChange?.();
-  }
-
-  /* Move someone in one step: out of any boat, line reeled in, nothing still hurting. */
-  private warp(m: Member, s: Spawn) {
-    this.reelIn(m);
-    if (m.boat !== null) {
-      m.boat = null;
-      m.peer.send({ t: "aboard", boat: null });
-    }
-    m.body = createBody(s.x, s.y, s.z, s.yaw);
-    m.airVy = 0;
-    m.stagger = 0;
-    m.bleed = null;
-    m.blocking = false;
-    m.charging = false;
-    m.peer.send({ t: "warp", ...s });
-  }
-
-  /* Fast travel between the Harbor and your own island, but not in the middle of a fight. */
-  private travel(m: Member, to: TravelTarget) {
-    if (!this.harbor) return;
-    const now = this.now();
-    if (now - Math.max(m.lastHurtAt, m.lastHitAt, m.lastSwingAt) < TRAVEL_CALM) {
-      m.peer.send({ t: "feed", text: "Catch your breath first: you can't travel mid-fight" });
-      return;
-    }
-    if (to === "home" && m.profile?.island == null) {
-      m.peer.send({ t: "feed", text: "You haven't settled an island of your own yet" });
-      return;
-    }
-    const h = this.harbor.home;
-    this.warp(
-      m,
-      to === "harbor" ? { x: h.x, y: h.y, z: h.z, yaw: h.yaw } : this.homeFor(m.profile),
-    );
-  }
-
-  /* Where someone wakes up with no bed: on their own island, or the Harbor (the only one, offline). */
-  private homeFor(p: Profile | null): Spawn {
-    const own = p?.island == null ? null : this.world.islands.get(p.island)?.terrain;
-    const h = (own ?? this.world.primary)?.home ?? { x: 0, y: 0, z: 0, yaw: 0 };
+  /* Where someone wakes up with no bed: the Harbor (the only island, on the title screen). */
+  private home(): Spawn {
+    const h = (this.harbor ?? this.world.primary)?.home ?? { x: 0, y: 0, z: 0, yaw: 0 };
     return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
   }
 
@@ -581,8 +567,6 @@ export class Room {
     for (const m of this.members.values()) if (m.profile && m.placed) live.set(m.profile, m);
     return {
       v: WORLD_SAVE_VERSION,
-      /* The Harbor is always raised afresh, never stored. */
-      islands: this.world.list().filter((o) => !o.harbor),
       players: [...this.profiles.values()].map((p) => {
         const m = live.get(p);
         return {
@@ -590,7 +574,7 @@ export class Room {
           saved: m ? this.keptState(m) : p.saved,
         };
       }),
-      ids: { island: this.islandId, tool: this.toolId },
+      ids: { tool: this.toolId },
     };
   }
 
@@ -623,9 +607,6 @@ export class Room {
       case "attack":
         this.attack(m, msg.charge);
         return;
-      case "travel":
-        this.travel(m, msg.to);
-        return;
       case "stance": {
         const weapon = this.weaponOf(m);
         const block = msg.block && weapon === "shield";
@@ -656,20 +637,16 @@ export class Room {
         this.turnIn(m);
         return;
       case "abandon":
-        if (m.inv.bounty) {
-          m.inv.bounty = null;
+        if (m.inv.mission) {
+          m.inv.mission = null;
           m.invDirty = true;
         }
         return;
-      case "cast":
-        this.cast(m, msg.x, msg.z);
-        return;
-      case "reel":
-        this.reel(m, msg.at);
+      case "collect":
+        this.collect(m);
         return;
       case "slot":
         if (m.inv.slot !== msg.i) {
-          this.reelIn(m);
           m.inv.slot = msg.i;
           m.blocking = false;
           m.charging = false;
@@ -718,7 +695,6 @@ export class Room {
   }
 
   private removeTool(m: Member, id: number) {
-    if (heldTool(m.inv)?.id === id) this.reelIn(m);
     m.inv.tools = m.inv.tools.filter((t) => t.id !== id);
     m.inv.hotbar = m.inv.hotbar.map((t) => (t === id ? null : t));
     m.blocking = false;
@@ -739,7 +715,7 @@ export class Room {
       if (from > 0) inv.hotbar[from] = there;
       inv.hotbar[slot] = toolId;
     }
-    if (heldTool(inv)?.id !== held) this.reelIn(m);
+    if (heldTool(inv)?.id !== held) m.attackReadyAt = Math.max(m.attackReadyAt, this.now() + 0.2);
     m.blocking = false;
     m.charging = false;
     m.invDirty = true;
@@ -921,40 +897,61 @@ export class Room {
   }
 
   /*
-   * The nearest open water around you, looking ahead first: deep enough to
-   * float in and clear of other boats, bow pointing away from you.
+   * Open water near you, deep enough to float in and clear of other boats,
+   * bow pointing away from you. Straight ahead wins: the whole range in
+   * front is searched before turning aside, and the sides before behind,
+   * so a puddle at your heels never beats the sea you're looking at.
    */
   private launchSpot(m: Member, kind: VehicleKind) {
     const { x: px, z: pz, yaw } = m.body;
-    for (let r = 3; r <= LAUNCH_RANGE; r += 1.5) {
-      for (let i = 0; i < 16; i++) {
-        /* 0, then alternately either side of straight ahead. */
-        const a = yaw + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * (Math.PI / 8);
-        const x = px - Math.sin(a) * r;
-        const z = pz - Math.cos(a) * r;
-        if (Math.abs(x) > BOUNDARY - 4 || Math.abs(z) > BOUNDARY - 4) continue;
-        let crowded = false;
-        for (const p of this.prefabs.values()) {
-          /* Your own last one makes way, unless someone has rowed off in it. */
-          const going = p.id === m.vehicle && !this.aboard(p.id);
-          if (
-            (p.kind === "rowboat" || p.kind === "desertbike") &&
-            !going &&
-            Math.hypot(p.x - x, p.z - z) < 4.5
-          )
-            crowded = true;
+    /* Bearings off straight ahead, in widening fans: ahead, then the sides, then behind. */
+    const fans = [
+      [0, 1, -1],
+      [2, -2, 3, -3],
+      [4, -4, 5, -5, 6, -6, 7, -7, 8],
+    ];
+    for (const fan of fans)
+      for (let r = 3; r <= LAUNCH_RANGE; r += 1.5) {
+        for (const k of fan) {
+          const a = yaw + k * (Math.PI / 8);
+          const x = px - Math.sin(a) * r;
+          const z = pz - Math.cos(a) * r;
+          if (Math.abs(x) > BOUNDARY - 4 || Math.abs(z) > BOUNDARY - 4) continue;
+          let crowded = false;
+          for (const p of this.prefabs.values()) {
+            /* Your own last one makes way, unless someone has rowed off in it. */
+            const going = p.id === m.vehicle && !this.aboard(p.id);
+            if (
+              (p.kind === "rowboat" || p.kind === "desertbike") &&
+              !going &&
+              Math.hypot(p.x - x, p.z - z) < 4.5
+            )
+              crowded = true;
+          }
+          if (crowded) continue;
+          /* A bike wants clear, dry ground rather than water. */
+          if (kind === "desertbike") {
+            const ground = bikeGround(this.world, x, z, a);
+            if (ground) return { x, y: ground.y, z, rot: a };
+            continue;
+          }
+          /*
+           * Placement measures reach from the body, and keeps the hull off it.
+           * The reach here is ours to judge, so a spot beyond it is measured
+           * from a stand-in just within reach, on the line back to you. It
+           * never stands on the spot itself: that always reads as "on top of
+           * you", which is why boats used to refuse to launch near the water,
+           * or turned up wherever happened to pass.
+           */
+          const near = BUILD_REACH - 1;
+          const stand =
+            r <= near
+              ? m.body
+              : { ...m.body, x: x + Math.sin(a) * near, z: z + Math.cos(a) * near };
+          const v = checkPlacement(this.world, kind, x, z, a, stand);
+          if (v.ok) return { x, y: v.y, z, rot: a };
         }
-        if (crowded) continue;
-        /* Placement measures reach from the body; here the reach is ours to judge. */
-        if (kind === "desertbike") {
-          const ground = bikeGround(this.world, x, z, a);
-          if (ground) return { x, y: ground.y, z, rot: a };
-          continue;
-        }
-        const v = checkPlacement(this.world, kind, x, z, a, { ...m.body, x, z });
-        if (v.ok) return { x, y: v.y, z, rot: a };
       }
-    }
     return null;
   }
 
@@ -1003,7 +1000,6 @@ export class Room {
       Math.abs(p.y - m.body.y) > 2
     )
       return;
-    this.reelIn(m);
     this.bikeInputs.delete(p.id);
     m.boat = p.id;
     m.airVy = 0;
@@ -1063,7 +1059,6 @@ export class Room {
     }
     if (m.boat !== null || this.aboard(p.id)) return;
     if (Math.hypot(p.x - m.body.x, p.z - m.body.z) > BOAT_REACH + 1) return;
-    this.reelIn(m);
     m.boat = p.id;
     m.peer.send({ t: "aboard", boat: p.id });
   }
@@ -1079,7 +1074,7 @@ export class Room {
     const cx = x - SEAT.lz * Math.sin(b.rot);
     const cz = z - SEAT.lz * Math.cos(b.rot);
     const step = Math.hypot(cx - p.x, cz - p.z);
-    if (step > 4 || this.world.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
+    if (step > 6 || this.world.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
     p.x = round2(cx);
     p.z = round2(cz);
     p.rot = round2(b.rot);
@@ -1117,146 +1112,294 @@ export class Room {
     return false;
   }
 
-  /* ---------- bounties ---------- */
+  /* ---------- the Guild Board ---------- */
 
   private nearBoard(m: Member) {
-    const b = this.world.primary?.board;
-    if (!b) return false;
-    return Math.hypot(b.x - m.body.x, b.z - m.body.z) < BOARD_REACH && Math.abs(b.y - m.body.y) < 3;
+    const b = this.harbor?.board;
+    if (!b || !FEATURES.board) return false;
+    return (
+      Math.hypot(b.x - m.body.x, b.z - m.body.z) < BOARD_REACH && Math.abs(b.y - m.body.y) < 2.5
+    );
   }
 
-  /* Top the board up to its full set of offers. Returns true if anything changed. */
+  /* Which islands a kind lives on. */
+  private homesOf(species: SpeciesId) {
+    const out: number[] = [];
+    for (const { info } of this.world.islands.values())
+      if (info.biome && BIOME_HERDS[info.biome][species]) out.push(info.id);
+    return out;
+  }
+
+  /* Top the board up to its full set of contracts. Returns true if anything changed. */
   private fillBoard() {
-    if (!FEATURES.bounties) return false;
+    if (!FEATURES.board || !this.opts.grand) return false;
     let changed = false;
-    while (this.board.length < BOARD_SIZE) {
-      const held = [...this.members.values()].map((m) => m.inv.bounty).filter((b) => !!b);
-      const easy = !this.board.some(isEasy);
-      const b = makeBounty(this.rng, this.bountyId++, [...this.board, ...held], easy);
-      this.board.push(b);
-      this.posted.set(b.id, this.time);
+    const board = this.board;
+    while (board.contracts.length < BOARD_SIZE) {
+      const held = [...this.members.values()].map((m) => m.inv.mission).filter((c) => !!c);
+      const easy = !board.contracts.some((c) => SPECIES[c.species].role === "prey");
+      const c = makeContract(
+        this.rng,
+        this.missionId++,
+        [...board.contracts, ...held],
+        (sp) => this.homesOf(sp),
+        easy,
+      );
+      board.contracts.push(c);
+      this.posted.set(c.id, this.time);
       changed = true;
     }
+    if (changed) this.boardDirty = true;
     return changed;
   }
 
   private postBoard() {
-    this.broadcast({ t: "board", offers: this.board });
+    this.boardDirty = false;
+    this.broadcast({ t: "board", board: this.board });
   }
 
-  /* Offers nobody takes come down after a while, and new ones go up. */
-  private refreshBoard() {
-    const stale = this.board.find((b) => this.time - (this.posted.get(b.id) ?? 0) > BOARD_REFRESH);
-    if (!stale) return;
-    this.board = this.board.filter((b) => b !== stale);
-    this.posted.delete(stale.id);
-    this.fillBoard();
-    this.postBoard();
+  private news(title: string, sub: string) {
+    this.broadcast({ t: "news", title, sub });
+    this.feed(`${title} · ${sub}`);
   }
+
+  private islandName(id: number) {
+    return this.world.islands.get(id)?.info.name ?? "the wilds";
+  }
+
+  private gap(range: readonly [number, number]) {
+    return range[0] + this.rng() * (range[1] - range[0]);
+  }
+
+  /* Contracts nobody takes come down after a while; alphas and culls come and go. */
+  private tickBoard() {
+    if (!FEATURES.board || !this.opts.grand) return;
+    const board = this.board;
+    const stale = board.contracts.find(
+      (c) => this.time - (this.posted.get(c.id) ?? 0) > BOARD_REFRESH,
+    );
+    if (stale) {
+      board.contracts = board.contracts.filter((c) => c !== stale);
+      this.posted.delete(stale.id);
+      this.fillBoard();
+    }
+    this.tickAlpha();
+    this.tickCull();
+    if (this.boardDirty) this.postBoard();
+  }
+
+  /* ----- the alpha hunt ----- */
+
+  private alphaAnimal(): Animal | null {
+    return this.herd?.animals.find((a) => a.alpha) ?? null;
+  }
+
+  private tickAlpha() {
+    const board = this.board;
+    const hunt = board.alpha;
+    if (!hunt) {
+      if (board.nextAlpha === null || this.time < board.nextAlpha || !this.herd) return;
+      const options = ALPHAS.flatMap((def) => {
+        const island = [...this.world.islands.values()].find((o) => o.info.biome === def.biome);
+        return island ? [{ def, island: island.info.id }] : [];
+      });
+      if (!options.length) {
+        board.nextAlpha = null;
+        return;
+      }
+      const { def, island } = options[Math.floor(this.rng() * options.length)];
+      const beast = this.herd.spawn(def.species, island, this.preyList(), { alpha: true });
+      if (!beast) {
+        board.nextAlpha = this.time + 30;
+        return;
+      }
+      board.alpha = {
+        id: this.missionId++,
+        species: def.species,
+        name: def.name,
+        island,
+        reward: def.reward,
+        endsAt: this.time + ALPHA_TIME,
+        slainBy: null,
+      };
+      board.nextAlpha = null;
+      this.boardDirty = true;
+      this.news(
+        `${def.name} sighted`,
+        `An alpha ${SPECIES[def.species].name.toLowerCase()} roams ${this.islandName(island)} · ${def.reward} coins`,
+      );
+      return;
+    }
+    if (this.time < hunt.endsAt) return;
+    /* Time's up: it slips away (or, slain, its notice comes down). */
+    if (!hunt.slainBy) {
+      this.herd?.remove((a) => a.alpha);
+      this.news(
+        `${hunt.name} slipped away`,
+        `Nobody brought it down on ${this.islandName(hunt.island)}`,
+      );
+    }
+    board.alpha = null;
+    board.nextAlpha = this.time + this.gap(ALPHA_GAP);
+    this.boardDirty = true;
+  }
+
+  private alphaSlain(m: Member, hunt: AlphaHunt) {
+    hunt.slainBy = m.name;
+    /* The notice stays up a minute, so everyone can see who did it. */
+    hunt.endsAt = this.time + 60;
+    this.pay(m, { title: `Slew ${hunt.name}`, reward: hunt.reward });
+    this.boardDirty = true;
+    this.news(
+      `${hunt.name} is slain`,
+      `${m.name} brought it down · ${hunt.reward} coins at the Guild Board`,
+    );
+  }
+
+  /* ----- the cull ----- */
+
+  private tickCull() {
+    const board = this.board;
+    const cull = board.cull;
+    if (!cull) {
+      if (board.nextCull === null || this.time < board.nextCull || !this.herd) return;
+      const options = CULLS.flatMap((def) => {
+        const island = [...this.world.islands.values()].find((o) => o.info.biome === def.biome);
+        return island ? [{ def, island: island.info.id }] : [];
+      });
+      if (!options.length) {
+        board.nextCull = null;
+        return;
+      }
+      const { def, island } = options[Math.floor(this.rng() * options.length)];
+      const id = this.missionId++;
+      const want = 8 + Math.floor(this.rng() * 5);
+      const prey = this.preyList();
+      let need = 0;
+      for (let i = 0; i < want; i++)
+        if (this.herd.spawn(def.species, island, prey, { cull: id })) need++;
+      if (!need) {
+        board.nextCull = this.time + 30;
+        return;
+      }
+      const sp = SPECIES[def.species];
+      board.cull = {
+        id,
+        species: def.species,
+        island,
+        need,
+        done: 0,
+        pot: Math.round((sp.value * need * 1.4) / 10) * 10,
+        endsAt: this.time + CULL_TIME,
+        state: "active",
+        hunters: [],
+      };
+      this.cullKills.clear();
+      board.nextCull = null;
+      this.boardDirty = true;
+      this.news(
+        `${this.islandName(island)} is overrun`,
+        `Cull ${need} ${sp.plural} · ${board.cull.pot} coins shared among the hunters`,
+      );
+      return;
+    }
+    if (this.time < cull.endsAt) return;
+    if (cull.state === "active") {
+      this.endCull(cull, false);
+      return;
+    }
+    board.cull = null;
+    board.nextCull = this.time + this.gap(CULL_GAP);
+    this.boardDirty = true;
+  }
+
+  private cullKill(m: Member, cull: Cull) {
+    const key = m.profile?.token ?? `member:${m.id}`;
+    const entry = this.cullKills.get(key) ?? { name: m.name, kills: 0 };
+    entry.kills++;
+    this.cullKills.set(key, entry);
+    cull.done++;
+    cull.hunters = [...this.cullKills.values()]
+      .map((o) => ({ ...o }))
+      .sort((a, b) => b.kills - a.kills);
+    this.boardDirty = true;
+    if (cull.done >= cull.need) this.endCull(cull, true);
+  }
+
+  /* Pay everyone who took part, by their share of the kills. */
+  private endCull(cull: Cull, cleared: boolean) {
+    const where = this.islandName(cull.island);
+    const share = cleared ? 1 : CULL_FAIL_SHARE;
+    for (const [key, o] of this.cullKills) {
+      const reward = Math.round(((cull.pot * o.kills) / cull.need) * share);
+      if (reward <= 0) continue;
+      const payout: Payout = {
+        title: `${cleared ? "Cleared" : "Helped cull"} ${where} · ${o.kills} ${o.kills === 1 ? "kill" : "kills"}`,
+        reward,
+      };
+      const online = [...this.members.values()].find(
+        (mm) => (mm.profile?.token ?? `member:${mm.id}`) === key,
+      );
+      if (online) this.pay(online, payout);
+      else {
+        const saved = this.profiles.get(key)?.saved;
+        if (saved && saved.inv.payouts.length < MAX_PAYOUTS) {
+          saved.inv.payouts.push(payout);
+          this.opts.onChange?.();
+        }
+      }
+    }
+    this.herd?.remove((a) => a.cull === cull.id);
+    cull.state = cleared ? "cleared" : "failed";
+    /* The result stays up a minute. */
+    cull.endsAt = this.time + 60;
+    this.boardDirty = true;
+    if (cleared) this.news(`${where} is cleared`, "Shares are waiting at the Guild Board");
+    else this.news(`The cull on ${where} ran out`, "Hunters are paid part of their share");
+  }
+
+  /* A reward to collect at the board. */
+  private pay(m: Member, payout: Payout) {
+    if (m.inv.payouts.length >= MAX_PAYOUTS) {
+      /* A full purse of slips: the oldest is paid straight away instead. */
+      const first = m.inv.payouts.shift();
+      if (first) m.inv.coins += first.reward;
+    }
+    m.inv.payouts.push(payout);
+    m.invDirty = true;
+    m.peer.send({ t: "feed", text: `${payout.reward} coins waiting at the Guild Board` });
+  }
+
+  /* ----- at the board ----- */
 
   private accept(m: Member, id: number) {
-    const offer = this.board.find((b) => b.id === id);
-    if (!FEATURES.bounties || !offer || m.inv.bounty || !this.nearBoard(m)) return;
-    this.board = this.board.filter((b) => b !== offer);
+    const offer = this.board.contracts.find((c) => c.id === id);
+    if (!FEATURES.board || !offer || m.inv.mission || !this.nearBoard(m)) return;
+    this.board.contracts = this.board.contracts.filter((c) => c !== offer);
     this.posted.delete(offer.id);
-    m.inv.bounty = offer;
+    m.inv.mission = offer;
     m.invDirty = true;
     this.fillBoard();
     this.postBoard();
   }
 
   private turnIn(m: Member) {
-    const b = m.inv.bounty;
-    if (!FEATURES.bounties || !b || !this.nearBoard(m) || progress(m.inv, b) < b.count) return;
-    consume(m.inv, b);
-    m.inv.coins += b.reward;
-    m.inv.bounty = null;
+    const c: Contract | null = m.inv.mission;
+    if (!FEATURES.board || !c || !this.nearBoard(m) || progress(m.inv, c) < c.count) return;
+    consume(m.inv, c);
+    m.inv.coins += c.reward;
+    m.inv.mission = null;
     m.invDirty = true;
-    m.peer.send({ t: "paid", bounty: b });
+    m.peer.send({ t: "paid", payouts: [{ title: contractTitle(c), reward: c.reward }] });
   }
 
-  /* ---------- fishing ---------- */
-
-  private rodOf(m: Member) {
-    const tool = heldTool(m.inv);
-    return tool ? (TOOLS[tool.kind].rod ?? null) : null;
-  }
-
-  private cast(m: Member, x: number, z: number) {
-    const rod = this.rodOf(m);
-    if (!rod || m.line) return;
-    const reach = Math.hypot(x - m.body.x, z - m.body.z);
-    const depth = depthAt(this.world.heightAt(x, z));
-    /* Standing (or sitting) above the water, casting a fair distance into enough of it. */
-    if (reach > rod.cast + 1.5 || reach < 1.5 || depth < MIN_CAST_DEPTH) return;
-    if (SEA_LEVEL - m.body.y > 1.2) return;
-    const [lo, hi] = rod.bite;
-    m.line = {
-      x,
-      z,
-      depth,
-      biteAt: this.now() + lo + this.rng() * (hi - lo),
-      fish: null,
-      strike: null,
-    };
-    this.broadcast({ t: "line", by: m.id, x: round2(x), z: round2(z), state: "cast" });
-  }
-
-  /* Pull the line out without a fish. */
-  private reelIn(m: Member) {
-    if (!m.line) return;
-    const { x, z } = m.line;
-    m.line = null;
-    this.broadcast({ t: "line", by: m.id, x: round2(x), z: round2(z), state: "none" });
-  }
-
-  /* Strike. A miss, or striking before anything bites, loses the fish. */
-  private reel(m: Member, at: number) {
-    const line = m.line;
-    if (!line) return;
-    if (!line.fish || !line.strike) {
-      this.reelIn(m);
-      return;
-    }
-    /*
-     * Trust the angler's own timing, within reason: not earlier than we've
-     * seen, and inside the window. (A throttled tab can leave our clock behind.)
-     */
-    const elapsed = this.now() - line.biteAt;
-    const t = at >= elapsed - 0.5 && at <= BITE_WINDOW ? at : elapsed;
-    const fish = struck(line.strike, t) ? line.fish : null;
-    this.land(m, fish);
-  }
-
-  private land(m: Member, fish: FishId | null) {
-    const line = m.line;
-    if (!line) return;
-    m.line = null;
-    if (fish) {
-      this.addItem(m, fish);
-    }
-    this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "none" });
-    this.broadcast({ t: "catch", by: m.id, fish });
-  }
-
-  private tickLine(m: Member, now: number) {
-    const line = m.line;
-    if (!line) return;
-    const rod = this.rodOf(m);
-    const far = Math.hypot(line.x - m.body.x, line.z - m.body.z) > (rod?.cast ?? 0) + 5;
-    if (!rod || far) {
-      this.reelIn(m);
-      return;
-    }
-    if (!line.fish && now >= line.biteAt) {
-      line.fish = pickFish(this.rng, line.depth, rod);
-      line.strike = strikeFor(this.rng, line.fish, rod);
-      line.biteAt = now;
-      m.peer.send({ t: "bite", ...line.strike });
-      this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "bite" });
-    } else if (line.fish && now - line.biteAt > BITE_WINDOW) {
-      this.land(m, null);
-    }
+  private collect(m: Member) {
+    if (!FEATURES.board || !m.inv.payouts.length || !this.nearBoard(m)) return;
+    const payouts = m.inv.payouts;
+    for (const p of payouts) m.inv.coins += p.reward;
+    m.inv.payouts = [];
+    m.invDirty = true;
+    m.peer.send({ t: "paid", payouts });
   }
 
   private flush(m: Member) {
@@ -1296,7 +1439,6 @@ export class Room {
         else if (quiet > REGEN_DELAY) m.health = Math.min(HEALTH_MAX, m.health + HEALTH_REGEN * dt);
       }
 
-      this.tickLine(m, now);
       this.tickBleed(m, now);
 
       /* Stagger wears off a few seconds after the last hit. */
@@ -1307,7 +1449,7 @@ export class Room {
       if (m.body.y < SEA_FLOOR - 8) this.respawn(m);
     }
 
-    this.refreshBoard();
+    this.tickBoard();
   }
 
   /* Everyone the animals can see, in the shape they need. */
@@ -1329,17 +1471,17 @@ export class Room {
       yaw: m.body.yaw,
       running: (m.flags & FLAG.sprint) !== 0,
       blocking: m.blocking && this.weaponOf(m) === "shield",
-      /* Boars leave alone anyone in a boat, down, or in creative. */
+      /* Animals leave alone anyone in a boat, down, or in creative. */
       away: m.respawnAt !== null || m.boat !== null || (m.flags & FLAG.creative) !== 0,
     };
   }
 
-  /* A boar's tusks: damage, and a shove off your feet. */
-  private gored(id: number, damage: number, dx: number, dz: number) {
+  /* Teeth, hooves or tusks: damage, and a shove off your feet. */
+  private mauled(id: number, damage: number, dx: number, dz: number) {
     const m = this.members.get(id);
     if (!m) return;
-    this.push(m, dx, dz, 9, 4.5);
-    this.hurt(m, damage, "boar");
+    this.push(m, dx, dz, 6 + damage * 0.2, 3 + damage * 0.08);
+    this.hurt(m, damage, "animal");
   }
 
   /* Beside your bed if you have one, otherwise where everyone first wakes up. */
@@ -1364,7 +1506,7 @@ export class Room {
       }
       return { x: bed.x, y: bed.y + 0.45, z: bed.z, yaw: bed.rot };
     }
-    return this.homeFor(m.profile);
+    return this.home();
   }
 
   /*
@@ -1380,7 +1522,6 @@ export class Room {
     m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
     if (m.health > 0) return;
     m.respawnAt = this.now() + RESPAWN_DELAY;
-    this.reelIn(m);
     if (m.boat !== null) {
       m.boat = null;
       m.peer.send({ t: "aboard", boat: null });
@@ -1466,8 +1607,6 @@ export class Room {
   private attack(m: Member, charge: number) {
     const now = this.now();
     if (now < m.attackReadyAt || m.blocking) return;
-    const tool = heldTool(m.inv);
-    if (tool && TOOLS[tool.kind].rod) return;
     const kind = this.weaponOf(m);
     const def = weaponDef(kind);
     m.attackReadyAt = now + def.cooldown;
@@ -1642,24 +1781,34 @@ export class Room {
       const dx = a.x - m.body.x;
       const dz = a.z - m.body.z;
       const d = Math.hypot(dx, dz);
-      if (d > def.reach + 0.7 || Math.abs(a.y + 0.6 - m.body.y) > 2.4) continue;
+      const size = a.alpha ? 1.7 : 1;
+      if (d > def.reach + 0.7 * size || Math.abs(a.y + 0.6 * size - m.body.y) > 2.4 * size)
+        continue;
       if (def.arc > -1 && d > 0.9 && (dx * fx + dz * fz) / d < def.arc - 0.15) continue;
       /* An animal facing away takes it in the back. */
       const behind = (-Math.sin(a.yaw) * dx + -Math.cos(a.yaw) * dz) / (d || 1) > 0.4;
       const damage = this.damageOf(def, p, behind, false) + (def.bleed ?? 0);
       const dead = this.herd.strike(a, this.asPrey(m), damage, now);
-      if (dead) {
-        this.addItem(m, a.kind);
-      }
+      if (dead) this.killed(m, a);
       this.broadcast({
         t: "ahit",
         id: a.id,
-        kind: a.kind,
+        kind: a.species,
         by: m.id,
         damage: Math.round(damage),
         dead,
       });
     }
+  }
+
+  /* A kill: the carcass goes in your pack, and the board hears of it. */
+  private killed(m: Member, a: Animal) {
+    this.addItem(m, a.species);
+    const hunt = this.board.alpha;
+    if (a.alpha && hunt && !hunt.slainBy) this.alphaSlain(m, hunt);
+    const cull = this.board.cull;
+    if (a.cull !== null && cull && cull.id === a.cull && cull.state === "active")
+      this.cullKill(m, cull);
   }
 
   /* ---------- messages ---------- */
@@ -1673,7 +1822,6 @@ export class Room {
   private worldInfo(m: Member): WorldInfo {
     return {
       islands: this.world.list(),
-      mine: m.spectator ? null : m.profile ? m.profile.island : (this.world.list()[0]?.id ?? null),
       time: this.time,
       roster: this.roster(),
       board: this.board,
@@ -1720,7 +1868,6 @@ export class Room {
       ]);
     }
     const time = round2(this.time);
-    const a = this.herd?.snapshot() ?? [];
     const b: BoatSnap[] = [];
     const bikes: BikeSnap[] = [...this.bikes].map(([id, bike]) => [
       id,
@@ -1744,6 +1891,11 @@ export class Room {
         ]);
     }
     for (const m of this.members.values()) {
+      /* Only the animals near you: there are a lot of them out there. */
+      const near = this.present(m);
+      const a = this.herd
+        ? this.herd.snapshot(m.body.x, m.body.z, near ? ANIMAL_VIEW : Number.POSITIVE_INFINITY, [])
+        : [];
       m.peer.send({
         t: "snap",
         time,

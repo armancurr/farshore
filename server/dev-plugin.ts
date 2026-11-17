@@ -49,7 +49,7 @@ export function tideDevServer(): Plugin {
       };
       const room = new Room({
         online: true,
-        settle: true,
+        grand: true,
         world: loadWorld(),
         onChange: () => {
           saveTimer ??= setTimeout(store, 500);

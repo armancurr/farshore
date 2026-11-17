@@ -1,13 +1,17 @@
-/* One island: a square tile of land and sea. */
-export const TILE_SIZE = 760; // metres, square
-export const GRID = 305; // height samples per side (2.5 m apart)
-export const ISLAND_RADIUS = 300;
+/*
+ * One island: a square tile of land and sea. Shapes are drawn for a tile of
+ * BASE_TILE metres and scaled to each island's own size; the height samples
+ * are BASE_CELL apart unless an island asks for coarser ones.
+ */
+export const BASE_TILE = 760; // metres, square
+export const BASE_CELL = 2.5; // metres between height samples
+export const ISLAND_RADIUS = 300; // on a BASE_TILE tile
 export const MAX_HEIGHT = 46;
 export const CONTOUR = 2.5; // metres between contour lines
 export const SEA_FLOOR = -14;
 export const SEA_LEVEL = 0;
-/* The grand map: open sea that every player's island sits in. */
-export const GRAND_SIZE = 3800; // metres, square: room for 5 x 5 tiles
+/* The grand map: open sea with the Harbor in the middle and the hunting islands round it. */
+export const GRAND_SIZE = 5600; // metres, square
 export const MAX_ISLANDS = 16;
 export const BOUNDARY = GRAND_SIZE / 2 - 6;
 

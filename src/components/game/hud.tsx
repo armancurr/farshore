@@ -1,42 +1,67 @@
 import { cn } from "cn";
-import { useEffect, useRef } from "react";
 import { Progress } from "@/components/ui/progress";
 import type { HudState } from "../../game/client/game";
 import { Belt, controlHint } from "./belt";
-import { needleAt, type Strike } from "../../game/shared/fishing";
+import { clock } from "./panels";
 
 const DOWN_TEXT: Record<string, string> = {
   fall: "You fell too far",
-  boar: "The boar got the better of you",
+  animal: "The wilds got the better of you",
   hit: "You were struck down",
 };
 
-/* The bounty you've taken, and how far along it is. */
-function ActiveBounty(props: { hud: HudState }) {
-  const b = props.hud.bounty;
+/* The contract you've taken, and what's afoot on the islands. */
+function Missions(props: { hud: HudState }) {
+  const g = props.hud.guild;
+  const c = g.mission;
+  const alpha = g.alpha && !g.alpha.slainBy ? g.alpha : null;
+  const cull = g.cull?.state === "active" ? g.cull : null;
   return (
-    <div className="flex flex-col items-center gap-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-      {b ? (
+    <div className="flex flex-col items-center gap-1.5 font-mono text-[11px] tracking-[0.2em] uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]">
+      {c ? (
         <>
           <div className="flex items-baseline gap-3">
-            <span className="text-white/45">Bounty</span>
-            <span>{b.title}</span>
+            <span className="text-white/75">Contract</span>
+            <span>{c.title}</span>
             <span className="tabular-nums">
-              {b.have}/{b.need}
+              {c.have}/{c.need}
             </span>
           </div>
           <Progress
-            aria-label="Bounty progress"
-            value={Math.min(100, (b.have / b.need) * 100)}
+            aria-label="Contract progress"
+            value={Math.min(100, (c.have / c.need) * 100)}
             className="w-56"
           />
-          {b.have >= b.need && (
-            <div className="text-[10px] text-white/70">Done · hand it in at the board</div>
+          {c.have >= c.need && (
+            <div className="text-[10px]">Done · hand it in at the Guild Board</div>
           )}
         </>
       ) : (
-        <div className="text-white/40">No bounty · the board is at the lighthouse</div>
+        <div className="text-white/75">No contract · the Guild Board is atop the lighthouse</div>
       )}
+      {alpha && (
+        <div className="text-[10px]">
+          Alpha · {alpha.name} on {alpha.island} · {clock(alpha.left)}
+        </div>
+      )}
+      {cull && (
+        <div className="text-[10px]">
+          Cull · {cull.island} · {cull.done}/{cull.need} {cull.kind}
+        </div>
+      )}
+      {g.owed > 0 && <div className="text-[10px]">{g.owed} ◎ waiting at the Guild Board</div>}
+    </div>
+  );
+}
+
+/* Big news for a moment: a payout, an alpha sighted, an island overrun. */
+function Banner(props: { hud: HudState }) {
+  const c = props.hud.banner;
+  if (!c) return null;
+  return (
+    <div className="absolute top-[30%] left-1/2 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 flex-col items-center gap-1 text-center [text-shadow:0_1px_4px_rgba(0,0,0,0.8)]">
+      <div className="text-2xl font-semibold tracking-tight">{c.title}</div>
+      {c.sub && <div className="font-mono text-[10px] tracking-[0.3em] uppercase">{c.sub}</div>}
     </div>
   );
 }
@@ -94,66 +119,6 @@ function Crosshair(props: { hud: HudState }) {
   );
 }
 
-/* The strike: a needle sweeps the bar; click while it's inside the mark. */
-function StrikeBar(props: { strike: Strike; at: number }) {
-  const needle = useRef<HTMLDivElement>(null);
-  const { strike, at } = props;
-  useEffect(() => {
-    let raf = 0;
-    const frame = () => {
-      const t = performance.now() / 1000 - at;
-      if (needle.current) needle.current.style.left = `${needleAt(t, strike.speed) * 100}%`;
-      raf = requestAnimationFrame(frame);
-    };
-    frame();
-    return () => cancelAnimationFrame(raf);
-  }, [strike.speed, at]);
-  return (
-    <div className="relative h-5 w-64 border border-white/50 bg-black/50">
-      <div
-        className="absolute inset-y-0 bg-white/30"
-        style={{
-          left: `${(strike.c - strike.w / 2) * 100}%`,
-          width: `${strike.w * 100}%`,
-        }}
-      />
-      <div ref={needle} className="absolute -inset-y-1 w-0.5 -translate-x-1/2 bg-white" />
-    </div>
-  );
-}
-
-function Fishing(props: { hud: HudState }) {
-  const f = props.hud.fishing;
-  const c = props.hud.banner;
-  return (
-    <>
-      {f && (
-        <div className="absolute top-[58%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-2.5">
-          {f.strike && <StrikeBar strike={f.strike} at={f.at} />}
-          <div
-            className={cn(
-              "font-mono text-[10px] tracking-[0.2em] whitespace-nowrap uppercase",
-              f.strike ? "text-white" : "text-white/55",
-            )}
-          >
-            {f.text}
-          </div>
-        </div>
-      )}
-      {c && (
-        <div className="absolute top-[30%] left-1/2 flex -translate-x-1/2 flex-col items-center gap-1 text-center">
-          <div className="text-2xl font-semibold tracking-tight">{c.title}</div>
-          {c.sub && (
-            <div className="font-mono text-[10px] tracking-[0.3em] text-white/55 uppercase">
-              {c.sub}
-            </div>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
 /* "Space up · Shift down · …" as a short list, one control to a line. */
 /*
  * What the controls do right now, one per line. What E would do here (get in
@@ -168,7 +133,7 @@ function ControlHints(props: { text: string | null; prompt: string | null }) {
     action && !lines.some((l) => l.toLowerCase() === action.toLowerCase()) ? action : null;
   if (!lead && !lines.length) return null;
   return (
-    <ul className="flex flex-col items-start gap-1.5 text-white/55">
+    <ul className="flex flex-col items-start gap-1.5 text-white/80">
       {lead && <li className="text-white">{cap(lead)}</li>}
       {lines.map((line) => (
         <li key={line}>{line}</li>
@@ -196,15 +161,21 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
       >
         {h.player && h.economy && (
           <div className="font-mono text-[13px] font-normal tracking-[0.12em] tabular-nums">
-            <span className="mr-1.5 text-white/45">◎</span>
+            <span className="mr-1.5 text-white/75">◎</span>
             {h.inv.coins}
+          </div>
+        )}
+        {h.player && h.place && (
+          <div className="font-mono text-[11px] font-normal tracking-[0.12em] uppercase">
+            {h.place}
+            {h.sheltered ? " · safe ground" : ""}
           </div>
         )}
         {!props.touch && h.player && (
           <ControlHints text={controlHint(h, props.touch)} prompt={h.prompt} />
         )}
         {h.feed.length > 0 && (
-          <div className="flex flex-col items-start gap-1.5 text-white/70">
+          <div className="flex flex-col items-start gap-1.5 text-white/90">
             {h.feed.map((item, i) => (
               <div key={i}>{item.text}</div>
             ))}
@@ -212,15 +183,17 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
         )}
       </div>
       {h.player && h.economy && (
-        <div className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-28" : "top-5")}>
-          <ActiveBounty hud={h} />
+        <div
+          className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-28" : "top-20")}
+        >
+          <Missions hud={h} />
         </div>
       )}
       {/* The Harbor is common ground: nobody can be hurt here. */}
       {h.player && h.sheltered && !h.economy && (
         <div
           className={cn(
-            "absolute left-1/2 -translate-x-1/2 font-mono text-[10px] tracking-[0.2em] whitespace-nowrap text-white/60 uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]",
+            "absolute left-1/2 -translate-x-1/2 font-mono text-[10px] tracking-[0.2em] whitespace-nowrap uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]",
             props.touch ? "top-24" : "top-6",
           )}
         >
@@ -231,7 +204,7 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
       {h.player && (
         <>
           <Crosshair hud={h} />
-          <Fishing hud={h} />
+          <Banner hud={h} />
           {/* Phones have no hints column: what the action button does sits over the belt. */}
           {props.touch && h.prompt && (
             <div className="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
@@ -258,7 +231,7 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
       {h.down && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
           <div className="text-2xl font-semibold tracking-tight">You blacked out.</div>
-          <div className="font-mono text-[11px] tracking-[0.2em] text-white/55 uppercase">
+          <div className="font-mono text-[11px] tracking-[0.2em] text-white/85 uppercase">
             {DOWN_TEXT[h.down] ?? ""}
           </div>
         </div>

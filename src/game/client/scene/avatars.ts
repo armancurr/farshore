@@ -13,19 +13,15 @@ function nameTexture(name: string, stagger = 0) {
   canvas.width = 512;
   canvas.height = 96;
   const ctx = canvas.getContext("2d")!;
-  ctx.font = '500 38px "Google Sans Code", ui-monospace, monospace';
+  ctx.font = '600 40px "Google Sans Code", ui-monospace, monospace';
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const label = stagger > 0 ? `${name}  ${stagger}%` : name;
-  const text = label.toUpperCase().split("").join(" ");
-  const w = Math.min(500, ctx.measureText(text).width + 36);
-  ctx.fillStyle = "rgba(0,0,0,0.72)";
-  ctx.fillRect(256 - w / 2, 18, w, 60);
-  ctx.strokeStyle = "rgba(255,255,255,0.5)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(256 - w / 2 + 1, 19, w - 2, 58);
+  const text = stagger > 0 ? `${name}  ${stagger}%` : name;
+  /* Just the name, no box: a soft shadow keeps it legible against bright sky. */
+  ctx.shadowColor = "rgba(0,0,0,0.85)";
+  ctx.shadowBlur = 8;
   ctx.fillStyle = "#fff";
-  ctx.fillText(text, 256, 49);
+  ctx.fillText(text, 256, 48, 500);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;

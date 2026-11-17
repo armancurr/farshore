@@ -26,7 +26,7 @@ export function MenuPointer() {
 }
 
 const title = "m-0 text-lg leading-tight font-bold text-white";
-const sub = "mt-1.5 text-[13px] leading-normal text-[#8a8a8a]";
+const sub = "mt-1.5 text-[13px] leading-normal text-white/80";
 
 /* Each inner list is one group; the card draws a thin line between groups. */
 const CONTROL_GROUPS: [string, string[]][][] = [
@@ -47,8 +47,8 @@ const CONTROL_GROUPS: [string, string[]][][] = [
     ["Take a piece back", ["RMB"]],
   ],
   [
-    ["Skins and weapons", ["K"]],
-    ["Travel, claim an island", ["Esc"]],
+    ["Marketplace: skins, weapons, boats", ["K"]],
+    ["The map", ["N"]],
   ],
   [
     ["Creative mode", ["Shift+C"]],
@@ -76,7 +76,7 @@ export function ControlsCard() {
           {rows.map(([action, keys]) => (
             <div
               key={action}
-              className="flex items-center justify-between gap-3 py-[5px] text-[13px] text-[#d6d6d6]"
+              className="flex items-center justify-between gap-3 py-[5px] text-[13px] text-white/90"
             >
               {action}
               <span className="flex gap-1">
@@ -89,7 +89,7 @@ export function ControlsCard() {
         </Fragment>
       ))}
       <Separator className="mt-3.5" />
-      <div className="flex justify-between pt-3 text-xs text-[#8a8a8a]">
+      <div className="flex justify-between pt-3 text-xs text-white/80">
         {CONTROL_FOOT.map(([key, action]) => (
           <span key={key} className="flex items-center gap-1.5">
             <Kbd>{key}</Kbd>
@@ -168,11 +168,11 @@ export function AccessCard() {
           </InputGroupAddon>
         </InputGroup>
         {error ? (
-          <p role="alert" className="mt-2.5 mb-0 text-xs text-[#8a8a8a]">
+          <p role="alert" className="mt-2.5 mb-0 text-xs text-white/80">
             {error}
           </p>
         ) : (
-          <p className="mt-2.5 mb-0 text-xs text-[#5c5c5c]">
+          <p className="mt-2.5 mb-0 text-xs text-white/80">
             Already invited? Open the link in your invite email.
           </p>
         )}
@@ -192,7 +192,7 @@ export function AccessCard() {
             <h2 className={title}>You're on the list</h2>
             <p className={`${sub} break-all`}>
               We'll send your invite link to{" "}
-              <b className="font-bold text-[#d6d6d6]">{email.trim()}</b>
+              <b className="font-bold text-white/90">{email.trim()}</b>
             </p>
           </>
         )}
@@ -207,8 +207,8 @@ export function PendingCard(props: { email: string | null }) {
     <div className="px-[18px] pt-[18px] pb-4">
       <PopoverTitle>Not in yet</PopoverTitle>
       <p className={`${sub} break-all`}>
-        You're signed in as <b className="font-bold text-[#d6d6d6]">{props.email}</b>, but this
-        email hasn't been let onto the island yet. You'll hear from us when it is.
+        You're signed in as <b className="font-bold text-white/90">{props.email}</b>, but this email
+        hasn't been let onto the island yet. You'll hear from us when it is.
       </p>
       <SignOutRow note="Wrong account?" />
     </div>
@@ -236,7 +236,7 @@ function SignOutRow(props: { note: string }) {
   return (
     <>
       <Separator className="mt-3.5" />
-      <div className="flex items-center justify-between gap-3 pt-3 text-xs text-[#8a8a8a]">
+      <div className="flex items-center justify-between gap-3 pt-3 text-xs text-white/80">
         {sure ? "You'll need your invite link to get back in" : props.note}
         <Button
           variant="link"

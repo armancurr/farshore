@@ -10,7 +10,7 @@ const FLAT: [number, number, number] = [0, 1, 0];
 const NONE: readonly Solid[] = [];
 
 /*
- * The grand map: open sea with everyone's islands in it. Any question about
+ * The grand map: open sea with the islands in it. Any question about
  * the ground goes to the island whose tile holds the point; anywhere else is
  * deep water. Tiles never overlap, so there's only ever one to ask.
  */
@@ -31,12 +31,7 @@ export class Archipelago implements Ground {
   add(info: IslandInfo): Island {
     const had = this.islands.get(info.id);
     if (had) return had;
-    const terrain = new Terrain(
-      info.seed,
-      info.shape,
-      { x: info.x, z: info.z },
-      { harbor: info.harbor },
-    );
+    const terrain = new Terrain(info);
     const island = { info: { ...info }, terrain };
     this.islands.set(info.id, island);
     this.ladders = [...this.islands.values()].flatMap((o) => o.terrain.ladders);
@@ -48,7 +43,7 @@ export class Archipelago implements Ground {
     return [...this.islands.values()].map((o) => o.info);
   }
 
-  /* The first island: where the lighthouse and the shop would stand, in solo. */
+  /* The first island raised: the Harbor, where the lighthouse and the Guild Board stand. */
   get primary(): Terrain | null {
     return this.islands.values().next().value?.terrain ?? null;
   }

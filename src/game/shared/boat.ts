@@ -10,11 +10,12 @@ import { type Ground, overSolid } from "./terrain";
 
 export type BoatState = { x: number; z: number; rot: number; speed: number; turn: number };
 
-export const ROW_SPEED = 5.4;
-const BACK_SPEED = 1.8;
-const ROW_ACCEL = 2.2;
-const DRAG = 0.6;
-const TURN_RATE = 1.15;
+/* Quick enough to cross between the islands in a minute or so. */
+export const ROW_SPEED = 16;
+const BACK_SPEED = 4.5;
+const ROW_ACCEL = 6.5;
+const DRAG = 0.45;
+const TURN_RATE = 1.25;
 /* The hull draws this much water; shallower than this and you're aground. */
 export const DRAFT = 0.45;
 /* Where you sit, in the boat's own space, and how high your feet are. */
