@@ -284,7 +284,7 @@ const HOUSE = (o: Omit<WaterOpts, "class" | "section" | "draft" | "turn" | "spee
     section: "Workboats",
     draft: 0.8,
     turn: 0.45,
-    speed: 5.5,
+    speed: 11,
     sink: 0.3,
   });
 
@@ -342,7 +342,7 @@ export const VEHICLES = {
     length: 3.6,
     sink: 0.16,
     seats: [[0, 0.4, -0.42]],
-    speed: 6.5,
+    speed: 13,
   }),
   skiff: ROW({
     name: "Skiff",
@@ -355,7 +355,7 @@ export const VEHICLES = {
       [0, 0.4, -0.18],
       [0, 0.4, 0.8],
     ],
-    speed: 7,
+    speed: 14,
   }),
   daysailer: water({
     name: "Daysailer",
@@ -372,7 +372,7 @@ export const VEHICLES = {
       [-0.55, 1.5, -1.25],
     ],
     draft: 0.8,
-    speed: 11,
+    speed: 22,
     turn: 0.85,
   }),
   sloop: water({
@@ -389,7 +389,7 @@ export const VEHICLES = {
       [-0.55, 1.5, -1.4],
     ],
     draft: 0.9,
-    speed: 12,
+    speed: 24,
     turn: 0.8,
   }),
   airboat: water({
@@ -406,7 +406,7 @@ export const VEHICLES = {
       [0, 0.45, 0.3],
     ],
     draft: 0.3,
-    speed: 24,
+    speed: 48,
     turn: 1.3,
   }),
   fishingboat: water({
@@ -423,7 +423,7 @@ export const VEHICLES = {
       [-0.4, 1.05, -1.2],
     ],
     draft: 0.9,
-    speed: 11,
+    speed: 22,
     turn: 0.8,
   }),
   //   wakeboat: SPEED({
@@ -432,7 +432,7 @@ export const VEHICLES = {
   //     blurb: "A deep hull and a tow tower, built to throw a big wake.",
   //     model: "boats/boat-speed-a",
   //     seats: BESIDE(-0.75, 1.15),
-  //     speed: 24,
+  //     speed: 48,
   //   }),
   //   bowrider: SPEED({
   //     name: "Bowrider",
@@ -440,7 +440,7 @@ export const VEHICLES = {
   //     blurb: "Open seats right up into the bow, and a windscreen for the helm.",
   //     model: "boats/boat-speed-b",
   //     seats: BESIDE(-0.7, 1.12),
-  //     speed: 25,
+  //     speed: 50,
   //   }),
   runabout: SPEED({
     name: "Runabout",
@@ -448,7 +448,7 @@ export const VEHICLES = {
     blurb: "A small, lively speedboat for hopping between the islands.",
     model: "boats/boat-speed-c",
     seats: BESIDE(-0.65, 1.12),
-    speed: 26,
+    speed: 52,
   }),
   //   tender: SPEED({
   //     name: "Harbour tender",
@@ -456,7 +456,7 @@ export const VEHICLES = {
   //     blurb: "A broad inflatable with fat fenders. Slow to plane, hard to tip.",
   //     model: "boats/boat-speed-d",
   //     seats: BESIDE(-1.05, 0.95),
-  //     speed: 18,
+  //     speed: 36,
   //   }),
   //   surveylaunch: SPEED({
   //     name: "Survey launch",
@@ -464,7 +464,7 @@ export const VEHICLES = {
   //     blurb: "A stubby launch with a console and a mast of aerials.",
   //     model: "boats/boat-speed-e",
   //     seats: BESIDE(-0.55, 0.95),
-  //     speed: 20,
+  //     speed: 40,
   //   }),
   //   centreconsole: SPEED({
   //     name: "Centre console",
@@ -472,15 +472,15 @@ export const VEHICLES = {
   //     blurb: "A wide, open skiff with the helm in the middle.",
   //     model: "boats/boat-speed-f",
   //     seats: BESIDE(-0.45, 0.95),
-  //     speed: 21,
+  //     speed: 42,
   //   }),
   jetboat: SPEED({
     name: "Jet boat",
     price: 1100,
-    blurb: "A low, sleek hull for flat-out runs. The fastest thing afloat.",
+    blurb: "A low, sleek hull for flat-out runs. Nothing afloat is faster.",
     model: "boats/boat-speed-g",
     seats: BESIDE(-0.95, 1.05),
-    speed: 31,
+    speed: 62,
   }),
   //   skiboat: SPEED({
   //     name: "Ski boat",
@@ -488,7 +488,7 @@ export const VEHICLES = {
   //     blurb: "A sharp bow, a ski arch and a hull that likes to be driven hard.",
   //     model: "boats/boat-speed-h",
   //     seats: BESIDE(-0.9, 1.05),
-  //     speed: 27,
+  //     speed: 54,
   //   }),
   //   pilotlaunch: SPEED({
   //     name: "Pilot launch",
@@ -496,7 +496,7 @@ export const VEHICLES = {
   //     blurb: "A long, sure-footed launch with a cabin and aerials.",
   //     model: "boats/boat-speed-i",
   //     seats: BESIDE(-0.9, 1.05),
-  //     speed: 24,
+  //     speed: 48,
   //   }),
   daycruiser: SPEED({
     name: "Day cruiser",
@@ -504,7 +504,7 @@ export const VEHICLES = {
     blurb: "The longest of the speedboats, with a cuddy cabin in the bow.",
     model: "boats/boat-speed-j",
     seats: BESIDE(-1.25, 1.05),
-    speed: 25,
+    speed: 50,
   }),
 
   /* ----- workboats: tugs, towboats and houseboats ----- */
@@ -522,7 +522,7 @@ export const VEHICLES = {
   //       [0, 0.95, 1.25],
   //     ],
   //     draft: 1.4,
-  //     speed: 9,
+  //     speed: 18,
   //     turn: 0.7,
   //   }),
   //   pushtug: water({
@@ -539,7 +539,7 @@ export const VEHICLES = {
   //       [0, 0.95, 1.1],
   //     ],
   //     draft: 1.3,
-  //     speed: 8.5,
+  //     speed: 17,
   //     turn: 0.8,
   //   }),
   //   workboat: water({
@@ -556,7 +556,7 @@ export const VEHICLES = {
   //       [0, 0.95, 0.85],
   //     ],
   //     draft: 1.2,
-  //     speed: 9.5,
+  //     speed: 19,
   //     turn: 0.85,
   //   }),
   //   towboat: water({
@@ -574,7 +574,7 @@ export const VEHICLES = {
   //       [0.7, 1.16, 2.1, DECK],
   //     ],
   //     draft: 1.6,
-  //     speed: 8,
+  //     speed: 16,
   //     turn: 0.42,
   //   }),
   //   pushboat: water({
@@ -591,7 +591,7 @@ export const VEHICLES = {
   //       [0.7, 1.16, 2.1, DECK],
   //     ],
   //     draft: 1.6,
-  //     speed: 8,
+  //     speed: 16,
   //     turn: 0.42,
   //   }),
   //   houseboat: HOUSE({
@@ -648,7 +648,7 @@ export const VEHICLES = {
     length: 11,
     seats: HULL_SMALL,
     draft: 1.6,
-    speed: 12.5,
+    speed: 62,
     turn: 0.42,
   }),
   pirate_brig: SHIP({
@@ -659,18 +659,18 @@ export const VEHICLES = {
     length: 17,
     seats: HULL_MEDIUM,
     draft: 2.2,
-    speed: 13.5,
+    speed: 62,
     turn: 0.32,
   }),
   pirate_galleon: SHIP({
     name: "Pirate galleon",
     price: 7600,
-    blurb: "A great black-sailed galleon. Slow to turn; a helmsman and a crew of six.",
+    blurb: "A great black-sailed galleon. Quick, but slow to turn; a helmsman and a crew of six.",
     model: "ships/ship-pirate-large",
     length: 27,
     seats: HULL_LARGE,
     draft: 3,
-    speed: 14.5,
+    speed: 62,
     turn: 0.22,
   }),
   trading_sloop: SHIP({
@@ -681,7 +681,7 @@ export const VEHICLES = {
     length: 11,
     seats: HULL_SMALL,
     draft: 1.6,
-    speed: 12.5,
+    speed: 62,
     turn: 0.42,
   }),
   brigantine: SHIP({
@@ -692,18 +692,18 @@ export const VEHICLES = {
     length: 17,
     seats: HULL_MEDIUM,
     draft: 2.2,
-    speed: 13.5,
+    speed: 62,
     turn: 0.32,
   }),
   galleon: SHIP({
     name: "Galleon",
     price: 6800,
-    blurb: "A tall merchant galleon. Slow to turn; a helmsman and a crew of six.",
+    blurb: "A tall merchant galleon. Quick, but slow to turn; a helmsman and a crew of six.",
     model: "ships/ship-large",
     length: 27,
     seats: HULL_LARGE,
     draft: 3,
-    speed: 14.5,
+    speed: 62,
     turn: 0.22,
   }),
   //   ghost_ship: SHIP({
@@ -714,7 +714,7 @@ export const VEHICLES = {
   //     length: 17,
   //     seats: HULL_MEDIUM,
   //     draft: 2.2,
-  //     speed: 16,
+  //     speed: 62,
   //     turn: 0.36,
   //   }),
 
