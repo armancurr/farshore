@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stepHull } from "../src/game/shared/boat.ts";
-import { carExit, carGround, stepCar, wheelContacts } from "../src/game/shared/car.ts";
+import { carExit, carGround, stepCar, swamped, wheelContacts } from "../src/game/shared/car.ts";
 import { BOUNDARY, SEA_LEVEL } from "../src/game/shared/constants.ts";
 import {
   createVehicle,
@@ -168,7 +168,7 @@ test("a glancing impact slides along a wall without crossing it", () => {
   assert(b.x > 2, "Momentum carries it along the wall");
 });
 
-test("trees, overhangs, water, cliffs, walls of rock and the world's edge stop a car", () => {
+test("trees, overhangs, walls of rock and the world's edge stop a car", () => {
   for (const solid of [
     { x: 0, z: -10, r: 0.3, bottom: 0, top: 6, standable: false },
     { x: 0, z: -10, r: 4, bottom: 2.4, top: 4, standable: false },
@@ -183,13 +183,17 @@ test("trees, overhangs, water, cliffs, walls of rock and the world's edge stop a
     );
     assert(b.z > -9, "blocked by a solid");
   }
-  for (const height of [(_x, z) => (z < -10 ? -5 : 2), (_x, z) => (z < -10 ? 15 : 2)]) {
-    const b = car();
-    b.speed = 20;
-    drive(b, throttle, 2, ground(height));
-    assert(b.z > -10 && Math.abs(b.y - 2) < 0.2);
-  }
-  /* Too steep for a tyre to hold: the terrain's own normal says so. */
+  /* A wall of rock. */
+  const rock = car();
+  rock.speed = 20;
+  drive(
+    rock,
+    throttle,
+    2,
+    ground((_x, z) => (z < -10 ? 15 : 2)),
+  );
+  assert(rock.z > -10 && Math.abs(rock.y - 2) < 0.2);
+  /* Too steep to put a car down on: the terrain's own normal says so. */
   const cliff = { ...ground(), normalAt: () => [0.8, 0.5, 0] };
   assert.equal(carGround(cliff, SEDAN, 0, 0, 0), null);
   assert.equal(
@@ -215,6 +219,105 @@ test("the wheels follow a slope the car can climb, and it slows going up", () =>
   assert(Math.abs(b.pitch - Math.atan(0.2)) < 0.02);
   assert(Math.abs(b.y - terrain.heightAt(b.x, b.z)) < 0.25);
   assert(b.speed > 15 && b.speed < SEDAN.speed);
+});
+
+/* A slope rising `grade` metres per metre towards -z (ahead), with its normal to match. */
+function slope(grade, base = 30) {
+  const n = Math.hypot(grade, 1);
+  return { ...ground((_x, z) => base - z * grade), normalAt: () => [0, 1 / n, grade / n] };
+}
+
+test("off a cliff a car falls, lands on its wheels and drives on, never past 37 degrees of tilt", () => {
+  const terrain = ground((_x, z) => (z < -10 ? 2 : 14));
+  const b = car(14);
+  b.speed = 14;
+  let lowest = 14;
+  let flew = false;
+  let tilt = 0;
+  for (let i = 0; i < 240; i++) {
+    stepCar(b, throttle, 1 / 60, terrain, SEDAN);
+    if (b.z < -11 && b.y > 4) flew = true;
+    lowest = Math.min(lowest, b.y);
+    tilt = Math.max(tilt, Math.abs(b.pitch), Math.abs(b.roll));
+  }
+  assert(flew, "it carried on out past the edge before it came down");
+  assert(b.z < -40, "and kept driving once down");
+  assert(Math.abs(b.y - 2) < 0.25 && lowest > 1.8, "on the lower ground, not through it");
+  assert(b.speed > 8);
+  assert(tilt <= 0.65 + 1e-9);
+});
+
+test("a car drives down (and across) a slope too steep to climb, the right way up", () => {
+  const down = slope(-1.5);
+  const b = car(30);
+  b.speed = 6;
+  let tilt = 0;
+  for (let i = 0; i < 180; i++) {
+    stepCar(b, throttle, 1 / 60, down, SEDAN);
+    tilt = Math.max(tilt, Math.abs(b.pitch), Math.abs(b.roll));
+  }
+  assert(b.z < -15, "down it goes");
+  assert(b.y >= down.heightAt(b.x, b.z) - 0.15, "riding on the ground, not under it");
+  assert(tilt <= 0.65 + 1e-9);
+  /* Across it: sideways along the contour. */
+  const across = car(30);
+  across.rot = Math.PI / 2;
+  across.speed = 6;
+  drive(across, throttle, 2, down);
+  assert(across.x < -8, "along the slope");
+  assert(Math.abs(across.roll) <= 0.65 + 1e-9);
+  /* Up it: a slow, hard climb, slower still the steeper it is. */
+  const climb = (grade) => {
+    const up = car(30);
+    up.speed = 10;
+    drive(up, throttle, 3, slope(grade));
+    return up;
+  };
+  const flat = car(30);
+  flat.speed = 10;
+  drive(
+    flat,
+    throttle,
+    3,
+    ground(() => 30),
+  );
+  const fifty = climb(1.2);
+  const sixty = climb(1.75);
+  assert(fifty.z < -30 && fifty.z > flat.z, "up 50 degrees, slower than on the flat");
+  assert(sixty.z < -5 && sixty.z > fifty.z, "up 60 degrees, slower again");
+  /* Too steep to hold: it rolls back rather than sticking there. */
+  assert(climb(2.5).z > 0, "rolls back off 68 degrees");
+  /* A face of rock: no further. */
+  assert(climb(4).z > -2, "a wall at 76 degrees");
+  /* And nobody gets to put a car down on it. */
+  assert.equal(carGround(down, SEDAN, 0, 0, 0), null);
+});
+
+test("a car driven into the sea is swamped: it stops, sinks to the bottom and won't drive out", () => {
+  const sea = ground((_x, z) => (z < -10 ? -5 : 2));
+  const b = car();
+  b.speed = 14;
+  drive(b, throttle, 6, sea);
+  assert(b.z < -12, "in it went");
+  assert(swamped(b), "swamped");
+  assert(Math.abs(b.y + 5) < 0.2, "on the bottom");
+  assert(Math.abs(b.speed) < 0.2, "the water stopped it");
+  const z = b.z;
+  drive(b, intent({ forward: -1 }), 2, sea);
+  assert(Math.abs(b.z - z) < 0.2, "the engine's drowned");
+  /* Getting out: into the water beside it, to swim. */
+  const out = carExit(b, sea, SEDAN, 1);
+  assert(out && out.y < SEA_LEVEL && out.y >= -5);
+  /* Wading the shallows is fine. */
+  const shallow = car();
+  shallow.speed = 10;
+  drive(
+    shallow,
+    throttle,
+    3,
+    ground((_x, z) => (z < -10 ? -0.3 : 0.3)),
+  );
+  assert(shallow.z < -25 && !swamped(shallow));
 });
 
 test("tyres climb a kerb with lift and a speed cost; a high step stops them", () => {
@@ -672,4 +775,32 @@ test("creative and flying only count where the room allows creative (the dev ser
     room.leave(a.id);
     room.leave(b.id);
   }
+});
+
+test("sat in a car under the sea you drown, a few seconds after it goes under", () => {
+  let now = 100;
+  const room = new Room({ online: true, now: () => now });
+  const a = member(room);
+  room.tick();
+  room.handle(a.id, { t: "spawn", kind: "fourbyfour" });
+  room.tick();
+  const snap = a.last("snap").v.find((v) => vehicleFromIndex(v[1]) === "fourbyfour");
+  const { id, state } = unpackVehicle(snap);
+  room.handle(a.id, moveAt(state.x, state.y, state.z));
+  room.handle(a.id, { t: "interact", kind: "vehicle", id });
+  assert.equal(a.last("aboard").id, id);
+  /* As if it had rolled into the deep: the seat well under the surface. */
+  room.rides.get(id).state.y = SEA_LEVEL - 4;
+  const hurts = () => a.messages.filter((m) => m.t === "hurt" && m.cause === "drown").length;
+  for (let i = 0; i < 40; i++) {
+    now += 0.05;
+    room.tick();
+  }
+  assert.equal(hurts(), 0, "a breath held");
+  for (let i = 0; i < 40; i++) {
+    now += 0.05;
+    room.tick();
+  }
+  assert(hurts() >= 1, "then the water gets in");
+  room.leave(a.id);
 });

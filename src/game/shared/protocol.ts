@@ -52,7 +52,7 @@ export const FLAG = {
 
 export type Spawn = { x: number; y: number; z: number; yaw: number };
 
-export type HurtCause = "fall" | "animal" | "hit";
+export type HurtCause = "fall" | "animal" | "hit" | "drown";
 
 export type WorldInfo = {
   /* Every island on the grand map. */

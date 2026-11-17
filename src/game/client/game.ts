@@ -18,6 +18,7 @@ import {
   type VehicleState,
   vehicleSolids,
 } from "../shared/drive";
+import { swamped } from "../shared/car";
 import { FEATURES } from "../shared/features";
 import { clamp, lerp, wrapAngle } from "../shared/math";
 import {
@@ -354,6 +355,8 @@ export class Game {
     state: VehicleState | null;
     /* Its heading last frame, so the view turns with it. */
     yaw: number;
+    /* A car that's run into the sea: for the splash. */
+    wet?: boolean;
   } | null = null;
   private strokeAt = 0;
   private bumpAt = 0;
@@ -1061,6 +1064,10 @@ export class Game {
       ground.addSolids(ride.id, vehicleSolids(ride.kind, state));
       this.vehicles.steer(ride.id, state);
       const now = performance.now() / 1000;
+      /* Driven into the sea. */
+      const sunk = VEHICLES[ride.kind].class === "car" && state.y < SEA_LEVEL;
+      if (sunk && !ride.wet) this.audio.splash(1);
+      ride.wet = sunk;
       if (hit && Math.abs(state.speed) > 1.5 && now - this.bumpAt > 0.6) {
         this.bumpAt = now;
         this.audio.land(4 + Math.min(10, Math.abs(state.speed) * 0.5));
@@ -1146,6 +1153,12 @@ export class Game {
       this.audio.motor(null);
       return;
     }
+    /* Water in the engine. */
+    const look = ride.state ?? this.vehicles.look(ride.id);
+    if (def.class === "car" && look && swamped(look)) {
+      this.audio.motor(null);
+      return;
+    }
     const pose = ride.state ?? this.vehicles.look(ride.id);
     const top = def.hull?.speed ?? def.car?.speed ?? 20;
     this.audio.motor(Math.abs(pose?.speed ?? 0) / top);
@@ -1168,6 +1181,7 @@ export class Game {
   private rideHint(ride: NonNullable<typeof this.ride>) {
     const def = VEHICLES[ride.kind];
     const pose = ride.state ?? this.vehicles.look(ride.id);
+    if (def.class === "car" && pose && swamped(pose)) return "Swamped · E get out and swim";
     if (!ride.state) return `Riding along in the ${def.name.toLowerCase()} · E get off`;
     const speed = Math.abs(pose?.speed ?? 0);
     const pace = afloat(ride.kind)

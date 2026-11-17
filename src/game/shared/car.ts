@@ -1,4 +1,4 @@
-import { BOUNDARY, SEA_LEVEL, STEEP_NY } from "./constants";
+import { BOUNDARY, SEA_LEVEL } from "./constants";
 import type { DriveIntent, VehicleState } from "./drive";
 import { clamp, wrapAngle } from "./math";
 import type { Ground, Solid } from "./terrain";
@@ -7,8 +7,19 @@ import type { Ground, Solid } from "./terrain";
  * Four wheels over the hills. The swept tyre contacts climb low steps and
  * rounded rocks; damped suspension absorbs bumps; contact normals keep the
  * tangential motion on a glancing impact, so a wall turns you along it rather
- * than stopping you dead. The wheels climb what a person could, never a wall:
- * ground steeper than STEEP_NY, or a step higher than the tyres, stops them.
+ * than stopping you dead. Steep hills are a fight: past MAX_TILT the climb
+ * eats more and more of the engine, until somewhere short of WALL the car
+ * rolls back down. Only a face steeper than WALL, or a step higher than the
+ * tyres, stops it outright (sliding along it where it slants).
+ *
+ * Going down there's no limit: over a steep drop or a cliff edge the car
+ * leaves the ground, falls, and lands on its wheels. However the ground lies,
+ * the body never tilts past MAX_TILT, so it can't roll over: you can always
+ * drive on.
+ *
+ * Into the sea it goes too, but deeper than WADE it's swamped: the engine
+ * dies, the water stops it, and it settles on the bottom. The room drowns
+ * whoever stays in it.
  *
  * Steering is kinematic: the yaw follows the front wheels' lock over the
  * wheelbase, with a little lateral slip that the tyres scrub away.
@@ -40,10 +51,23 @@ export const STEP_RISE = 0.34;
 export const ROCK_RISE = 0.8;
 /* Sideways, m/s²: how hard the tyres can pull it round a bend. */
 const GRIP = 14;
-/* About 37 degrees, either way: steeper than that and the wheels can't hold. */
+/* About 37 degrees, either way: the most the body tilts, and where hills start to fight back. */
 const MAX_TILT = 0.65;
+/* About 70 degrees: a face of rock, more wall than hill. Nothing on wheels goes up that. */
+const WALL = 1.22;
+const WALL_NY = Math.cos(WALL);
+/* Water over the wheels deeper than this swamps a car (its floor, near enough). */
+export const WADE = 0.6;
+/* Sinking through water, m/s. */
+const SINK = 1.4;
+/* Falling, m/s²; and the fastest fall (under what the room believes of a report). */
+const GRAVITY = 9.81;
+const MAX_FALL = 28;
+/* Clear of the ground by more than this, the wheels have nothing to push on. */
+const AIRBORNE = 0.2;
 
-type Support = { y: number; pitch: number; roll: number };
+/* `steep`: a wall the wheels can't climb (fine to go down, or across). */
+type Support = { y: number; pitch: number; roll: number; steep: boolean };
 type Contact = { nx: number; nz: number; depth: number };
 
 function overlaps(s: Solid, x: number, z: number, radius: number) {
@@ -179,12 +203,18 @@ export function wheelContacts(terrain: Ground, spec: CarSpec, x: number, z: numb
   ] as const;
 }
 
+/*
+ * Where the car would rest at (x, z) facing `rot`, or what it would hit there.
+ * `strict` (putting one down) wants ground it could have driven onto; driving,
+ * any ground will do and the body's tilt is held within MAX_TILT.
+ */
 function probe(
   terrain: Ground,
   spec: CarSpec,
   x: number,
   z: number,
   rot: number,
+  strict = false,
 ): { ground: Support | null; hit: Contact | null } {
   const invalid = { ground: null, hit: null };
   const l = spec.halfLength;
@@ -193,9 +223,12 @@ function probe(
   const c = Math.cos(rot);
   const s = Math.sin(rot);
   const center = terrain.heightAt(x, z);
-  if (center < SEA_LEVEL + 0.1) return invalid;
-  /* A wall of rock, a cliff: no tyre holds on that. */
-  if (terrain.normalAt(x, z)[1] < STEEP_NY) return invalid;
+  /* Put down only on dry land; driven, into the sea it goes (and is swamped). */
+  if (strict && center < SEA_LEVEL + 0.1) return invalid;
+  /* A wall of rock: no tyre climbs that. Too steep even to stand a car on, for putting one down. */
+  const ny = terrain.normalAt(x, z)[1];
+  if (strict && ny < STRICT_NY) return invalid;
+  let steep = ny < WALL_NY;
   const solids = nearby(terrain, spec, x, z, rot);
   const supports = solids.filter((solid) => rideable(solid, terrain));
   const half = spec.track / 2;
@@ -206,12 +239,29 @@ function probe(
   const bl = at(-half, spec.back);
   const br = at(half, spec.back);
   const base = spec.back - spec.front;
-  const pitch = Math.atan2((fl + fr) / 2 - (bl + br) / 2, base);
-  const roll = Math.atan2((fr + br) / 2 - (fl + bl) / 2, spec.track);
-  if (Math.abs(pitch) > MAX_TILT || Math.abs(roll) > MAX_TILT) return invalid;
+  const tiltPitch = Math.atan2((fl + fr) / 2 - (bl + br) / 2, base);
+  const tiltRoll = Math.atan2((fr + br) / 2 - (fl + bl) / 2, spec.track);
+  const tilted = Math.abs(tiltPitch) > MAX_TILT || Math.abs(tiltRoll) > MAX_TILT;
+  if (tilted && strict) return invalid;
+  steep ||= Math.abs(tiltPitch) > WALL || Math.abs(tiltRoll) > WALL;
+  /* Never more than MAX_TILT: whatever the ground does, the car stays the right way up. */
+  const pitch = clamp(tiltPitch, -MAX_TILT, MAX_TILT);
+  const roll = clamp(tiltRoll, -MAX_TILT, MAX_TILT);
   /* The body's height at its middle, from the plane through the four wheels. */
   const mid = (spec.front + spec.back) / 2;
   let y = Math.max(center, (fl + fr + bl + br) / 4 + mid * Math.tan(pitch));
+  if (tilted) {
+    /* Held flatter than the ground: it rests on whichever wheels are highest. */
+    const tp = Math.tan(pitch);
+    const tr = Math.tan(roll);
+    y = Math.max(
+      y,
+      fl + (spec.front - mid) * tp + half * tr,
+      fr + (spec.front - mid) * tp - half * tr,
+      bl + (spec.back - mid) * tp + half * tr,
+      br + (spec.back - mid) * tp - half * tr,
+    );
+  }
   /* The floor can skim a low rounded crest between the wheels. */
   for (const lz of [spec.front / 2, 0, spec.back / 2]) {
     const px = x + s * lz;
@@ -231,9 +281,12 @@ function probe(
       const px = x + lx * c + s * lz;
       const pz = z - lx * s + c * lz;
       const h = terrain.heightAt(px, pz);
-      if (h < SEA_LEVEL || Math.abs(h - center) > 1.6) return invalid;
-      /* Ground under the body must clear its floor. */
-      if (h > chassis + spec.clearance) return invalid;
+      if (strict && (h < SEA_LEVEL || Math.abs(h - center) > 1.6)) return invalid;
+      /* Ground under the body must clear its floor (driving, the body rides up over it). */
+      if (h > chassis + spec.clearance) {
+        if (strict) return invalid;
+        y += h - chassis - spec.clearance;
+      }
       for (const solid of solids) {
         if (solid.top <= chassis + 0.12 || solid.bottom >= chassis + spec.height) continue;
         const touching = contact(solid, px, pz, r);
@@ -247,12 +300,59 @@ function probe(
       }
     }
   }
-  return { ground: hit ? null : { y, pitch, roll }, hit };
+  return { ground: hit ? null : { y, pitch, roll, steep }, hit };
+}
+
+/* Ground a car can be put down on: what a tyre always held (about 48 degrees). */
+const STRICT_NY = 0.66;
+
+/* Water over the wheels: the engine's drowned and it's going nowhere. */
+export function swamped(v: Pick<VehicleState, "y">) {
+  return v.y < SEA_LEVEL - WADE;
+}
+
+/*
+ * How steep the ground is along the way the car faces: positive uphill. The
+ * terrain's own slope, not the body's, which never tilts past MAX_TILT.
+ */
+function grade(terrain: Ground, x: number, z: number, rot: number) {
+  const [nx, ny, nz] = terrain.normalAt(x, z);
+  return Math.atan2(nx * Math.sin(rot) + nz * Math.cos(rot), Math.max(1e-3, ny));
 }
 
 /* Can a car stand here? The room asks before it puts one down. */
 export function carGround(terrain: Ground, spec: CarSpec, x: number, z: number, rot: number) {
-  return probe(terrain, spec, x, z, rot).ground;
+  return probe(terrain, spec, x, z, rot, true).ground;
+}
+
+/*
+ * Off the ground: it falls, keeps its way on, and the nose follows where it's
+ * headed, within MAX_TILT. Back on its wheels once it reaches `ground`.
+ */
+function fall(b: VehicleState, ground: Support, dt: number) {
+  /* Water slows a fall to a sink. */
+  const most = b.y < SEA_LEVEL ? SINK : MAX_FALL;
+  b.vy = Math.max(-most, b.vy - GRAVITY * dt);
+  b.y += b.vy * dt;
+  b.supportY = ground.y;
+  const nose = clamp(Math.atan2(b.vy, Math.max(4, Math.abs(b.speed))) * 0.6, -MAX_TILT, MAX_TILT);
+  b.pitch += (nose - b.pitch) * (1 - Math.exp(-dt * 3));
+  b.roll += (0 - b.roll) * (1 - Math.exp(-dt * 3));
+  if (b.y > ground.y) return 0;
+  /* Landed: the springs take what they can, a hard landing costs some speed. */
+  const impact = -b.vy;
+  b.y = ground.y;
+  b.vy = 0;
+  if (impact > 6) b.speed *= 0.8;
+  return impact;
+}
+
+/* The way down the slope at (x, z), as a contact normal to slide along, or null on the flat. */
+function downhill(terrain: Ground, x: number, z: number): Contact | null {
+  const [nx, , nz] = terrain.normalAt(x, z);
+  const flat = Math.hypot(nx, nz);
+  if (flat < 0.05) return null;
+  return { nx: nx / flat, nz: nz / flat, depth: 0 };
 }
 
 function suspend(b: VehicleState, ground: Support, dt: number) {
@@ -296,15 +396,27 @@ export function stepCar(
   while (remaining > 1e-7) {
     const h = Math.min(remaining, 1 / 120);
     remaining -= h;
+    /* In the air, or swamped, the wheels have nothing to push on, steer by or brake against. */
+    const flying = b.y > b.supportY + AIRBORNE;
+    const drowned = swamped(b);
+    const helpless = flying || drowned;
     /* S at speed brakes first, then reverses at a crawl. */
     const target = input.brake ? 0 : forward >= 0 ? forward * spec.speed : forward * spec.reverse;
     const braking = input.brake || b.speed * forward < 0;
     const accel = braking ? spec.brake : forward === 0 ? 3 : spec.accel;
-    /* Hills: gravity along the slope, eased by the engine. */
-    const slope = Math.sin(b.pitch) * 9.81 * 0.55;
+    /*
+     * Hills: gravity along the slope, eased by the engine. Past MAX_TILT it
+     * eats more and more of it, until the car can't hold and rolls back.
+     */
+    const rake = grade(terrain, b.x, b.z, b.rot);
+    const steepness = Math.abs(rake) > MAX_TILT ? rake : b.pitch;
+    const slope =
+      Math.sin(steepness) * 9.81 * (0.55 + 5.8 * Math.max(0, Math.abs(steepness) - MAX_TILT));
     const want =
       input.brake || forward === 0 ? target : clamp(target - slope, -spec.reverse, spec.speed);
-    b.speed += clamp(want - b.speed, -accel * h, accel * h);
+    if (!helpless) b.speed += clamp(want - b.speed, -accel * h, accel * h);
+    /* Wading slows it; swamped, the water brings it to a stop. */
+    if (b.y < SEA_LEVEL) b.speed *= Math.exp(-h * (drowned ? 2.5 : 0.8));
     b.aux = forward;
     /*
      * Full lock at walking pace; at speed, only as much as the tyres can
@@ -313,7 +425,7 @@ export function stepCar(
     const lock = Math.min(spec.steer, Math.atan((wheelbase * GRIP) / Math.max(1, b.speed ** 2)));
     const steering = -right * lock;
     b.steer += (steering - b.steer) * (1 - Math.exp(-h * 8));
-    const yawRate = (b.speed / wheelbase) * Math.tan(b.steer);
+    const yawRate = helpless ? 0 : (b.speed / wheelbase) * Math.tan(b.steer);
     b.turn = yawRate;
     const rot = wrapAngle(b.rot + yawRate * h);
     /* A handbrake lets the back step out; the tyres scrub the slide away. */
@@ -356,38 +468,80 @@ export function stepCar(
       b.slipZ = vz + Math.cos(heading) * b.speed;
       result = probe(terrain, spec, x, z, heading);
     }
-    const ground = result.ground;
-    const travel = Math.hypot(vx, vz) * h;
-    if (!ground || Math.abs(ground.y - b.supportY) > 0.12 + travel * Math.tan(MAX_TILT)) {
-      /* The edge of the sea, a cliff: no contact normal to slide along, so stop. */
+    let ground = result.ground;
+    /*
+     * Up into ground the wheels can't climb (a cliff face, ahead or met in
+     * mid-air): slide along it where it slants, as off a wall.
+     */
+    const wall = (g: Support | null, tx: number, tz: number) => {
+      if (!g) return false;
+      const travel = Math.hypot(tx - b.x, tz - b.z);
+      if (b.y > b.supportY + AIRBORNE) return g.y > b.y + STEP_RISE;
+      const rise = g.y - b.supportY;
+      return rise > 0.12 + travel * Math.tan(WALL) || (rise > 0.01 && g.steep);
+    };
+    if (wall(ground, x, z)) {
+      bumped = true;
+      const slope = downhill(terrain, x, z);
+      const incoming = slope ? Math.min(0, vx * slope.nx + vz * slope.nz) : 0;
+      ground = null;
+      if (slope && incoming < 0) {
+        vx -= incoming * 1.04 * slope.nx;
+        vz -= incoming * 1.04 * slope.nz;
+        x = b.x + vx * h;
+        z = b.z + vz * h;
+        const along = probe(terrain, spec, x, z, heading).ground;
+        if (!wall(along, x, z)) {
+          ground = along;
+          b.speed = vx * -Math.sin(heading) + vz * -Math.cos(heading);
+          b.slipX = vx + Math.sin(heading) * b.speed;
+          b.slipZ = vz + Math.cos(heading) * b.speed;
+        }
+      }
+    }
+    if (!ground) {
+      /* The world's edge, a wall dead ahead: stop (falling, if it's in the air). */
       bumped = true;
       b.speed *= 0.15;
       b.slipX = 0;
       b.slipZ = 0;
       b.steer *= 0.8;
       const rest = probe(terrain, spec, b.x, b.z, b.rot).ground;
-      if (rest) suspend(b, rest, h);
+      if (rest && b.y > rest.y + AIRBORNE) fall(b, rest, h);
+      else if (rest) suspend(b, rest, h);
       continue;
     }
-    /* Climbing a bump costs speed rather than keeping road pace over every stone. */
+    b.x = x;
+    b.z = z;
+    b.rot = heading;
+    /* Over a drop: off the ground until it comes back up to meet the wheels. */
+    if (b.y > ground.y + AIRBORNE) {
+      if (fall(b, ground, h) > 4) bumped = true;
+      continue;
+    }
+    /*
+     * Climbing a bump costs speed rather than keeping road pace over every
+     * stone. (Steep hills have their own cost, in `slope` above.)
+     */
     const rise = Math.max(0, ground.y - b.supportY);
-    if (rise > 0) {
+    if (rise > 0 && Math.abs(rake) <= MAX_TILT) {
       const loss = Math.min(
         Math.abs(b.speed) * 0.4,
         (9.81 * rise) / Math.max(2, Math.abs(b.speed)),
       );
       b.speed -= Math.sign(b.speed) * loss;
     }
-    b.x = x;
-    b.z = z;
-    b.rot = heading;
     suspend(b, ground, h);
   }
   return bumped;
 }
 
-/* Get out onto clear dry ground beside the car, within a small step of the seat. */
+/*
+ * Get out onto clear dry ground beside the car, within a small step of the
+ * seat; or, from a car in the sea, out into the water to swim for it.
+ */
 export function carExit(b: VehicleState, terrain: Ground, spec: CarSpec, side: number) {
+  const wet = b.y < SEA_LEVEL - 0.2;
   const w = spec.halfWidth + 0.75;
   const l = spec.halfLength;
   const spots: [number, number][] = [
@@ -402,7 +556,13 @@ export function carExit(b: VehicleState, terrain: Ground, spec: CarSpec, side: n
     const x = b.x + lx * Math.cos(b.rot) + lz * Math.sin(b.rot);
     const z = b.z - lx * Math.sin(b.rot) + lz * Math.cos(b.rot);
     const ground = terrain.groundAt(x, z, b.y + 1).ground;
-    if (Math.abs(x) > BOUNDARY || Math.abs(z) > BOUNDARY || ground < SEA_LEVEL - 0.6) continue;
+    if (Math.abs(x) > BOUNDARY || Math.abs(z) > BOUNDARY) continue;
+    if (wet) {
+      /* Into the water beside it, a little above the roof's reach of the bottom. */
+      if (ground > b.y + 1.5) continue;
+      return { x, y: Math.max(ground, Math.min(b.y + 0.5, SEA_LEVEL - 1)), z, yaw: b.rot };
+    }
+    if (ground < SEA_LEVEL - 0.6) continue;
     if (Math.abs(ground - b.y) > 1.5) continue;
     if (
       terrain
