@@ -5,7 +5,7 @@ import { type KitId, type ToolKind, TOOLS } from "./items";
  * and this is the only place to spend them.
  */
 
-export type ShopSection = "Shelter" | "Amenities" | "Gear" | "Vehicles";
+export type ShopSection = "Shelter" | "Amenities" | "Gear";
 
 export type ShopEntry = {
   id: string;
@@ -21,7 +21,6 @@ const CATALOG: readonly ShopEntry[] = [
   { id: "chest", section: "Amenities", price: 40, give: { kit: "chest" } },
   { id: "bed", section: "Amenities", price: 60, give: { kit: "bed" } },
   { id: "dock", section: "Amenities", price: 150, give: { kit: "dock" } },
-  { id: "rowboat", section: "Vehicles", price: 220, give: { kit: "rowboat" } },
 ];
 
 /* What's for sale here. Weapons come from the marketplace instead. */

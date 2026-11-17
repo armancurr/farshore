@@ -1,13 +1,26 @@
 import { CheckIcon } from "@phosphor-icons/react";
 import { cn } from "cn";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import type { Game } from "../../game/client/game";
 import type { Showcase } from "../../game/client/scene/showcase";
 import { SKINS, type SkinId, skinDef } from "../../game/shared/skins";
-import { VEHICLE_KINDS, VEHICLES, type VehicleKind } from "../../game/shared/vehicles";
-import { WEAPON_KINDS, WEAPONS, type WeaponDef, type WeaponKind } from "../../game/shared/weapons";
+import {
+  controlsOf,
+  VEHICLE_KINDS,
+  VEHICLE_SECTIONS,
+  VEHICLES,
+  type VehicleKind,
+} from "../../game/shared/vehicles";
+import {
+  type Grip,
+  gripOf,
+  WEAPON_KINDS,
+  WEAPONS,
+  type WeaponDef,
+  type WeaponKind,
+} from "../../game/shared/weapons";
 
 type Tab = "skins" | "weapons" | "vehicles";
 
@@ -56,9 +69,15 @@ export function Marketplace(props: {
       if (now.tab === "skins") showcase.current.show(now.picked);
       else if (now.tab === "weapons") showcase.current.showWeapon(now.eyed);
       else showcase.current.showVehicle(now.ride);
-      setPortraits(mod.portraitsOf(SKINS.map((s) => s.id)));
-      setWeaponPortraits(mod.weaponPortraitsOf(WEAPON_KINDS));
-      setVehiclePortraits(mod.vehiclePortraitsOf(VEHICLE_KINDS));
+      void mod.portraitsOf(SKINS.map((s) => s.id)).then((p) => {
+        if (!disposed) setPortraits(p);
+      });
+      void mod.weaponPortraitsOf(WEAPON_KINDS).then((p) => {
+        if (!disposed) setWeaponPortraits(p);
+      });
+      void mod.vehiclePortraitsOf(VEHICLE_KINDS).then((p) => {
+        if (!disposed) setVehiclePortraits(p);
+      });
     });
     return () => {
       disposed = true;
@@ -169,12 +188,8 @@ export function Marketplace(props: {
           <div className="flex items-end justify-between gap-4 px-5 pb-5 sm:px-6 sm:pb-6">
             <div className="flex min-w-0 flex-col gap-2">
               <h3 className="truncate font-sans text-3xl leading-none font-extrabold">{name}</h3>
-              {tab === "weapons" && <WeaponStats def={weapon} />}
-              {tab === "vehicles" && (
-                <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">
-                  {vehicle.hint}
-                </p>
-              )}
+              {tab === "weapons" && <WeaponStats def={weapon} grip={gripOf(eyed)} />}
+              {tab === "vehicles" && <VehicleStats kind={ride} />}
               <Price price={price} />
             </div>
             {tab === "vehicles" ? (
@@ -238,19 +253,26 @@ export function Marketplace(props: {
                     />
                   </li>
                 ))
-              : VEHICLE_KINDS.map((k) => (
-                  <li key={k}>
-                    <Tile
-                      name={VEHICLES[k].name}
-                      caption
-                      portrait={vehiclePortraits?.get(k) ?? null}
-                      picked={ride === k}
-                      chosen={false}
-                      chosenLabel=""
-                      onPick={() => setRide(k)}
-                      onChoose={() => spawn(k)}
-                    />
-                  </li>
+              : VEHICLE_SECTIONS.map((section) => (
+                  <Fragment key={section}>
+                    <li className="col-span-3 pt-3 pb-0.5 font-sans text-[11px] font-bold tracking-wide text-white/60 uppercase first:pt-0">
+                      {section}
+                    </li>
+                    {VEHICLE_KINDS.filter((k) => VEHICLES[k].section === section).map((k) => (
+                      <li key={k}>
+                        <Tile
+                          name={VEHICLES[k].name}
+                          caption
+                          portrait={vehiclePortraits?.get(k) || null}
+                          picked={ride === k}
+                          chosen={false}
+                          chosenLabel=""
+                          onPick={() => setRide(k)}
+                          onChoose={() => spawn(k)}
+                        />
+                      </li>
+                    ))}
+                  </Fragment>
                 ))}
         </ul>
       </div>
@@ -276,15 +298,27 @@ function pace(cooldown: number) {
   return "Very slow";
 }
 
-/* What a weapon does: damage, reach and pace, then what makes it different. */
-function WeaponStats(props: { def: WeaponDef }) {
+/* How it's held, in words. */
+const HELD: Record<Grip, string> = {
+  unarmed: "Bare hands",
+  "1h": "One hand",
+  "2h": "Two hands",
+  dual: "A pair",
+  polearm: "Two hands",
+  shield: "Left arm",
+};
+
+/* What a weapon does: how it's held, damage, reach and pace, then what makes it different. */
+function WeaponStats(props: { def: WeaponDef; grip: Grip }) {
   const d = props.def;
   const damage = d.charged ? `${d.damage}–${d.charged}` : `${d.damage}`;
   const special = d.hint.split(" · ").slice(1).join(" · ");
   return (
     <div className="flex flex-col gap-1.5">
       <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
-        <Stat label="Damage" value={damage} />
+        <Stat label="Held" value={HELD[props.grip]} />
+        {/* A shield's blow is its bash. */}
+        <Stat label={d.guard ? "Bash" : "Damage"} value={damage} />
         <Stat label="Reach" value={`${d.reach} m`} />
         <Stat label="Pace" value={pace(d.cooldown)} />
       </dl>
@@ -293,6 +327,28 @@ function WeaponStats(props: { def: WeaponDef }) {
           {special.charAt(0).toUpperCase() + special.slice(1)}
         </p>
       )}
+    </div>
+  );
+}
+
+/* What a vehicle is like: its pace, who it carries, and how you drive it. */
+function VehicleStats(props: { kind: VehicleKind }) {
+  const d = VEHICLES[props.kind];
+  const top = d.hull?.speed ?? d.car?.speed ?? d.mount?.gallop ?? 0;
+  const afloat = !!d.hull;
+  const pace = afloat ? `${Math.round(top * 1.944)} knots` : `${Math.round(top * 3.6)} km/h`;
+  const seats = d.seats.length;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="max-w-[22rem] font-sans text-[13px] leading-snug text-white/80">{d.blurb}</p>
+      <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-sm tabular-nums">
+        <Stat label={d.class === "sail" ? "Best pace" : "Top speed"} value={pace} />
+        <Stat label="Seats" value={seats === 1 ? "1" : `${seats}`} />
+        <Stat label="Length" value={`${d.length.toFixed(1)} m`} />
+      </dl>
+      <p className="max-w-[22rem] font-sans text-[12px] leading-snug text-white/60">
+        {controlsOf(props.kind)}
+      </p>
     </div>
   );
 }

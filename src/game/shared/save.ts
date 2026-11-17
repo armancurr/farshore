@@ -3,7 +3,7 @@ import {
   HOTBAR,
   type Inventory,
   isItemId,
-  isToolKind,
+  toToolKind,
   type ItemId,
   MAX_TOOLS,
   type Tool,
@@ -11,6 +11,7 @@ import {
 } from "./items";
 import { parseMission, parsePayouts } from "./missions";
 import { isSkinId, type SkinId } from "./skins";
+import { migrateKind, type VehicleKind } from "./vehicles";
 
 /*
  * What an online host stores: everyone who's been on the grand map, and what
@@ -25,10 +26,19 @@ export type SavedPlayer = {
   yaw: number;
   health: number;
   inv: Inventory;
-  /* The rowboat you were sitting in. */
-  boat: number | null;
+  /* The vehicle you had out, and whether you were at its helm. */
+  vehicle: SavedVehicle | null;
   /* Saved on a map that has since changed: wake on the Harbor, with everything you had. */
   relocate?: boolean;
+};
+
+export type SavedVehicle = {
+  kind: VehicleKind;
+  x: number;
+  y: number;
+  z: number;
+  rot: number;
+  aboard: boolean;
 };
 
 type Obj = Record<string, unknown>;
@@ -61,10 +71,14 @@ function inventory(v: unknown): Inventory | null {
   const tools: Tool[] = [];
   for (const t of v.tools) {
     if (!isObj(t) || !id(t.id) || !int(t.uses, -1, 1000)) return null;
-    /* Retired tools (the sword, the pickaxe, the flail, bought variants) are simply gone. */
-    if (!isToolKind(t.kind) || t.uses === 0 || tools.some((o) => o.id === t.id)) continue;
+    /*
+     * Retired weapons come back as their heirs; other retired tools (the
+     * pickaxe, the flail, bought variants) are simply gone.
+     */
+    const kind = toToolKind(t.kind);
+    if (!kind || t.uses === 0 || tools.some((o) => o.id === t.id)) continue;
     /* Weapons no longer wear out. */
-    tools.push({ id: t.id, kind: t.kind, uses: TOOLS[t.kind].weapon ? -1 : t.uses });
+    tools.push({ id: t.id, kind, uses: TOOLS[kind].weapon ? -1 : t.uses });
   }
   if (tools.length > MAX_TOOLS) return null;
   /* Slot 1 is always fists; other slots must point at tools you have, once each. */
@@ -89,6 +103,38 @@ function inventory(v: unknown): Inventory | null {
   };
 }
 
+/*
+ * The vehicle someone left with. Older saves kept a rowboat's id (`boat`) for
+ * someone sitting in one: that's a rowboat where they sat. A desert bike, or
+ * anything else that's gone, is simply dropped.
+ */
+function vehicle(v: Obj): SavedVehicle | null {
+  const lim = BOUNDARY + 10;
+  const at = v.vehicle;
+  if (isObj(at)) {
+    const kind = migrateKind(at.kind);
+    if (
+      !kind ||
+      !num(at.x, -lim, lim) ||
+      !num(at.y, -60, 200) ||
+      !num(at.z, -lim, lim) ||
+      !num(at.rot, -100, 100)
+    )
+      return null;
+    return { kind, x: at.x, y: at.y, z: at.z, rot: at.rot, aboard: at.aboard === true };
+  }
+  if (id(v.boat))
+    return {
+      kind: "rowboat",
+      x: v.x as number,
+      y: 0,
+      z: v.z as number,
+      rot: v.yaw as number,
+      aboard: true,
+    };
+  return null;
+}
+
 function player(v: unknown, relocate: boolean): SavedPlayer | null {
   if (!isObj(v)) return null;
   const lim = BOUNDARY + 10;
@@ -104,7 +150,7 @@ function player(v: unknown, relocate: boolean): SavedPlayer | null {
     yaw: v.yaw,
     health: Math.max(1, v.health),
     inv,
-    boat: relocate ? null : id(v.boat) ? v.boat : null,
+    vehicle: relocate ? null : vehicle(v),
     relocate: relocate || v.relocate === true,
   };
 }
@@ -115,8 +161,10 @@ function player(v: unknown, relocate: boolean): SavedPlayer | null {
  * 2: the islands are authored, and nobody settles land of their own. A
  * version 1 save still loads: its islands are dropped, and everyone keeps
  * what they carry but wakes on the Harbor.
+ * 3: the islands were reshaped (terraces, places, paths). Older saves load
+ * the same way: everyone keeps their things and wakes on the Harbor.
  */
-export const WORLD_SAVE_VERSION = 2;
+export const WORLD_SAVE_VERSION = 3;
 
 /* Someone who's been here: who they are, and where they left off. */
 export type SavedProfile = {
@@ -136,10 +184,10 @@ export type WorldSave = {
 
 /* A stored grand map, or null if it's missing or damaged. Bad entries are dropped, not fatal. */
 export function parseWorldSave(raw: unknown): WorldSave | null {
-  if (!isObj(raw) || (raw.v !== 1 && raw.v !== WORLD_SAVE_VERSION)) return null;
+  if (!isObj(raw) || (raw.v !== 1 && raw.v !== 2 && raw.v !== WORLD_SAVE_VERSION)) return null;
   if (!Array.isArray(raw.players) || !isObj(raw.ids)) return null;
-  /* Every place on an old map may now be sea, or somewhere else entirely. */
-  const relocate = raw.v === 1;
+  /* Every place on an old map may now be sea, a cliff, or somewhere else entirely. */
+  const relocate = raw.v !== WORLD_SAVE_VERSION;
   const players: SavedProfile[] = [];
   for (const v of raw.players) {
     if (!isObj(v) || typeof v.token !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(v.token))

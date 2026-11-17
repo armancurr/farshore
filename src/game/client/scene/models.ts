@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { type GLTF, GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
+import { worldShade } from "./shade";
 
 /*
  * Models from the asset packs (public/models), loaded once and shared. The
@@ -40,15 +41,17 @@ export function flatten(
     const src = m as THREE.MeshStandardMaterial;
     const color = src.color ? src.color.clone() : new THREE.Color(1, 1, 1);
     const want = recolor?.(m.name ?? "", color);
-    out = new THREE.MeshLambertMaterial({
-      name: m.name,
-      color: want !== null && want !== undefined ? new THREE.Color(want) : color,
-      map: src.map ?? null,
-      flatShading: true,
-      side: src.side,
-      transparent: src.transparent,
-      alphaTest: src.alphaTest,
-    });
+    out = worldShade(
+      new THREE.MeshLambertMaterial({
+        name: m.name,
+        color: want !== null && want !== undefined ? new THREE.Color(want) : color,
+        map: src.map ?? null,
+        flatShading: true,
+        side: src.side,
+        transparent: src.transparent,
+        alphaTest: src.alphaTest,
+      }),
+    );
     swapped.set(m, out);
     return out;
   };

@@ -30,3 +30,6 @@ tsconfig.tsbuildinfo
 Thumbs.db
 .oc
 .env*
+
+# Raw asset packs (scripts/fetch-assets.sh), built into public/models by scripts/build-assets.mjs
+/assets-src

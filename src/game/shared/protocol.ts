@@ -1,12 +1,13 @@
 import { GRAND_SIZE } from "./constants";
 import type { IslandInfo } from "./islands";
 import { HOTBAR, type Inventory, isItemId, isKitId, type ItemId, type KitId } from "./items";
+import type { VehicleSnap } from "./drive";
 import type { BoardState, Payout } from "./missions";
 import type { Prefab } from "./prefabs";
 import { isSkinId, type SkinId } from "./skins";
 import type { SpeciesId } from "./species";
 import { isVehicleKind, type VehicleKind } from "./vehicles";
-import { isWeaponKind, type WeaponKind } from "./weapons";
+import { toWeaponKind, type WeaponKind } from "./weapons";
 
 export type RosterEntry = { id: number; name: string; skin: SkinId };
 
@@ -23,10 +24,7 @@ export const ANIMAL_FLAG = {
   cull: 2,
 } as const;
 
-/* Compact per-boat state: [id, x, z, heading, speed]. */
-export type BoatSnap = [number, number, number, number, number];
-/* Bike: id, x, y, z, heading, speed, steering, terrain pitch, lean. */
-export type BikeSnap = [number, number, number, number, number, number, number, number, number];
+export type { VehicleSnap };
 
 export const ANIMAL_STATE = {
   graze: 0,
@@ -40,7 +38,7 @@ export const ANIMAL_STATE = {
 } as const;
 
 export const FLAG = {
-  riding: 512, // Server-owned bike posture; never accepted from a client frame.
+  riding: 512, // Seated in a vehicle: the room sets it, never a client.
   alive: 1,
   sprint: 2,
   grounded: 4,
@@ -64,6 +62,8 @@ export type WorldInfo = {
   roster: RosterEntry[];
   board: BoardState;
   prefabs: Prefab[];
+  /* Every vehicle out there, as in a snapshot. */
+  vehicles: VehicleSnap[];
   /* Where you stand right now; null when only watching. */
   you: Spawn | null;
 };
@@ -80,8 +80,8 @@ export type ServerMsg =
       time: number;
       p: PlayerSnap[];
       a: AnimalSnap[];
-      b: BoatSnap[];
-      bikes: BikeSnap[];
+      /* Every vehicle out there (see drive.ts packVehicle). */
+      v: VehicleSnap[];
       me: {
         health: number;
         stagger: number;
@@ -92,8 +92,13 @@ export type ServerMsg =
   | { t: "board"; board: BoardState }
   /* Something built, or changed (a chest's contents). */
   | { t: "prefab"; prefab: Prefab }
-  /* You're in this boat now (or out of it, with null). */
-  | { t: "aboard"; boat: number | null }
+  /*
+   * You're in this vehicle's seat now (seat 0 steers), or out of it with
+   * null: then `at` is where you step off, when the room chose it.
+   */
+  | { t: "aboard"; id: number | null; seat: number; at?: Spawn }
+  /* Where your vehicle really is: what you reported didn't add up. */
+  | { t: "vfix"; snap: VehicleSnap }
   | { t: "unprefab"; id: number }
   /* Coins into your purse at the Guild Board: a contract handed in, or payouts collected. */
   | { t: "paid"; payouts: Payout[] }
@@ -148,7 +153,7 @@ export type ClientMsg =
   | { t: "skin"; skin: SkinId }
   /* Take up a weapon from the marketplace, in place of the one you carry (null: put it away). */
   | { t: "arm"; kind: WeaponKind | null }
-  /* Put a vehicle from the marketplace in the water nearby, in place of the last one you spawned. */
+  /* Put a vehicle from the marketplace in the water or on the ground nearby, in place of your last one. */
   | { t: "spawn"; kind: VehicleKind }
   | {
       t: "move";
@@ -161,9 +166,11 @@ export type ClientMsg =
       vy: number;
       vz: number;
       flags: number;
-      /* Rowing: the boat's heading and speed (its position is yours). */
-      boat?: { rot: number; speed: number };
-      drive?: { forward: number; right: number; brake: boolean };
+      /*
+       * At the helm: where you've driven it, as RIDE_FIELDS. Your own
+       * position is ignored while you ride; the room seats you.
+       */
+      ride?: number[];
     }
   | { t: "attack"; charge: number }
   | { t: "stance"; block: boolean; charge: boolean }
@@ -182,8 +189,23 @@ export type ClientMsg =
   | { t: "abandon" }
   | { t: "collect" };
 
-export type InteractKind = "prefab";
-const INTERACT_KINDS: readonly InteractKind[] = ["prefab"];
+export type InteractKind = "prefab" | "vehicle";
+const INTERACT_KINDS: readonly InteractKind[] = ["prefab", "vehicle"];
+
+/* What a driver reports of their vehicle, in this order. */
+export const RIDE_FIELDS = [
+  "x",
+  "y",
+  "z",
+  "rot",
+  "speed",
+  "steer",
+  "turn",
+  "pitch",
+  "roll",
+  "vy",
+  "aux",
+] as const;
 
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 
@@ -200,18 +222,9 @@ const isPlayerName = (v: unknown): v is string =>
 const finite = (v: unknown, limit: number): v is number =>
   typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= limit;
 
-function boatOf(v: unknown) {
-  if (!v || typeof v !== "object") return undefined;
-  const b = v as Record<string, unknown>;
-  return finite(b.rot, 100) && finite(b.speed, 40) ? { rot: b.rot, speed: b.speed } : undefined;
-}
-
-function driveOf(v: unknown) {
-  if (!v || typeof v !== "object") return undefined;
-  const d = v as Record<string, unknown>;
-  return finite(d.forward, 1) && finite(d.right, 1) && typeof d.brake === "boolean"
-    ? { forward: d.forward, right: d.right, brake: d.brake }
-    : undefined;
+function rideOf(v: unknown) {
+  if (!Array.isArray(v) || v.length !== RIDE_FIELDS.length) return undefined;
+  return v.every((n) => finite(n, COORD)) ? (v as number[]) : undefined;
 }
 
 const isInt = (v: unknown, min: number, max: number): v is number =>
@@ -237,13 +250,15 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         token: isToken(m.token) ? m.token : undefined,
         own: m.own === true,
         skin: isSkinId(m.skin) ? m.skin : undefined,
-        weapon: m.weapon === null ? null : isWeaponKind(m.weapon) ? m.weapon : undefined,
+        weapon: m.weapon === null ? null : (toWeaponKind(m.weapon) ?? undefined),
       };
     case "skin":
       return isSkinId(m.skin) ? { t: "skin", skin: m.skin } : null;
-    case "arm":
-      if (m.kind !== null && !isWeaponKind(m.kind)) return null;
-      return { t: "arm", kind: m.kind };
+    case "arm": {
+      if (m.kind === null) return { t: "arm", kind: null };
+      const kind = toWeaponKind(m.kind);
+      return kind ? { t: "arm", kind } : null;
+    }
     case "spawn":
       return isVehicleKind(m.kind) ? { t: "spawn", kind: m.kind } : null;
     case "attack":
@@ -293,8 +308,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
         vy: m.vy as number,
         vz: m.vz as number,
         flags: (m.flags as number) | 0,
-        boat: boatOf(m.boat),
-        drive: driveOf(m.drive),
+        ride: rideOf(m.ride),
       };
     }
     default:

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { CONTOUR, GRAND_SIZE, MAX_ISLANDS } from "../../shared/constants";
 import type { Terrain } from "../../shared/terrain";
 import { GLSL_COMMON, PALETTE, shared } from "./materials";
+import { pathDistance } from "../../shared/paths";
 import { bakeShoreDistance } from "./shore";
 
 /*
@@ -114,6 +115,12 @@ const colors = {
   uSea: { value: hex(PALETTE.sea) },
   uSeaLine: { value: hex(PALETTE.seaLine) },
   uSeaDeep: { value: hex(PALETTE.seaDeep) },
+  /* The ground's zones, all mixed from the palette: pale sand, worn earth, lavender stone. */
+  uSand: { value: hex(PALETTE.paper).lerp(hex(PALETTE.plank), 0.42) },
+  uDirt: { value: hex(PALETTE.land).lerp(hex(PALETTE.plank), 0.3) },
+  uCobble: { value: hex(PALETTE.rock).lerp(hex(PALETTE.landMajor), 0.5) },
+  uRock: { value: hex(PALETTE.rock) },
+  uRockDark: { value: hex(PALETTE.landMajor).lerp(hex(PALETTE.timber), 0.35) },
 };
 const GLSL_COLORS = /* glsl */ `
   uniform vec3 uLand;
@@ -127,6 +134,11 @@ const GLSL_COLORS = /* glsl */ `
   uniform vec3 uSea;
   uniform vec3 uSeaLine;
   uniform vec3 uSeaDeep;
+  uniform vec3 uSand;
+  uniform vec3 uDirt;
+  uniform vec3 uCobble;
+  uniform vec3 uRock;
+  uniform vec3 uRockDark;
 `;
 
 const TERRAIN_VERTEX = /* glsl */ `
@@ -153,13 +165,35 @@ const TERRAIN_FRAGMENT = /* glsl */ `
   uniform float uContour;
   /* The island's meadows (r) and groves (g), over its tile. */
   uniform sampler2D uFlora;
+  /* Distance to the nearest path (r, 0..12 m), the trampled ground of the places (g), distance inland (b, 0..32 m). */
+  uniform sampler2D uZones;
+  /* 1 on the Harbor: its paths are cobbled. */
+  uniform float uCobbled;
   varying vec3 vWorld;
+
+  /* Cobblestones: a cell pattern, each stone its own shade, mortar between. */
+  vec2 cobble(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float d1 = 9.0, d2 = 9.0, id = 0.0;
+    for (int y = -1; y <= 1; y++)
+      for (int x = -1; x <= 1; x++) {
+        vec2 g = vec2(float(x), float(y));
+        vec2 o = vec2(hash2(i + g), hash2(i + g + 17.1)) * 0.8 + 0.1;
+        float d = length(g + o - f);
+        if (d < d1) { d2 = d1; d1 = d; id = hash2(i + g + 3.7); }
+        else if (d < d2) d2 = d;
+      }
+    return vec2(d2 - d1, id);
+  }
+
   void main() {
     vec3 hf = field(vWorld.xz);
     float h = hf.x;
     float slope = length(hf.yz);
     vec3 n = normalize(vec3(-hf.y, 1.0, -hf.z));
-    float diff = sunlight(n);
+    float shade = worldShadow(vWorld + n * 0.1);
+    float diff = sunlight(n) * shade;
 
     /* How fast h changes per pixel, exactly, so every line holds its width. */
     vec2 dh = vec2(dot(hf.yz, dFdx(vWorld).xz), dot(hf.yz, dFdy(vWorld).xz));
@@ -172,13 +206,54 @@ const TERRAIN_FRAGMENT = /* glsl */ `
     /* On level ground a contour would wander; let it go instead. */
     float fade = smoothstep(0.004, 0.03, slope);
 
-    float steep = smoothstep(0.9, 0.62, n.y);
-    vec2 flora = texture2D(uFlora, (vWorld.xz - uOrigin + uHalf) / (2.0 * uHalf)).rg;
-    vec3 ground = mix(uLand, uLandMeadow, flora.r * 0.9);
+    vec2 tuv = (vWorld.xz - uOrigin + uHalf) / (2.0 * uHalf);
+    vec2 flora = texture2D(uFlora, tuv).rg;
+    vec3 zone = texture2D(uZones, tuv).rgb;
+    float grain = vnoise(vWorld.xz * 0.35);
+    float blot = vnoise(vWorld.xz * 0.045);
+
+    /* The open ground: meadow and grove tints over the bare land, mottled so it isn't flat paint. */
+    vec3 ground = mix(uLand, uLandMeadow * 1.08, flora.r);
     ground = mix(ground, uLandForest, flora.g * 0.6);
-    vec3 c = ground * (0.78 + 0.34 * diff) * mix(1.0, 0.9, steep);
-    c = mix(c, uLandLine * (0.85 + 0.2 * diff), minor * 0.55 * fade);
-    c = mix(c, uLandMajor * (0.85 + 0.2 * diff), major * 0.7 * fade);
+    ground *= 0.94 + 0.12 * blot + 0.04 * grain;
+
+    /* The beach: a band of pale sand above the waterline, wider where the shore is gentle. */
+    float inland = zone.b * 32.0;
+    float reach = 7.0 + 12.0 * blot;
+    float sand = (1.0 - smoothstep(reach - 2.5, reach + 1.5, inland)) * (1.0 - smoothstep(2.5, 4.0, h)) * smoothstep(0.55, 0.8, n.y);
+    ground = mix(ground, uSand * (0.95 + 0.08 * grain), sand);
+
+    /* Cliffs: the terraces' risers show their rock, in layers, darker toward the foot. */
+    float steep = smoothstep(0.8, 0.6, n.y);
+    float strata = smoothstep(0.42, 0.58, fract(h * 0.55 + blot * 0.8));
+    vec3 rock = mix(uRockDark, uRock, 0.35 + 0.45 * strata + 0.2 * grain);
+    ground = mix(ground, rock, steep);
+
+    /* Paths: worn earth (cobbles on the Harbor) with a soft, ragged edge; places are trampled. */
+    float pd = zone.r * 12.0 + (grain - 0.5) * 0.7;
+    /* Trails are a cart's width; the Harbor's cobbled lanes are wider. */
+    float tw = uCobbled > 0.5 ? 1.9 : 1.15;
+    float trail = 1.0 - smoothstep(tw - 0.4, tw + 0.35, pd);
+    float verge = (1.0 - smoothstep(tw + 0.2, tw + 1.6, pd)) * (1.0 - trail);
+    vec3 path = uDirt * (0.92 + 0.1 * grain);
+    if (uCobbled > 0.5) {
+      vec2 cb = cobble(vWorld.xz * 1.4);
+      vec3 stone = uCobble * (0.86 + 0.18 * cb.y);
+      path = mix(uDirt * 0.8, stone, smoothstep(0.04, 0.12, cb.x));
+    }
+    ground = mix(ground, ground * 0.9, verge * 0.6);
+    ground = mix(ground, path, trail * (1.0 - steep));
+    /* Round the places the ground is trodden bare. */
+    float trod = zone.g * (0.5 + 0.35 * grain) * (1.0 - steep) * (1.0 - trail);
+    ground = mix(ground, uDirt * (0.9 + 0.1 * grain), trod);
+    float worn = max(trail, trod);
+
+    vec3 c = ground * (0.74 + 0.4 * diff);
+    /* Shadows lean cool: violet from the sky, not grey. */
+    c = mix(c, c * vec3(0.86, 0.84, 1.08), (1.0 - shade) * 0.6);
+    float lines = fade * (1.0 - steep) * (1.0 - worn) * (1.0 - sand);
+    c = mix(c, uLandLine * (0.85 + 0.2 * diff), minor * 0.3 * lines);
+    c = mix(c, uLandMajor * (0.85 + 0.2 * diff), major * 0.45 * lines);
 
     /* The shore. */
     float waterY = swashLevel();
@@ -311,6 +386,95 @@ function floraTexture(terrain: Terrain) {
   return tex;
 }
 
+/*
+ * The paths and places, baked fine enough to draw a trail's edge: distance to
+ * the nearest path (r) and how trampled the ground is round each place (g).
+ */
+function zonesTexture(terrain: Terrain) {
+  const res = Math.min(1024, Math.round(terrain.size / 1.6));
+  const local = terrain.paths.map((line) =>
+    line.map((p) => ({ x: p.x - terrain.ox, z: p.z - terrain.oz })),
+  );
+  const dist = pathDistance(local, terrain.half, res, 12);
+  const data = new Uint8Array(res * res * 4);
+  const cell = terrain.size / res;
+  for (let k = 0; k < res * res; k++) data[k * 4] = Math.round((dist[k] / 12) * 255);
+  for (const pl of terrain.places) {
+    if (pl.kind === "landing" || pl.kind === "dock" || pl.kind === "wreck") continue;
+    /* The market is a cobbled square: drawn as path, not trodden earth. */
+    const square = pl.kind === "market";
+    const cx = pl.x - terrain.ox + terrain.half;
+    const cz = pl.z - terrain.oz + terrain.half;
+    const r = pl.r + 2;
+    for (
+      let i = Math.max(0, Math.floor((cz - r) / cell));
+      i <= Math.min(res - 1, Math.ceil((cz + r) / cell));
+      i++
+    )
+      for (
+        let j = Math.max(0, Math.floor((cx - r) / cell));
+        j <= Math.min(res - 1, Math.ceil((cx + r) / cell));
+        j++
+      ) {
+        const d = Math.hypot((j + 0.5) * cell - cx, (i + 0.5) * cell - cz);
+        const v = Math.round(
+          255 * (1 - Math.min(1, Math.max(0, (d - pl.r * 0.55) / (r - pl.r * 0.55)))),
+        );
+        const k = (i * res + j) * 4;
+        if (square) {
+          if (d < pl.r + 1)
+            data[k] = Math.min(data[k], Math.round((Math.max(0, d - pl.r + 2) / 12) * 255));
+        } else if (v > data[k + 1]) data[k + 1] = v;
+      }
+  }
+  /* How far inland each spot is (b, 0..32 m): the beach is a band round the coast, whatever its height. */
+  const inland = new Float32Array(res * res);
+  for (let i = 0; i < res; i++)
+    for (let j = 0; j < res; j++) {
+      const x = terrain.ox - terrain.half + (j + 0.5) * cell;
+      const z = terrain.oz - terrain.half + (i + 0.5) * cell;
+      inland[i * res + j] = terrain.heightAt(x, z) > 0.05 ? 1e6 : 0;
+    }
+  chamfer(inland, res, cell);
+  for (let k = 0; k < res * res; k++)
+    data[k * 4 + 2] = Math.round(Math.min(1, inland[k] / 32) * 255);
+  const tex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/* A two-pass chamfer distance transform, in place: zeros stay, everything else becomes its distance to one. */
+function chamfer(d: Float32Array, n: number, cell: number) {
+  const a = cell;
+  const b = cell * Math.SQRT2;
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++) {
+      const k = i * n + j;
+      let v = d[k];
+      if (j > 0) v = Math.min(v, d[k - 1] + a);
+      if (i > 0) {
+        v = Math.min(v, d[k - n] + a);
+        if (j > 0) v = Math.min(v, d[k - n - 1] + b);
+        if (j < n - 1) v = Math.min(v, d[k - n + 1] + b);
+      }
+      d[k] = v;
+    }
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = n - 1; j >= 0; j--) {
+      const k = i * n + j;
+      let v = d[k];
+      if (j < n - 1) v = Math.min(v, d[k + 1] + a);
+      if (i < n - 1) {
+        v = Math.min(v, d[k + n] + a);
+        if (j < n - 1) v = Math.min(v, d[k + n + 1] + b);
+        if (j > 0) v = Math.min(v, d[k + n - 1] + b);
+      }
+      d[k] = v;
+    }
+}
+
 function heightTexture(terrain: Terrain) {
   const tex = new THREE.DataTexture(
     new Float32Array(terrain.heights),
@@ -333,6 +497,7 @@ export function createLand(terrain: Terrain) {
   const heights = heightTexture(terrain);
   const shore = bakeShoreDistance(terrain.heights, terrain.grid, terrain.size);
   const flora = floraTexture(terrain);
+  const zones = zonesTexture(terrain);
   const field = {
     uHeights: { value: heights },
     uOrigin: { value: new THREE.Vector2(terrain.ox, terrain.oz) },
@@ -341,18 +506,21 @@ export function createLand(terrain: Terrain) {
     uGrid: { value: terrain.grid },
   };
 
-  const geo = new THREE.PlaneGeometry(
-    terrain.size,
-    terrain.size,
-    terrain.grid - 1,
-    terrain.grid - 1,
-  );
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position as THREE.BufferAttribute;
-  for (let k = 0; k < pos.count; k++) pos.setY(k, terrain.heights[k]);
-  geo.deleteAttribute("uv");
-  geo.deleteAttribute("normal");
-  geo.computeBoundingSphere();
+  /* The ground at full detail, and a quarter of it for when the island is far off. */
+  const grid = (step: number) => {
+    const n = Math.floor((terrain.grid - 1) / step);
+    const g = new THREE.PlaneGeometry(terrain.size, terrain.size, n, n);
+    g.rotateX(-Math.PI / 2);
+    const pos = g.attributes.position as THREE.BufferAttribute;
+    for (let k = 0; k < pos.count; k++)
+      pos.setY(k, terrain.heightAt(terrain.ox + pos.getX(k), terrain.oz + pos.getZ(k)));
+    g.deleteAttribute("uv");
+    g.deleteAttribute("normal");
+    g.computeBoundingSphere();
+    return g;
+  };
+  const geo = grid(1);
+  const far = grid(4);
   const groundMat = new THREE.ShaderMaterial({
     uniforms: {
       ...shared,
@@ -360,12 +528,17 @@ export function createLand(terrain: Terrain) {
       ...field,
       uContour: { value: CONTOUR },
       uFlora: { value: flora },
+      uZones: { value: zones },
+      uCobbled: { value: terrain.harbor ? 1 : 0 },
     },
     vertexShader: TERRAIN_VERTEX,
     fragmentShader: TERRAIN_FRAGMENT,
   });
   const ground = new THREE.Mesh(geo, groundMat);
   ground.name = "terrain";
+  /* The shadows come from what stands on the ground; the ground's own relief is shaded by the sun. */
+  ground.userData.noCast = true;
+  ground.userData.lod = { near: geo, far };
   ground.position.set(terrain.ox, 0, terrain.oz);
 
   /* A touch wider than the tile, so it overlaps the open sea rather than leaving a crack. */
@@ -396,6 +569,8 @@ export function createLand(terrain: Terrain) {
     heights.dispose();
     shore.tex.dispose();
     flora.dispose();
+    zones.dispose();
+    far.dispose();
   });
 
   return [ground, sea] as const;

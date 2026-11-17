@@ -1,31 +1,14 @@
 import type { Contract, Payout } from "./missions";
 import { SPECIES, SPECIES_IDS, type SpeciesId } from "./species";
-import { WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
+import { toWeaponKind, WEAPON_KINDS, WEAPONS, type WeaponKind } from "./weapons";
 
 /*
  * Everything you can own. Stackable items (carcasses, building kits) are
  * counted; tools (weapons) are individual, and the hotbar slots point at them.
  */
 
-export type KitId =
-  | "campfire"
-  | "chest"
-  | "bed"
-  | "hut"
-  | "cabin"
-  | "dock"
-  | "rowboat"
-  | "desertbike";
-export const KIT_IDS: readonly KitId[] = [
-  "campfire",
-  "chest",
-  "bed",
-  "hut",
-  "cabin",
-  "dock",
-  "rowboat",
-  "desertbike",
-];
+export type KitId = "campfire" | "chest" | "bed" | "hut" | "cabin" | "dock";
+export const KIT_IDS: readonly KitId[] = ["campfire", "chest", "bed", "hut", "cabin", "dock"];
 
 /* A carcass is filed under the species it came from. */
 export type ItemId = SpeciesId | KitId;
@@ -51,12 +34,6 @@ const CARCASSES = Object.fromEntries(
 
 export const ITEMS: Record<ItemId, ItemDef> = {
   ...CARCASSES,
-  desertbike: {
-    name: "Desert bike",
-    plural: "desert bikes",
-    kind: "kit",
-    note: "A fast trail machine. Spawn from Marketplace → Vehicles on clear dry ground.",
-  },
   campfire: {
     name: "Campfire",
     plural: "campfires",
@@ -77,12 +54,6 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     plural: "docks",
     kind: "kit",
     note: "Walk out over the water, and tie up a boat.",
-  },
-  rowboat: {
-    name: "Rowboat",
-    plural: "rowboats",
-    kind: "kit",
-    note: "Row out to the hunting islands.",
   },
 };
 
@@ -107,6 +78,9 @@ export const TOOLS: Record<ToolKind, ToolDef> = Object.fromEntries(
 
 export const isToolKind = (v: unknown): v is ToolKind =>
   typeof v === "string" && Object.hasOwn(TOOLS, v);
+
+/* A tool kind from a save: a weapon since retired comes back as its heir (see toWeaponKind). */
+export const toToolKind = (v: unknown): ToolKind | null => (isToolKind(v) ? v : toWeaponKind(v));
 
 /* A tool you own. `uses` counts down to breaking; -1 never breaks (weapons never do). */
 export type Tool = { id: number; kind: ToolKind; uses: number };

@@ -3,7 +3,6 @@ import {
   ArrowUpRightIcon,
   AxeIcon,
   BedIcon,
-  BoatIcon,
   CampfireIcon,
   HammerIcon,
   HandFistIcon,
@@ -13,12 +12,12 @@ import {
   type Icon,
   KnifeIcon,
   LightningIcon,
-  MoonIcon,
+  ShieldChevronIcon,
   ShieldIcon,
+  ShieldWarningIcon,
   StarFourIcon,
   SwordIcon,
   TreasureChestIcon,
-  WavesIcon,
 } from "@phosphor-icons/react";
 import { cn } from "cn";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -28,17 +27,19 @@ import type { KitId, ToolKind } from "../../game/shared/items";
 
 const TOOL_ICONS: Record<ToolKind, Icon> = {
   daggers: KnifeIcon,
-  sickle: MoonIcon,
-  machete: KnifeIcon,
-  boardaxe: AxeIcon,
+  knuckles: HandFistIcon,
+  cutlass: SwordIcon,
+  beardaxe: AxeIcon,
+  mallet: HammerIcon,
+  morningstar: StarFourIcon,
   spear: ArrowUpRightIcon,
-  trident: WavesIcon,
-  mace: StarFourIcon,
   halberd: AxeIcon,
   axe: AxeIcon,
   greatsword: SwordIcon,
   hammer: HammerIcon,
   shield: ShieldIcon,
+  kite: ShieldChevronIcon,
+  spiked: ShieldWarningIcon,
 };
 
 const KIT_ICONS: Record<KitId, Icon> = {
@@ -48,8 +49,6 @@ const KIT_ICONS: Record<KitId, Icon> = {
   hut: HouseIcon,
   cabin: HouseLineIcon,
   dock: AnchorIcon,
-  rowboat: BoatIcon,
-  desertbike: LightningIcon,
 };
 
 /* The little number in a slot's corner; it darkens on the bright selected slot. */

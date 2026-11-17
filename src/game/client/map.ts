@@ -191,3 +191,45 @@ export function drawMap(ctx: CanvasRenderingContext2D, f: MapFrame, view: MapVie
     }
   }
 }
+
+/*
+ * The island's trails and places, inked over its picture: the paths as fine
+ * dashed lines, each place a small ring, so the map shows where to go.
+ */
+export function drawRoutes(
+  canvas: HTMLCanvasElement,
+  island: {
+    ox: number;
+    oz: number;
+    half: number;
+    paths: readonly (readonly { x: number; z: number }[])[];
+    places: readonly { x: number; z: number; kind: string }[];
+  },
+) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+  const k = canvas.width / (island.half * 2);
+  const px = (x: number) => (x - island.ox + island.half) * k;
+  const pz = (z: number) => (z - island.oz + island.half) * k;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 236, 214, 0.85)";
+  ctx.lineWidth = Math.max(1, canvas.width / 160);
+  ctx.setLineDash([3, 2]);
+  ctx.lineCap = "round";
+  for (const line of island.paths) {
+    ctx.beginPath();
+    line.forEach((p, i) => (i ? ctx.lineTo(px(p.x), pz(p.z)) : ctx.moveTo(px(p.x), pz(p.z))));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#f2665e";
+  ctx.strokeStyle = "#f4efe6";
+  for (const p of island.places) {
+    ctx.beginPath();
+    ctx.arc(px(p.x), pz(p.z), Math.max(2, canvas.width / 70), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+  return canvas;
+}

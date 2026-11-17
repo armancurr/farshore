@@ -1,5 +1,4 @@
 import { PLAYER_RADIUS, SEA_LEVEL } from "./constants";
-import { bikeGround } from "./bike";
 import type { ItemId, KitId } from "./items";
 import type { Block, Tone } from "./structures";
 import { toWorld } from "./structures";
@@ -40,15 +39,6 @@ type PrefabDef = {
 };
 
 export const PREFABS: Record<KitId, PrefabDef> = {
-  desertbike: {
-    hx: 0.5,
-    z0: -1.2,
-    z1: 1.2,
-    height: 2.1,
-    spread: 0.65,
-    placing: "land",
-    onFloors: false,
-  },
   campfire: {
     hx: 0.6,
     z0: -0.6,
@@ -71,7 +61,6 @@ export const PREFABS: Record<KitId, PrefabDef> = {
   hut: { hx: 2, z0: -2, z1: 2, height: 3.2, spread: 1.3, placing: "land", onFloors: false },
   cabin: { hx: 2.8, z0: -3.4, z1: 4.9, height: 3.6, spread: 1.4, placing: "land", onFloors: false },
   dock: { hx: 1.3, z0: -12.4, z1: 0.2, height: 1, spread: 99, placing: "shore", onFloors: false },
-  rowboat: { hx: 0.8, z0: -1.9, z1: 1.9, height: 1, spread: 99, placing: "water", onFloors: false },
 };
 
 /* The dock's planks sit this far above the sea. */
@@ -315,8 +304,6 @@ function layout(kind: KitId): Local[] {
       for (const s of [-1, 1])
         out.push({ lx: s * 1.15, lz: -7.5, bottom: 0, top: 0.85, hx: 0.04, hz: 4.6, tone: "dark" });
       break;
-    case "rowboat":
-      break;
   }
   return out;
 }
@@ -437,12 +424,6 @@ export function checkPlacement(
   const d = PREFABS[kind];
   const no = (reason: string, y = 0): Verdict => ({ ok: false, y, reason });
   if (Math.hypot(x - body.x, z - body.z) > BUILD_REACH) return no("Too far away");
-  if (kind === "desertbike") {
-    const ground = bikeGround(terrain, x, z, rot);
-    if (!ground) return no("Needs clear, dry ground without steep slopes");
-    if (Math.hypot(x - body.x, z - body.z) < 1.8) return no("Stand clear", ground.y);
-    return { ok: true, y: ground.y, reason: null };
-  }
   const pts = samples(kind, x, z, rot);
 
   let y: number;

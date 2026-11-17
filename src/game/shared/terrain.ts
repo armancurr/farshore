@@ -2,7 +2,11 @@ import { BASE_TILE, ISLAND_RADIUS, STEP_HEIGHT } from "./constants";
 import { FEATURES } from "./features";
 import { type Flora, floraFor } from "./flora";
 import { type BiomeId, gridOf, type IslandInfo, islandHeights, type ShapeId } from "./islands";
-import { angleTo, clamp, mulberry32, range, smoothstep } from "./math";
+import { angleTo, clamp, mulberry32, range, type Rng, smoothstep } from "./math";
+import type { ModelId } from "./models.gen";
+import { BOULDERS, COLUMNS, SPECIES_TREES, type TreeSpecies, WOODLAND } from "./nature";
+import { type PathPoint, pathDistance, planPaths } from "./paths";
+import { modelExtent, type Place, planPlaces } from "./places";
 import {
   type Block,
   type Ladder,
@@ -28,6 +32,9 @@ export type Prop = {
   /* Height of the visible object above y. */
   height: number;
   variant: number;
+  /* The pack model drawn for it (trees and rocks), and for a tree, its species. */
+  model?: ModelId;
+  species?: TreeSpecies;
 };
 
 /*
@@ -149,6 +156,13 @@ export class Terrain implements Ground {
   readonly solids: Solid[] = [];
   readonly structures: Structure[] = [];
   readonly ladders: Ladder[] = [];
+  /* The places someone made something of (camps, lookouts, jetties), and the paths between them. */
+  readonly places: Place[] = [];
+  paths: PathPoint[][] = [];
+  /* Distance to the nearest path, sampled every pathCell metres over the tile (island-local grid). */
+  pathField: Float32Array = new Float32Array(1);
+  pathRes = 1;
+  pathCell = 1;
   /* Walkable high places on the structures. */
   perches: readonly Perch[] = [];
   lighthouse: Spot = { x: 0, y: 0, z: 0 };
@@ -186,6 +200,9 @@ export class Terrain implements Ground {
     this.heights = islandHeights(info.shape, this.seed, this.grid, info.lift);
     this.raiseLighthouse();
     this.raiseStructures();
+    /* Where the Harbor is from here: the landing faces it. The Harbor's main quay faces north. */
+    const toward = this.harbor ? -Math.PI / 2 : Math.atan2(-info.z, -info.x);
+    this.layPlaces(toward);
     this.scatterProps();
     this.findHome();
     this.moveTo(info.x, info.z);
@@ -229,6 +246,12 @@ export class Terrain implements Ground {
       for (const r of p.route) at(r);
     }
     for (const t of this.taken) at(t);
+    for (const pl of this.places) {
+      at(pl);
+      at(pl.door);
+      for (const m of pl.models) at(m);
+    }
+    for (const line of this.paths) for (const pt of line) at(pt);
     at(this.lighthouse);
     at(this.home);
     at(this.board);
@@ -430,6 +453,231 @@ export class Terrain implements Ground {
     }
   }
 
+  /*
+   * The island's places and the paths between them. Places get level ground,
+   * the paths are found across the ground as it then stands and cut into it
+   * with an even grade, and only then is everything set down on the ground
+   * (so a crate sits on the path's cutting, not on the hill that was there).
+   */
+  private layPlaces(toward: number) {
+    const kind = this.harbor ? "harbor" : (this.biome ?? "meadow");
+    const places = planPlaces(this, this.seed, kind, this.taken, {
+      toward,
+      lighthouse: this.harbor ? this.lighthouse : undefined,
+    });
+    for (const pl of places) {
+      if (pl.kind === "landing" || pl.kind === "dock" || pl.kind === "wreck") continue;
+      this.levelPad(pl.x, pl.z, pl.r * 0.85, pl.r + 7, pl.y);
+    }
+    this.places.push(...places);
+
+    const doors = places.map((pl) => pl.door);
+    if (this.harbor) {
+      /* Every path on the Harbor leads back to the lighthouse door. */
+      const lh = this.lighthouse;
+      doors.unshift({ x: lh.x, z: lh.z + 16 });
+    }
+    this.paths = planPaths(this, doors);
+    this.carvePaths();
+
+    /* The path field: trails are drawn from it, and trees keep off it. */
+    this.pathRes = Math.round(this.size / 4);
+    this.pathCell = this.size / this.pathRes;
+    this.pathField = pathDistance(this.paths, this.half, this.pathRes, 24);
+
+    for (const pl of places) this.seatPlace(pl);
+  }
+
+  /* Cut each path into the ground: its own profile, smoothed and held to an easy grade. */
+  private carvePaths() {
+    const MAX_GRADE = 0.42; // metres per 2 m sample, about 12°
+    const g = this.grid;
+    const best = new Float32Array(g * g).fill(99);
+    const target = new Float32Array(g * g);
+    for (const line of this.paths) {
+      const raw = line.map((p) => this.heightAt(p.x, p.z));
+      /* Smooth it along its length, then clamp the grade both ways. */
+      const prof = raw.map((_, k) => {
+        let sum = 0;
+        let n = 0;
+        for (let j = Math.max(0, k - 5); j <= Math.min(raw.length - 1, k + 5); j++) {
+          sum += raw[j];
+          n++;
+        }
+        return Math.max(0.7, sum / n);
+      });
+      for (let k = 1; k < prof.length; k++)
+        prof[k] = clamp(prof[k], prof[k - 1] - MAX_GRADE, prof[k - 1] + MAX_GRADE);
+      for (let k = prof.length - 2; k >= 0; k--)
+        prof[k] = clamp(prof[k], prof[k + 1] - MAX_GRADE, prof[k + 1] + MAX_GRADE);
+      const reach = 6;
+      for (let k = 0; k < line.length - 1; k++) {
+        const a = line[k];
+        const b = line[k + 1];
+        const j0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - reach + this.half) / this.cell));
+        const j1 = Math.min(g - 1, Math.ceil((Math.max(a.x, b.x) + reach + this.half) / this.cell));
+        const i0 = Math.max(0, Math.floor((Math.min(a.z, b.z) - reach + this.half) / this.cell));
+        const i1 = Math.min(g - 1, Math.ceil((Math.max(a.z, b.z) + reach + this.half) / this.cell));
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const len2 = dx * dx + dz * dz || 1;
+        for (let i = i0; i <= i1; i++) {
+          const pz = -this.half + i * this.cell;
+          for (let j = j0; j <= j1; j++) {
+            const px = -this.half + j * this.cell;
+            const t = clamp(((px - a.x) * dx + (pz - a.z) * dz) / len2, 0, 1);
+            const d = Math.hypot(px - a.x - dx * t, pz - a.z - dz * t);
+            const o = i * g + j;
+            if (d < best[o]) {
+              best[o] = d;
+              target[o] = prof[k] + (prof[k + 1] - prof[k]) * t;
+            }
+          }
+        }
+      }
+    }
+    for (let o = 0; o < g * g; o++) {
+      if (best[o] > 6 || this.heights[o] < 0.2) continue;
+      const w = 1 - smoothstep(1.6, 6, best[o]);
+      this.heights[o] += (target[o] - this.heights[o]) * w;
+    }
+  }
+
+  /* Set a place's models on the ground (or the water) and give the solid ones collision. */
+  private seatPlace(pl: Place) {
+    for (const m of pl.models) {
+      const e = modelExtent(m.model, m.scale);
+      if (m.float) {
+        /* Jetties stand on piles in the sea, their deck a step up from the beach. */
+        m.y = m.model.includes("boat") ? -0.28 : 0.95 - e.top;
+      } else if (m.model === "ships/ship-wreck") {
+        m.y = this.heightAt(m.x, m.z) - 1.4;
+      } else {
+        m.y = this.heightAt(m.x, m.z) - 0.04;
+      }
+      if (!m.solid) continue;
+      const c = Math.cos(m.rot);
+      const s = Math.sin(m.rot);
+      /* The model's footprint may sit off its pivot; find its middle in the world. */
+      const x = m.x + e.cx * c + e.cz * s;
+      const z = m.z - e.cx * s + e.cz * c;
+      const hx = Math.max(0.15, e.hx * 0.92);
+      const hz = Math.max(0.15, e.hz * 0.92);
+      this.solids.push({
+        x,
+        z,
+        r: Math.hypot(hx, hz),
+        bottom: m.y - 2,
+        top: m.y + e.top * (m.stand ? 1 : 1.05),
+        standable: m.stand,
+        box: { hx, hz, c, s },
+      });
+    }
+  }
+
+  /* A tree of a species at a size (1 = full grown): its model, its trunk's collision. */
+  private addTree(
+    id: number,
+    rng: Rng,
+    x: number,
+    y: number,
+    z: number,
+    sp: TreeSpecies,
+    age: number,
+    grid: Map<number, { x: number; z: number; r: number }[]>,
+    cellOf: (x: number, z: number) => number,
+  ) {
+    const def = SPECIES_TREES[sp];
+    /* Younger trees use the pack's smaller models; each model is then sized to its age. */
+    const n = def.models.length;
+    const model =
+      def.models[
+        Math.min(n - 1, Math.floor(clamp((age - 0.45) / 0.7, 0, 0.999) * n + rng() * 0.8))
+      ];
+    const height = def.height * age * range(rng, 0.9, 1.1);
+    this.props.push({
+      id,
+      kind: "tree",
+      x,
+      y: y - 0.15,
+      z,
+      rot: rng() * Math.PI * 2,
+      scale: age,
+      height,
+      variant: Math.floor(rng() * 1e6),
+      model,
+      species: sp,
+    });
+    this.solids.push({
+      x,
+      z,
+      r: def.trunk * Math.max(0.6, age),
+      bottom: y - 1,
+      top: y + height,
+      standable: false,
+    });
+    const key = cellOf(x, z);
+    const spot = { x, z, r: def.spacing * 0.5 * Math.max(0.7, age) };
+    const list = grid.get(key);
+    if (list) list.push(spot);
+    else grid.set(key, [spot]);
+  }
+
+  /* A rock of a model at a scale, its collision a rounded cylinder you can climb onto. */
+  private addRock(
+    id: number,
+    rng: Rng,
+    x: number,
+    y: number,
+    z: number,
+    model: ModelId,
+    scale: number,
+  ) {
+    const e = modelExtent(model, scale);
+    const sink = Math.max(0, -e.bottom) + scale * 0.06;
+    const height = e.top;
+    this.props.push({
+      id,
+      kind: "rock",
+      x,
+      y: y - sink,
+      z,
+      rot: rng() * Math.PI * 2,
+      scale,
+      height,
+      variant: 0,
+      model,
+    });
+    this.solids.push({
+      x,
+      z,
+      r: Math.max(e.hx, e.hz) * 0.85,
+      bottom: y - sink,
+      top: y - sink + height * 0.9,
+      standable: true,
+      surface: "rounded",
+    });
+  }
+
+  /* How much (x, z) is at the foot of a cliff: level ground with steep ground just beside it. */
+  cliffFoot(x: number, z: number) {
+    if (this.normalAt(x, z)[1] < 0.85) return 0;
+    let steep = 0;
+    for (let a = 0; a < 6; a++) {
+      const n = this.normalAt(x + Math.cos(a * 1.047) * 5, z + Math.sin(a * 1.047) * 5)[1];
+      steep = Math.max(steep, smoothstep(0.75, 0.5, n));
+    }
+    return steep;
+  }
+
+  /* How far (x, z) is from the nearest path, in metres (24 or more: nowhere near one). */
+  pathAt(x: number, z: number) {
+    const j = Math.floor((x - this.ox + this.half) / this.pathCell);
+    const i = Math.floor((z - this.oz + this.half) / this.pathCell);
+    if (i < 0 || j < 0 || i >= this.pathRes || j >= this.pathRes) return 24;
+    return this.pathField[i * this.pathRes + j];
+  }
+
   private scatterProps() {
     const rng = mulberry32(this.seed ^ 0x51ed270b);
     let id = 0;
@@ -572,71 +820,144 @@ export class Terrain implements Ground {
     };
 
     const f = flora.def;
-    keepIf(FEATURES.rocks, () =>
+    const kind = this.harbor ? "harbor" : (this.biome ?? "meadow");
+    /* Nothing grows on a path, on a cliff, or down on the beach. */
+    const growable = (x: number, z: number, y: number, clearPath: number) =>
+      y > 2.3 && this.normalAt(x, z)[1] > 0.84 && this.pathAt(x, z) > clearPath;
+
+    keepIf(FEATURES.rocks, () => {
+      /* Boulders lie about the stony ground, and gather at the feet of the cliffs. */
       grow(
-        (x, z) => f.strays + (f.rocks - f.strays) * flora.stone(x, z),
-        f.rocks,
+        (x, z) => f.strays + (f.rocks - f.strays) * flora.stone(x, z) + 6 * this.cliffFoot(x, z),
+        f.rocks + 6,
         { minH: 0.4, spacing: 2.6, minNy: 0.55 },
         (x, y, z, k) => {
-          /* Out on an outcrop they come bigger. */
-          const big = rng() < 0.08 + 0.2 * k;
-          const scale = big ? range(rng, 2, 3.4) : range(rng, 0.5, 1.7);
-          const sink = scale * 0.28;
-          const height = scale * range(rng, 0.8, 1.15);
-          this.props.push({
-            id: id++,
-            kind: "rock",
-            x,
-            y: y - sink,
-            z,
-            rot: rng() * Math.PI * 2,
-            scale,
-            height,
-            variant: Math.floor(rng() * 1e6),
-          });
-          this.solids.push({
-            x,
-            z,
-            r: scale * 0.82,
-            bottom: y - sink,
-            top: y - sink + height * 0.86,
-            standable: true,
-            surface: "rounded",
-          });
+          if (this.pathAt(x, z) < 3) return;
+          const big = rng() < 0.1 + 0.25 * k;
+          const scale = big ? range(rng, 2.2, 3.6) : range(rng, 0.7, 1.8);
+          this.addRock(id++, rng, x, y, z, BOULDERS[Math.floor(rng() * BOULDERS.length)], scale);
         },
-      ),
-    );
+      );
+      /* Stacked stone columns stand on the high benches of the rugged islands. */
+      const columns = kind === "ridge" || kind === "fells" ? 26 : kind === "pinewood" ? 10 : 4;
+      scatter(columns, { minH: 8, spacing: 22, minNy: 0.86 }, (x, y, z) => {
+        if (this.pathAt(x, z) < 5) return;
+        const model = COLUMNS[Math.floor(rng() * COLUMNS.length)];
+        this.addRock(id++, rng, x, y, z, model, range(rng, 1.1, 1.8));
+      });
+    });
 
-    keepIf(FEATURES.trees, () =>
+    keepIf(FEATURES.trees, () => {
+      const wood = WOODLAND[kind];
+      const total = wood.groves.reduce((a, [, w]) => a + w, 0);
+      const pick = () => {
+        let r = rng() * total;
+        for (const [sp, w] of wood.groves) if ((r -= w) <= 0) return sp;
+        return wood.groves[0][0];
+      };
+      /*
+       * Groves: each a stand of one species, biggest in the middle and
+       * thinning to saplings at the edge, so a wood reads as a wood.
+       */
+      const reachR = this.radius * 1.05;
+      const groves = Math.round(
+        ((Math.PI * reachR * reachR) / 1e6) * 40 * f.forest * (f.dense / 12),
+      );
+      for (let gi = 0, tries = 0; gi < groves && tries < groves * 30; tries++) {
+        const a = rng() * Math.PI * 2;
+        const d = Math.sqrt(rng()) * reachR;
+        const cx = Math.cos(a) * d;
+        const cz = Math.sin(a) * d;
+        if (flora.forest(cx, cz) < 0.45) continue;
+        if (!growable(cx, cz, this.heightAt(cx, cz), 8)) continue;
+        gi++;
+        const sp = pick();
+        const def = SPECIES_TREES[sp];
+        const radius = range(rng, 18, 46);
+        const want = Math.round(((Math.PI * radius * radius) / (def.spacing * def.spacing)) * 0.5);
+        for (let t = 0; t < want * 3; t++) {
+          const u = Math.sqrt(rng());
+          const b = rng() * Math.PI * 2;
+          /* Ragged edges: the grove's outline wobbles. */
+          const edge = radius * (0.75 + 0.25 * Math.sin(b * 3 + gi) * Math.cos(b * 2 - gi));
+          const x = cx + Math.cos(b) * u * edge;
+          const z = cz + Math.sin(b) * u * edge;
+          const y = this.heightAt(x, z);
+          if (!growable(x, z, y, 3.5 + def.spacing * 0.3)) continue;
+          if (!free(x, z, 1.2) || !clear(x, z, def.spacing * 0.5)) continue;
+          /* Big in the heart of the grove, young at its rim. */
+          const age = 1 - u * u * 0.6 + range(rng, -0.12, 0.12);
+          this.addTree(id++, rng, x, y, z, sp, clamp(age, 0.45, 1.15), grid, cellOf);
+        }
+      }
+      /* Landmark trees: a few big ones alone in the open, the kind you steer by. */
+      scatter(kind === "harbor" ? 10 : 7, { minH: 3, spacing: 40, minNy: 0.88 }, (x, y, z) => {
+        if (flora.forest(x, z) > 0.3 || this.pathAt(x, z) < 6) return;
+        this.addTree(id++, rng, x, y, z, wood.lone, range(rng, 1.25, 1.5), grid, cellOf);
+      });
+      /* Strays: the odd tree between groves, so the open ground isn't bald. */
       grow(
-        (x, z) => f.sparse + (f.dense - f.sparse) * flora.forest(x, z),
-        f.dense,
-        { minH: 1.6, spacing: 3.2, minNy: 0.7 },
-        (x, y, z, k) => {
-          /* Deep in a grove the trees grow taller. */
-          const scale = range(rng, 0.75, 1.15) + k * range(rng, 0, 0.45);
-          this.props.push({
-            id: id++,
-            kind: "tree",
-            x,
-            y: y - 0.3,
-            z,
-            rot: rng() * Math.PI * 2,
-            scale,
-            height: 6.5 * scale,
-            variant: Math.floor(rng() * 1e6),
-          });
-          this.solids.push({
-            x,
-            z,
-            r: 0.32 * scale,
-            bottom: y - 1,
-            top: y + 7 * scale,
-            standable: false,
-          });
+        (x, z) => f.sparse * (0.4 + flora.forest(x, z)),
+        f.sparse * 1.4,
+        { minH: 2.4, spacing: 6, minNy: 0.86 },
+        (x, y, z) => {
+          if (this.pathAt(x, z) < 4) return;
+          this.addTree(id++, rng, x, y, z, pick(), range(rng, 0.55, 0.9), grid, cellOf);
         },
-      ),
-    );
+      );
+      /* Palms lean over the Harbor's beaches in twos and threes. */
+      if (this.harbor) {
+        for (let c = 0, tries = 0; c < 26 && tries < 3000; tries++) {
+          const a = rng() * Math.PI * 2;
+          let d = this.half * 0.9;
+          while (d > 20 && this.heightAt(Math.cos(a) * d, Math.sin(a) * d) < 0.9) d -= 2;
+          const bx = Math.cos(a) * (d - range(rng, 4, 14));
+          const bz = Math.sin(a) * (d - range(rng, 4, 14));
+          const by = this.heightAt(bx, bz);
+          if (by < 0.9 || by > 3.2 || !free(bx, bz, 3) || this.pathAt(bx, bz) < 4) continue;
+          c++;
+          const n = 2 + Math.floor(rng() * 2);
+          for (let k = 0; k < n; k++) {
+            const x = bx + range(rng, -3.5, 3.5);
+            const z = bz + range(rng, -3.5, 3.5);
+            const y = this.heightAt(x, z);
+            if (y < 0.7 || !clear(x, z, 1.4)) continue;
+            const model: ModelId = rng() < 0.6 ? "coast/palm-bend" : "coast/palm-straight";
+            const scale = range(rng, 1.25, 1.7);
+            /* Bent palms lean out toward the sea. */
+            const rot =
+              model === "coast/palm-bend"
+                ? Math.atan2(Math.cos(a), Math.sin(a)) + Math.PI / 2 + range(rng, -0.5, 0.5)
+                : rng() * 6.28;
+            this.props.push({
+              id: id++,
+              kind: "tree",
+              x,
+              y: y - 0.1,
+              z,
+              rot,
+              scale,
+              height: 4.2 * scale,
+              variant: 0,
+              model,
+            });
+            this.solids.push({
+              x,
+              z,
+              r: 0.3 * scale,
+              bottom: y - 1,
+              top: y + 4 * scale,
+              standable: false,
+            });
+            const key = cellOf(x, z);
+            const spot = { x, z, r: 1.4 };
+            const list = grid.get(key);
+            if (list) list.push(spot);
+            else grid.set(key, [spot]);
+          }
+        }
+      }
+    });
 
     keepIf(FEATURES.buoys, () => {
       for (let b = 0, attempt = 0; b < 20 && attempt < 600; attempt++) {
