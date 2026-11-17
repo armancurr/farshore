@@ -1,10 +1,10 @@
 import * as THREE from "three";
-import { GRID, SEA_LEVEL, WORLD_SIZE } from "../../shared/constants";
+import { GRID, SEA_LEVEL, TILE_SIZE } from "../../shared/constants";
 
 /* The shore field is sampled this many times finer than the heightmap. */
 export const SHORE_SUB = 4;
 export const SHORE_GRID = (GRID - 1) * SHORE_SUB + 1;
-export const SHORE_CELL = WORLD_SIZE / (SHORE_GRID - 1);
+export const SHORE_CELL = TILE_SIZE / (SHORE_GRID - 1);
 
 /* Uniform cubic B-spline weights at t in [0, 1): the same smoothing the shaders use. */
 function bspline(t: number): [number, number, number, number] {

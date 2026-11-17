@@ -184,50 +184,41 @@ export type RodDef = {
   luck: number;
 };
 
-export type ToolKind = WeaponKind | "rod" | "rod2" | "sword2" | "spear2" | "axe2";
+export type ToolKind = WeaponKind | "rod" | "rod2";
 
 type ToolDef = {
   name: string;
   /* The weapon it swings like, or null for a rod. */
   weapon: WeaponKind | null;
   rod?: RodDef;
-  /* Bought gear: hits harder and never wears out. */
-  fine?: boolean;
-  /* Dropping it leaves it on the ground for later. */
-  droppable: boolean;
 };
 
-const PICKUPS = Object.fromEntries(
-  WEAPON_KINDS.map((k) => [k, { name: WEAPONS[k].name, weapon: k, droppable: true }]),
+const ARMS = Object.fromEntries(
+  WEAPON_KINDS.map((k) => [k, { name: WEAPONS[k].name, weapon: k }]),
 ) as Record<WeaponKind, ToolDef>;
 
 export const TOOLS: Record<ToolKind, ToolDef> = {
-  ...PICKUPS,
+  ...ARMS,
   rod: {
     name: "Driftwood rod",
     weapon: null,
     rod: { cast: 12, bite: [4, 10], window: 1, luck: 0 },
-    droppable: false,
   },
   rod2: {
     name: "Ashwood rod",
     weapon: null,
     rod: { cast: 18, bite: [2.5, 6.5], window: 1.4, luck: 1 },
-    droppable: false,
   },
-  sword2: { name: "Steel sword", weapon: "sword", fine: true, droppable: false },
-  spear2: { name: "Hunting spear", weapon: "spear", fine: true, droppable: false },
-  axe2: { name: "Bearded axe", weapon: "axe", fine: true, droppable: false },
 };
 
 export const isToolKind = (v: unknown): v is ToolKind =>
   typeof v === "string" && Object.hasOwn(TOOLS, v);
 
-/* A tool you own. `uses` counts down to breaking; -1 never breaks. */
+/* A tool you own. `uses` counts down to breaking; -1 never breaks (weapons never do). */
 export type Tool = { id: number; kind: ToolKind; uses: number };
 
-/* How much harder bought weapons hit. */
-export const FINE_DAMAGE = 1.7;
+/* The belt slot your one weapon lives in: fists, then your weapon, then the rest. */
+export const WEAPON_SLOT = 1;
 
 /* ---------- inventory ---------- */
 

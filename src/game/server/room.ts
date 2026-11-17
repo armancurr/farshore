@@ -1,17 +1,11 @@
 import {
   BOUNDARY,
-  BREATH_MAX,
-  BREATH_REGEN,
-  BREATH_UNDER,
-  BREATH_WADE,
-  DROWN_DAMAGE,
   FALL_DAMAGE,
   FALL_SAFE_SPEED,
+  FLY_CEILING,
   HEALTH_MAX,
   HEALTH_REGEN,
-  ISLAND_RADIUS,
   MAX_PLAYERS,
-  PLAYER_HEIGHT,
   REGEN_DELAY,
   RESPAWN_DELAY,
   SEA_FLOOR,
@@ -47,17 +41,16 @@ import {
   type ClientMsg,
   FLAG,
   type BoatSnap,
-  type GroundWeapon,
   type HurtCause,
   type PlayerSnap,
   round2,
   type ServerMsg,
   type Spawn,
+  type TravelTarget,
   type WorldInfo,
 } from "../shared/protocol";
 import {
   emptyInventory,
-  FINE_DAMAGE,
   type FishId,
   HOTBAR,
   heldTool,
@@ -68,6 +61,7 @@ import {
   type Tool,
   type ToolKind,
   TOOLS,
+  WEAPON_SLOT,
 } from "../shared/items";
 import {
   CAMPFIRE_WARMTH,
@@ -76,17 +70,27 @@ import {
   type Prefab,
   prefabBlocks,
 } from "../shared/prefabs";
-import { SAVE_VERSION, type SaveData, type SavedPlayer } from "../shared/save";
-import { SHOP_REACH, shopEntry } from "../shared/shop";
-import { blockSolid, overSolid, Terrain } from "../shared/terrain";
+import { Archipelago } from "../shared/archipelago";
+import { HARBOR, type IslandInfo, placementProblem, type ShapeId } from "../shared/islands";
 import {
+  type SavedPlayer,
+  type SavedProfile,
+  WORLD_SAVE_VERSION,
+  type WorldSave,
+} from "../shared/save";
+import { SHOP_REACH, shopEntry } from "../shared/shop";
+import { canWear, DEFAULT_SKIN, type SkinId } from "../shared/skins";
+import { blockSolid, overSolid, type Terrain } from "../shared/terrain";
+import {
+  BLEED_TIME,
   COMBO_WINDOW,
+  chargePower,
   knockScale,
   PARRY_WINDOW,
   STAGGER_GRACE,
   STAGGER_MAX,
   STAGGER_RECOVER,
-  WEAPON_KINDS,
+  type WeaponDef,
   type WeaponKind,
   weaponDef,
   weaponIndex,
@@ -96,17 +100,27 @@ import { Herd, type Prey } from "./animals";
 
 export interface Peer {
   send(msg: ServerMsg): void;
+  /* Hang up: someone else has taken over this player (the same tab, reloaded). */
+  close?(): void;
 }
+
+/* Someone who's been here, connected or not. */
+type Profile = SavedProfile;
 
 type Member = {
   id: number;
   name: string;
+  /* What everyone else sees you as. */
+  skin: SkinId;
   peer: Peer;
   spectator: boolean; // joined only to watch
+  /* Online: who this is across visits, and their island. */
+  profile: Profile | null;
+  /* In the world with a body. Online, that's once you've settled an island. */
+  placed: boolean;
   body: Body;
   pitch: number;
   flags: number;
-  breath: number;
   health: number;
   lastHurtAt: number;
   /* Falling speed from the last airborne report, for landing damage. */
@@ -128,6 +142,8 @@ type Member = {
   blocking: boolean;
   blockSince: number;
   charging: boolean;
+  /* A sickle's cut: damage still to come, a second at a time, and whose it is. */
+  bleed: { left: number; per: number; nextAt: number; by: number } | null;
 };
 
 /* A line in the water: waiting for a bite, then a fish on, waiting for the strike. */
@@ -145,10 +161,9 @@ type PendingHit = {
   at: number;
   by: number;
   kind: WeaponKind | null;
-  /* Bought gear hits harder. */
-  fine: boolean;
+  /* A combo's third swing. */
   heavy: boolean;
-  /* 0..1: how far a flail was spun up. */
+  /* 0..1: how far a charged weapon was wound up. */
   power: number;
   yaw: number;
 };
@@ -158,8 +173,15 @@ export type RoomOptions = {
   now?: () => number;
   maxHumans?: number;
   seed?: number;
-  /* An island to pick up where it was left. */
-  save?: SaveData | null;
+  /*
+   * The game: the grand map, where everyone settles an island of their own.
+   * Otherwise (the title screen) there's one island in the middle to look at.
+   */
+  settle?: boolean;
+  /* The grand map as it was left (online). */
+  world?: WorldSave | null;
+  /* The grand map changed in a way worth keeping: the host should store exportWorld(). */
+  onChange?: () => void;
 };
 
 /* Points round a body's centre, to test whether it fits somewhere. */
@@ -171,13 +193,12 @@ const PROBES = [
   [0, -0.4],
 ] as const;
 
-/* Loose weapons lying about the island; a fresh one washes up when the count drops. */
-const GROUND_WEAPONS = 8;
-const WEAPON_RESPAWN = 45;
+/* Seconds after you last hit or were hit before you can fast travel. */
+const TRAVEL_CALM = 5;
 
 /*
- * The island. Transport-agnostic: the Cloudflare Durable Object, the Vite dev
- * server and the in-browser solo mode all drive this same class. The room
+ * The world. Transport-agnostic: the Cloudflare Durable Object and the Vite dev
+ * server run the game with it, and the title screen runs a quiet one in the tab. The room
  * runs the world and everything in it; each human reports their own movement
  * and asks for everything else.
  */
@@ -189,14 +210,16 @@ export class Room {
   private collected = new Set<number>();
   private felledTrees = new Set<number>();
   private treeHits = new Map<number, number>();
+  private readonly world: Archipelago;
   private readonly seed: number;
+  private profiles = new Map<string, Profile>();
+  private islandId = 1;
   /* World clock in seconds; it only advances while the room ticks. */
   private time = 0;
   private lastTick: number | null = null;
-  private weapons: GroundWeapon[] = [];
-  private weaponId = 1;
+  /* The Harbor's ground, online: where everyone arrives and nobody gets hurt. */
+  private harbor: Terrain | null = null;
   private toolId = 1;
-  private nextWeaponAt = 0;
   private pending: PendingHit[] = [];
   /* Animals, when they're switched on. */
   private herd: Herd | null = null;
@@ -205,10 +228,6 @@ export class Room {
   private posted = new Map<number, number>();
   private prefabs = new Map<number, Prefab>();
   private boatSpeed = new Map<number, number>();
-  /* The saved player, waiting for the first person to arrive. */
-  private returning: SavedPlayer | null = null;
-  /* Something happened that would hurt to lose: the host should save soon. */
-  saveSoon = false;
   private prefabId = 1;
   private bountyId = 1;
   private prey: Prey[] = [];
@@ -224,16 +243,30 @@ export class Room {
     for (const resource of groundResources(this.terrain)) this.resources.set(resource.id, resource);
     const t = this.terrain;
     if (FEATURES.animals)
+    this.seed = opts.seed ?? (this.rng() * 2 ** 32) >>> 0;
+    this.world = new Archipelago();
+    if (opts.settle) {
+      /* The Harbor goes in first: it's the primary island, where the shop and herd would be. */
+      this.harbor = this.world.add(HARBOR).terrain;
+      const w = opts.world;
+      if (w) {
+        for (const info of w.islands) this.world.add(info);
+        for (const p of w.players) this.profiles.set(p.token, structuredClone(p));
+        this.islandId = w.ids.island;
+        this.toolId = w.ids.tool;
+      }
+    } else this.world.add({ id: 0, shape: "headland", seed: this.seed, x: 0, z: 0, name: "" });
+    const t = this.world.primary;
+    if (FEATURES.animals && t)
       this.herd = new Herd(
         {
-          terrain: t,
+          terrain: this.world,
           rng: this.rng,
           gore: (id, damage, dx, dz) => this.gored(id, damage, dx, dz),
           blocked: (id) => {
-            const m = this.members.get(id);
-            if (!m) return;
-            this.wear(m);
-            m.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
+            this.members
+              .get(id)
+              ?.peer.send({ t: "feed", text: "Your shield turns the boar aside" });
           },
         },
         [
@@ -241,10 +274,7 @@ export class Room {
           { x: t.lighthouse.x, z: t.lighthouse.z, r: 28 },
         ],
       );
-    if (save) this.restore(save);
     this.fillBoard();
-    if (FEATURES.weapons)
-      for (let i = 0; i < GROUND_WEAPONS; i++) this.spawnWeapon(WEAPON_KINDS[i % 8], false);
   }
 
   /* ---------- saving ---------- */
@@ -295,6 +325,19 @@ export class Room {
       board: this.board.map((b) => structuredClone(b)),
       player,
       ids: { tool: this.toolId, prefab: this.prefabId, bounty: this.bountyId },
+  /* Where someone is and what they carry, ready to store. */
+  private playerState(m: Member): SavedPlayer {
+    /* Saved while down: you come back on your feet, where you'd have woken. */
+    const down = m.respawnAt !== null;
+    const at = down ? this.spawnPoint(m) : { ...m.body, yaw: m.body.yaw };
+    return {
+      x: round2(at.x),
+      y: round2(at.y),
+      z: round2(at.z),
+      yaw: round2(at.yaw),
+      health: down ? HEALTH_MAX : Math.max(1, Math.ceil(m.health)),
+      inv: structuredClone(m.inv),
+      boat: down ? null : m.boat,
     };
   }
 
@@ -307,6 +350,11 @@ export class Room {
       m.inv.hotbar = m.inv.hotbar.map((id) => (keep.some((t) => t.id === id) ? id : null));
       m.inv.tools = keep;
     }
+    /* One weapon at a time, in its own slot: older saves may carry several, anywhere. */
+    const weapons = m.inv.tools.filter((t) => TOOLS[t.kind].weapon);
+    const kept = weapons[0] ? (TOOLS[weapons[0].kind].weapon as WeaponKind) : null;
+    for (const t of weapons) this.removeTool(m, t.id);
+    if (kept) this.arm(m, kept, false);
     m.health = saved.health;
     m.invDirty = true;
     const boat = saved.boat === null ? null : this.prefabs.get(saved.boat);
@@ -316,8 +364,8 @@ export class Room {
       return;
     }
     /* Never inside something that was built over the spot, or underground. */
-    const { ground } = this.terrain.groundAt(saved.x, saved.z, saved.y + 0.3);
-    const inside = this.terrain
+    const { ground } = this.world.groundAt(saved.x, saved.z, saved.y + 0.3);
+    const inside = this.world
       .solidsNear(saved.x, saved.z)
       .some(
         (o) => o.top > ground + 0.6 && o.bottom < ground + 1.7 && overSolid(o, saved.x, saved.z),
@@ -334,23 +382,72 @@ export class Room {
     return n;
   }
 
-  join(peer: Peer, hello: { spectate?: boolean } = {}) {
+  /* In the world with a body: not just watching, and (online) settled. */
+  private present(m: Member) {
+    return !m.spectator && m.placed;
+  }
+
+  /*
+   * Who's arriving, by the token they bring. A token this tab owns takes over
+   * a connection still holding it (the tab was reloaded); one borrowed from
+   * another tab that's still connected gets a new identity instead, so two
+   * tabs in one browser are two players.
+   */
+  private claim(token: string | undefined, own: boolean): Profile {
+    const known = token ? this.profiles.get(token) : undefined;
+    if (known) {
+      const using = [...this.members.values()].find((o) => o.profile === known);
+      if (!using) return known;
+      if (own) {
+        this.leave(using.id);
+        using.peer.close?.();
+        return known;
+      }
+    }
+    const fresh: Profile = {
+      token: token && !known ? token : crypto.randomUUID(),
+      name: randomName(Math.random),
+      island: null,
+      saved: null,
+    };
+    this.profiles.set(fresh.token, fresh);
+    return fresh;
+  }
+
+  join(
+    peer: Peer,
+    hello: {
+      spectate?: boolean;
+      token?: string;
+      own?: boolean;
+      skin?: SkinId;
+      weapon?: WeaponKind | null;
+    } = {},
+  ) {
     const spectator = !!hello.spectate;
+    const profile = this.opts.settle && !spectator ? this.claim(hello.token, !!hello.own) : null;
     if (!spectator && this.humans() >= (this.opts.maxHumans ?? MAX_PLAYERS)) {
       peer.send({ t: "full" });
       return -1;
     }
     const id = this.nextId++;
-    const h = this.terrain.home;
+    /* Everyone arrives with a body: on their own island, or on the Harbor. */
+    const placed = !spectator;
+    const h = this.homeFor(profile);
+    /* The browser's choice wins: you may have changed skins on the title screen. */
+    const skin = hello.skin && canWear(hello.skin) ? hello.skin : (profile?.skin ?? DEFAULT_SKIN);
+    if (profile) profile.skin = skin;
     const member: Member = {
       id,
-      name: randomName(Math.random),
+      name: profile?.name ?? randomName(Math.random),
+      skin,
       peer,
       spectator,
+      profile,
+      placed,
       body: createBody(h.x, h.y, h.z, h.yaw),
       pitch: 0,
       flags: 0,
-      breath: BREATH_MAX,
       health: HEALTH_MAX,
       lastHurtAt: -1e9,
       airVy: 0,
@@ -368,13 +465,23 @@ export class Room {
       blocking: false,
       blockSince: 0,
       charging: false,
+      bleed: null,
     };
-    if (!spectator && this.returning) {
-      this.welcomeBack(member, this.returning);
-      this.returning = null;
-    } else if (!spectator) this.giveTool(member, "rod", 2);
+    if (placed && profile?.saved) {
+      this.welcomeBack(member, profile.saved);
+      profile.saved = null;
+    } else if (!spectator) this.giveTool(member, "rod", WEAPON_SLOT + 1);
+    /* The browser's choice of weapon wins, as with skins. */
+    if (placed && hello.weapon !== undefined && hello.weapon !== this.carried(member))
+      this.arm(member, hello.weapon, false);
     this.members.set(id, member);
-    peer.send({ t: "welcome", id, name: member.name, online: this.opts.online });
+    peer.send({
+      t: "welcome",
+      id,
+      name: member.name,
+      online: this.opts.online,
+      token: profile?.token ?? null,
+    });
     peer.send({ t: "world", ...this.worldInfo(member) });
     if (member.boat !== null) peer.send({ t: "aboard", boat: member.boat });
     if (!spectator) {
@@ -388,6 +495,13 @@ export class Room {
   leave(id: number) {
     const m = this.members.get(id);
     if (!m) return;
+    /* Online, your island keeps your place: you come back where you left off. */
+    if (m.profile && m.placed) {
+      m.profile.saved = this.playerState(m);
+      /* A rowboat may have been taken apart by the time you're back. */
+      m.profile.saved.boat = null;
+      this.opts.onChange?.();
+    }
     m.boat = null;
     this.members.delete(id);
     if (!m.spectator) {
@@ -398,9 +512,128 @@ export class Room {
 
   handle(id: number, msg: ClientMsg) {
     const m = this.members.get(id);
-    if (!m || m.spectator || m.respawnAt !== null) return;
+    if (!m || m.spectator) return;
+    if (msg.t === "settle") {
+      this.settle(m, msg.shape, msg.seed, msg.x, msg.z);
+      return;
+    }
+    /* What you wear and carry can change anywhere, even while down. */
+    if (msg.t === "skin") {
+      this.dress(m, msg.skin);
+      return;
+    }
+    if (msg.t === "arm") {
+      if (m.placed) this.arm(m, msg.kind, true);
+      this.flush(m);
+      return;
+    }
+    if (!m.placed || m.respawnAt !== null) return;
     this.apply(m, msg);
     this.flush(m);
+  }
+
+  private dress(m: Member, skin: SkinId) {
+    if (m.skin === skin || !canWear(skin)) return;
+    m.skin = skin;
+    if (m.profile) {
+      m.profile.skin = skin;
+      this.opts.onChange?.();
+    }
+    this.broadcastRoster();
+  }
+
+  /* ---------- the grand map ---------- */
+
+  /* Put a new island on the map for someone who hasn't got one, and take them to it. */
+  private settle(m: Member, shape: ShapeId, seed: number, x: number, z: number) {
+    const p = m.profile;
+    if (!p || p.island !== null) {
+      m.peer.send({ t: "unsettled", reason: "You already have an island" });
+      return;
+    }
+    const at = { x: round2(x), z: round2(z) };
+    const problem = placementProblem(this.world.list(), at.x, at.z);
+    if (problem) {
+      m.peer.send({ t: "unsettled", reason: problem });
+      return;
+    }
+    const info: IslandInfo = { id: this.islandId++, shape, seed: seed >>> 0, ...at, name: m.name };
+    this.world.add(info);
+    p.island = info.id;
+    this.broadcast({ t: "island", island: info });
+    m.peer.send({ t: "world", ...this.worldInfo(m) });
+    /* Down or not, you wake on your new land. */
+    if (m.respawnAt !== null) this.respawn(m);
+    else this.warp(m, this.homeFor(p));
+    this.feed(`${m.name} settled a new island`);
+    this.opts.onChange?.();
+  }
+
+  /* Move someone in one step: out of any boat, line reeled in, nothing still hurting. */
+  private warp(m: Member, s: Spawn) {
+    this.reelIn(m);
+    if (m.boat !== null) {
+      m.boat = null;
+      m.peer.send({ t: "aboard", boat: null });
+    }
+    m.body = createBody(s.x, s.y, s.z, s.yaw);
+    m.airVy = 0;
+    m.stagger = 0;
+    m.bleed = null;
+    m.blocking = false;
+    m.charging = false;
+    m.peer.send({ t: "warp", ...s });
+  }
+
+  /* Fast travel between the Harbor and your own island, but not in the middle of a fight. */
+  private travel(m: Member, to: TravelTarget) {
+    if (!this.harbor) return;
+    const now = this.now();
+    if (now - Math.max(m.lastHurtAt, m.lastHitAt, m.lastSwingAt) < TRAVEL_CALM) {
+      m.peer.send({ t: "feed", text: "Catch your breath first: you can't travel mid-fight" });
+      return;
+    }
+    if (to === "home" && m.profile?.island == null) {
+      m.peer.send({ t: "feed", text: "You haven't settled an island of your own yet" });
+      return;
+    }
+    const h = this.harbor.home;
+    this.warp(
+      m,
+      to === "harbor" ? { x: h.x, y: h.y, z: h.z, yaw: h.yaw } : this.homeFor(m.profile),
+    );
+  }
+
+  /* Where someone wakes up with no bed: on their own island, or the Harbor (the only one, offline). */
+  private homeFor(p: Profile | null): Spawn {
+    const own = p?.island == null ? null : this.world.islands.get(p.island)?.terrain;
+    const h = (own ?? this.world.primary)?.home ?? { x: 0, y: 0, z: 0, yaw: 0 };
+    return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
+  }
+
+  private keptState(m: Member): SavedPlayer {
+    const state = this.playerState(m);
+    state.boat = null;
+    return state;
+  }
+
+  /* The grand map and everyone who's been on it, ready to store. */
+  exportWorld(): WorldSave {
+    const live = new Map<Profile, Member>();
+    for (const m of this.members.values()) if (m.profile && m.placed) live.set(m.profile, m);
+    return {
+      v: WORLD_SAVE_VERSION,
+      /* The Harbor is always raised afresh, never stored. */
+      islands: this.world.list().filter((o) => !o.harbor),
+      players: [...this.profiles.values()].map((p) => {
+        const m = live.get(p);
+        return {
+          ...structuredClone(p),
+          saved: m ? this.keptState(m) : p.saved,
+        };
+      }),
+      ids: { island: this.islandId, tool: this.toolId },
+    };
   }
 
   private apply(m: Member, msg: ClientMsg) {
@@ -460,16 +693,20 @@ export class Room {
         m.body.yaw = msg.yaw;
         m.pitch = msg.pitch;
         m.body.x = clamp(msg.x, -BOUNDARY, BOUNDARY);
-        m.body.y = clamp(msg.y, SEA_FLOOR - 20, this.terrain.peak + 30);
+        const creative = (msg.flags & FLAG.creative) !== 0;
+        m.body.y = clamp(msg.y, SEA_FLOOR - 20, creative ? FLY_CEILING + 5 : this.world.peak + 30);
         m.body.z = clamp(msg.z, -BOUNDARY, BOUNDARY);
         m.body.vx = msg.vx;
         m.body.vy = msg.vy;
         m.body.vz = msg.vz;
-        m.flags = msg.flags & (FLAG.sprint | FLAG.grounded | FLAG.wet);
+        m.flags = msg.flags & (FLAG.sprint | FLAG.grounded | FLAG.wet | FLAG.fly | FLAG.creative);
         return;
       }
       case "attack":
-        this.attack(m, msg.charge, msg.climb);
+        this.attack(m, msg.charge);
+        return;
+      case "travel":
+        this.travel(m, msg.to);
         return;
       case "stance": {
         const weapon = this.weaponOf(m);
@@ -528,8 +765,7 @@ export class Room {
         this.drop(m, msg.tool);
         return;
       case "interact":
-        if (msg.kind === "weapon") this.pickUp(m, msg.id);
-        else this.usePrefab(m, msg.id);
+        this.usePrefab(m, msg.id);
         return;
       default:
         return;
@@ -538,8 +774,15 @@ export class Room {
 
   /* ---------- inventory ---------- */
 
+  /* The weapon in hand (null for fists or a rod). */
   private weaponOf(m: Member) {
     const tool = heldTool(m.inv);
+    return tool ? TOOLS[tool.kind].weapon : null;
+  }
+
+  /* The one weapon you carry, in hand or not. */
+  private carried(m: Member) {
+    const tool = m.inv.tools.find((t) => TOOLS[t.kind].weapon);
     return tool ? TOOLS[tool.kind].weapon : null;
   }
 
@@ -549,9 +792,7 @@ export class Room {
    */
   private giveTool(m: Member, kind: ToolKind, prefer: number, uses?: number): Tool | null {
     if (m.inv.tools.length >= MAX_TOOLS) return null;
-    const def = TOOLS[kind];
-    const max = def.weapon && !def.fine ? weaponDef(def.weapon).uses : -1;
-    const tool: Tool = { id: this.toolId++, kind, uses: uses ?? max };
+    const tool: Tool = { id: this.toolId++, kind, uses: uses ?? -1 };
     m.inv.tools.push(tool);
     const bar = m.inv.hotbar;
     let slot = bar[prefer] == null && m.inv.itemHotbar[prefer] == null ? prefer : -1;
@@ -629,6 +870,32 @@ export class Room {
     };
     this.weapons.push(dropped);
     this.broadcast({ t: "wspawn", weapon: dropped });
+  /*
+   * Take up a weapon from the marketplace: it replaces whatever you carried,
+   * goes in the weapon slot, and into your hand. Null puts it away for fists.
+   */
+  private arm(m: Member, kind: WeaponKind | null, announce: boolean) {
+    const had = this.carried(m);
+    for (const t of m.inv.tools.filter((o) => TOOLS[o.kind].weapon)) this.removeTool(m, t.id);
+    if (!kind) {
+      if (m.inv.slot === WEAPON_SLOT) m.inv.slot = 0;
+      m.invDirty = true;
+      return;
+    }
+    /* Whatever else sat in the weapon slot moves along the belt (or into the pack). */
+    const bar = m.inv.hotbar;
+    const there = bar[WEAPON_SLOT];
+    if (there != null) {
+      bar[WEAPON_SLOT] = null;
+      const free = bar.findIndex((id, i) => i > WEAPON_SLOT && id == null);
+      if (free > 0) bar[free] = there;
+    }
+    const tool = this.giveTool(m, kind, WEAPON_SLOT);
+    if (!tool) return;
+    m.inv.slot = WEAPON_SLOT;
+    m.attackReadyAt = Math.max(m.attackReadyAt, this.now() + 0.3);
+    if (announce && had !== kind)
+      m.peer.send({ t: "feed", text: `You take up the ${weaponDef(kind).name.toLowerCase()}` });
   }
 
   addItem(m: Member, id: ItemId, n = 1) {
@@ -649,9 +916,11 @@ export class Room {
 
   private buy(m: Member, id: string) {
     const entry = shopEntry(id);
-    const s = this.terrain.shop;
+    const s = this.world.primary?.shop;
     const near =
-      Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH && Math.abs(s.y - m.body.y) < 3;
+      !!s &&
+      Math.hypot(s.x - m.body.x, s.z - m.body.z) < SHOP_REACH &&
+      Math.abs(s.y - m.body.y) < 3;
     if (!FEATURES.shop || !entry || !near || m.inv.coins < entry.price) return;
     if ("tool" in entry.give) {
       if (!this.giveTool(m, entry.give.tool, 1)) {
@@ -661,7 +930,6 @@ export class Room {
     } else this.addItem(m, entry.give.kit);
     m.inv.coins -= entry.price;
     m.invDirty = true;
-    this.saveSoon = true;
   }
 
   private build(p: Prefab) {
@@ -669,7 +937,7 @@ export class Room {
     const solids = prefabBlocks(p)
       .filter((b) => b.solid)
       .map(blockSolid);
-    if (solids.length) this.terrain.addSolids(p.id, solids);
+    if (solids.length) this.world.addSolids(p.id, solids);
   }
 
   private place(m: Member, kind: Prefab["kind"], x: number, z: number, rot: number) {
@@ -678,7 +946,7 @@ export class Room {
       m.peer.send({ t: "feed", text: "The island can't hold any more" });
       return;
     }
-    const v = checkPlacement(this.terrain, kind, x, z, rot, m.body);
+    const v = checkPlacement(this.world, kind, x, z, rot, m.body);
     if (!v.ok) return;
     const p: Prefab = {
       id: this.prefabId++,
@@ -692,7 +960,6 @@ export class Room {
     this.build(p);
     this.addItem(m, kind, -1);
     if (kind === "bed") m.inv.bed = p.id;
-    this.saveSoon = true;
     this.broadcast({ t: "prefab", prefab: p });
   }
 
@@ -701,7 +968,7 @@ export class Room {
     const p = this.prefabs.get(id);
     if (!p || Math.hypot(p.x - m.body.x, p.z - m.body.z) > 14 || this.aboard(id)) return;
     this.prefabs.delete(id);
-    this.terrain.removeSolids(id);
+    this.world.removeSolids(id);
     this.addItem(m, p.kind, 1);
     for (const [item, n] of Object.entries(p.store ?? {}) as [ItemId, number][])
       this.addItem(m, item, n);
@@ -711,7 +978,6 @@ export class Room {
         o.invDirty = true;
       }
     }
-    this.saveSoon = true;
     this.broadcast({ t: "unprefab", id });
   }
 
@@ -757,7 +1023,7 @@ export class Room {
     const cx = x - SEAT.lz * Math.sin(b.rot);
     const cz = z - SEAT.lz * Math.cos(b.rot);
     const step = Math.hypot(cx - p.x, cz - p.z);
-    if (step > 4 || this.terrain.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
+    if (step > 4 || this.world.heightAt(cx, cz) > SEA_LEVEL - DRAFT + 0.2) return;
     p.x = round2(cx);
     p.z = round2(cz);
     p.rot = round2(b.rot);
@@ -798,7 +1064,8 @@ export class Room {
   /* ---------- bounties ---------- */
 
   private nearBoard(m: Member) {
-    const b = this.terrain.board;
+    const b = this.world.primary?.board;
+    if (!b) return false;
     return Math.hypot(b.x - m.body.x, b.z - m.body.z) < BOARD_REACH && Math.abs(b.y - m.body.y) < 3;
   }
 
@@ -849,7 +1116,6 @@ export class Room {
     m.inv.coins += b.reward;
     m.inv.bounty = null;
     m.invDirty = true;
-    this.saveSoon = true;
     m.peer.send({ t: "paid", bounty: b });
   }
 
@@ -864,7 +1130,7 @@ export class Room {
     const rod = this.rodOf(m);
     if (!rod || m.line) return;
     const reach = Math.hypot(x - m.body.x, z - m.body.z);
-    const depth = depthAt(this.terrain.heightAt(x, z));
+    const depth = depthAt(this.world.heightAt(x, z));
     /* Standing (or sitting) above the water, casting a fair distance into enough of it. */
     if (reach > rod.cast + 1.5 || reach < 1.5 || depth < MIN_CAST_DEPTH) return;
     if (SEA_LEVEL - m.body.y > 1.2) return;
@@ -912,7 +1178,6 @@ export class Room {
     m.line = null;
     if (fish) {
       this.addItem(m, fish);
-      this.saveSoon = true;
     }
     this.broadcast({ t: "line", by: m.id, x: round2(line.x), z: round2(line.z), state: "none" });
     this.broadcast({ t: "catch", by: m.id, fish });
@@ -961,25 +1226,13 @@ export class Room {
     this.herd?.tick(now, dt, this.preyList());
 
     for (const m of this.members.values()) {
-      if (m.spectator) continue;
-      const depth = SEA_LEVEL - m.body.y;
-      /* Under: drowning. Swimming: the cold. Paddling: a slow chill. Dry: recovering. */
-      const rate =
-        depth > PLAYER_HEIGHT - 0.25
-          ? -BREATH_UNDER
-          : depth > 0.9
-            ? -BREATH_WADE
-            : depth > 0
-              ? -BREATH_WADE * 0.35
-              : BREATH_REGEN;
-      m.breath = clamp(m.breath + rate * dt, 0, BREATH_MAX);
+      if (!this.present(m)) continue;
       if (m.respawnAt !== null) {
         if (now >= m.respawnAt) this.respawn(m);
         continue;
       }
 
-      if (m.breath <= 0) this.hurt(m, DROWN_DAMAGE * dt, "drowned");
-      else if (m.health < HEALTH_MAX) {
+      if (m.health < HEALTH_MAX) {
         /* A campfire warms you back quickly; otherwise it takes a while. */
         const warm = this.nearCampfire(m);
         const quiet = now - m.lastHurtAt;
@@ -988,31 +1241,24 @@ export class Room {
       }
 
       this.tickLine(m, now);
+      this.tickBleed(m, now);
 
       /* Stagger wears off a few seconds after the last hit. */
       if (now - m.lastHitAt > STAGGER_GRACE)
         m.stagger = Math.max(0, m.stagger - STAGGER_RECOVER * dt);
 
-      if (m.body.y < SEA_FLOOR - 8) this.hurt(m, HEALTH_MAX, "drowned");
+      /* The sea is safe now; only a glitch through the floor sends you home, unhurt. */
+      if (m.body.y < SEA_FLOOR - 8) this.respawn(m);
     }
 
     this.refreshBoard();
-
-    if (
-      FEATURES.weapons &&
-      this.weapons.length < GROUND_WEAPONS &&
-      this.time >= this.nextWeaponAt
-    ) {
-      this.nextWeaponAt = this.time + WEAPON_RESPAWN;
-      this.spawnWeapon(null, true);
-    }
   }
 
   /* Everyone the animals can see, in the shape they need. */
   private preyList() {
     this.prey.length = 0;
     for (const m of this.members.values()) {
-      if (m.spectator) continue;
+      if (!this.present(m)) continue;
       this.prey.push(this.asPrey(m));
     }
     return this.prey;
@@ -1027,7 +1273,8 @@ export class Room {
       yaw: m.body.yaw,
       running: (m.flags & FLAG.sprint) !== 0,
       blocking: m.blocking && this.weaponOf(m) === "shield",
-      away: m.respawnAt !== null || m.boat !== null,
+      /* Boars leave alone anyone in a boat, down, or in creative. */
+      away: m.respawnAt !== null || m.boat !== null || (m.flags & FLAG.creative) !== 0,
     };
   }
 
@@ -1048,8 +1295,8 @@ export class Room {
       for (const side of [1, -1]) {
         const x = bed.x + side * 0.95 * c;
         const z = bed.z - side * 0.95 * s;
-        const { ground } = this.terrain.groundAt(x, z, bed.y + 0.3);
-        const blocked = this.terrain
+        const { ground } = this.world.groundAt(x, z, bed.y + 0.3);
+        const blocked = this.world
           .solidsNear(x, z)
           .some(
             (o) =>
@@ -1061,17 +1308,20 @@ export class Room {
       }
       return { x: bed.x, y: bed.y + 0.45, z: bed.z, yaw: bed.rot };
     }
-    const h = this.terrain.home;
-    return { x: h.x, y: h.y, z: h.z, yaw: h.yaw };
+    return this.homeFor(m.profile);
   }
 
-  /* Damage from any source. At zero you black out, and wake up somewhere safe. */
-  private hurt(m: Member, amount: number, cause: HurtCause) {
+  /*
+   * Damage from any source (`by` is whoever dealt it, if anyone). At zero you
+   * black out, and wake up somewhere safe.
+   */
+  private hurt(m: Member, amount: number, cause: HurtCause, by: Member | null = null) {
     if (m.respawnAt !== null || amount <= 0) return;
+    /* Nothing hurts you in creative. */
+    if (m.flags & FLAG.creative) return;
     m.health = Math.max(0, m.health - amount);
     m.lastHurtAt = this.now();
-    /* Drowning ticks every frame; only report the bigger knocks. */
-    if (cause !== "drowned") m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
+    m.peer.send({ t: "hurt", amount: Math.round(amount), cause });
     if (m.health > 0) return;
     m.respawnAt = this.now() + RESPAWN_DELAY;
     this.reelIn(m);
@@ -1081,11 +1331,18 @@ export class Room {
     }
     m.blocking = false;
     m.charging = false;
-    m.peer.send({ t: "died", cause });
+    m.bleed = null;
+    m.peer.send({ t: "died", cause, by: by?.name ?? null });
+    if (by) this.feed(`${m.name} was knocked out by ${by.name}`);
   }
 
   /* Hitting the ground hard hurts; landing in water doesn't. */
   private landing(m: Member, vy: number, flags: number) {
+    /* In creative (or coming down from it) no fall counts. */
+    if (flags & FLAG.creative) {
+      m.airVy = 0;
+      return;
+    }
     const grounded = (flags & FLAG.grounded) !== 0;
     if (!grounded) {
       m.airVy = vy;
@@ -1103,95 +1360,54 @@ export class Room {
     m.respawnAt = null;
     m.health = HEALTH_MAX;
     m.airVy = 0;
-    m.breath = BREATH_MAX;
     m.stagger = 0;
     m.blocking = false;
     m.charging = false;
+    m.bleed = null;
     m.peer.send({ t: "respawn", ...s });
   }
 
   /* ---------- weapons ---------- */
 
-  /* Somewhere dry and open for a weapon: on the ground, or up on a structure. */
-  private weaponSpot() {
-    const terrain = this.terrain;
-    const far = (x: number, z: number) =>
-      this.weapons.every((w) => Math.hypot(w.x - x, w.z - z) > 22);
-    const perches = terrain.perches;
-    for (let tries = 0; tries < 300; tries++) {
-      if (perches.length && this.rng() < 0.3) {
-        const p = perches[Math.floor(this.rng() * perches.length)];
-        if (far(p.x, p.z)) return { x: p.x, y: p.y, z: p.z };
-        continue;
-      }
-      const a = this.rng() * Math.PI * 2;
-      const d = Math.sqrt(this.rng()) * ISLAND_RADIUS * 0.95;
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
-      const h = terrain.heightAt(x, z);
-      if (h < 3 || !far(x, z)) continue;
-      const { ground } = terrain.groundAt(x, z, h + 0.1);
-      if (ground > h + 0.05) continue;
-      const blocked = terrain
-        .solidsNear(x, z)
-        .some(
-          (s) => s.bottom < h + 1.8 && s.top > h + 0.2 && Math.hypot(s.x - x, s.z - z) < s.r + 0.8,
-        );
-      if (blocked) continue;
-      return { x, y: h, z };
-    }
-    const best = perches[0];
-    return best ? { x: best.x, y: best.y, z: best.z } : null;
+  /* On the Harbor: common ground, where nobody comes to harm. */
+  private sheltered(m: Member) {
+    return !!this.harbor?.contains(m.body.x, m.body.z);
   }
 
-  private spawnWeapon(kind: WeaponKind | null, announce: boolean) {
-    const k = kind ?? WEAPON_KINDS[Math.floor(this.rng() * WEAPON_KINDS.length)];
-    const spot = this.weaponSpot();
-    if (!spot) return;
-    const weapon: GroundWeapon = {
-      id: this.weaponId++,
-      kind: k,
-      x: round2(spot.x),
-      y: round2(spot.y),
-      z: round2(spot.z),
-      uses: weaponDef(k).uses,
-    };
-    this.weapons.push(weapon);
-    if (announce) this.broadcast({ t: "wspawn", weapon });
+  /* Whether `by` can hurt `o` at all: not on the Harbor, and nobody in creative. */
+  private canHarm(by: Member, o: Member) {
+    return !this.sheltered(o) && !((by.flags | o.flags) & FLAG.creative);
   }
 
-  /* Pick a weapon up off the ground, into your hotbar if there's room. */
-  private pickUp(m: Member, id: number) {
-    const w = this.weapons.find((o) => o.id === id);
-    if (!w) return;
-    if (Math.hypot(w.x - m.body.x, w.z - m.body.z) > 3 || Math.abs(w.y - m.body.y) > 2.5) return;
-    const tool = this.giveTool(m, w.kind, 1, w.uses);
-    if (!tool) {
-      m.peer.send({ t: "feed", text: "Your pack is full" });
+  /* A sickle's bleed runs out a second at a time; the Harbor staunches it. */
+  private tickBleed(m: Member, now: number) {
+    const b = m.bleed;
+    if (!b || now < b.nextAt) return;
+    if (this.sheltered(m)) {
+      m.bleed = null;
       return;
     }
-    this.weapons = this.weapons.filter((o) => o !== w);
-    /* Picking something up puts it in your hand. */
-    const slot = m.inv.hotbar.indexOf(tool.id);
-    if (slot > 0) m.inv.slot = slot;
-    m.blocking = false;
-    m.charging = false;
-    this.broadcast({ t: "wtake", id: w.id, by: m.id, kind: w.kind });
+    const tick = Math.min(b.per, b.left);
+    b.left -= tick;
+    b.nextAt += 1;
+    if (b.left <= 0.01) m.bleed = null;
+    this.hurt(m, tick, "hit", this.members.get(b.by) ?? null);
   }
 
-  /* One use off the held weapon; when it's spent it breaks. Bought gear never does. */
-  private wear(m: Member) {
-    const tool = heldTool(m.inv);
-    const weapon = tool && TOOLS[tool.kind].weapon;
-    if (!tool || !weapon || tool.uses < 0) return;
-    tool.uses--;
-    m.invDirty = true;
-    if (tool.uses > 0) return;
-    this.removeTool(m, tool.id);
-    this.broadcast({ t: "wbreak", by: m.id, kind: weapon });
+  /*
+   * What one blow does in health before any block: the weapon's own damage,
+   * wound up by a charge or a combo, and sharpened from behind or in the water.
+   */
+  private damageOf(def: WeaponDef, p: PendingHit, behind: boolean, wet: boolean) {
+    let damage = def.damage;
+    if (def.charged !== undefined) damage += (def.charged - def.damage) * p.power;
+    if (p.heavy && def.combo) damage = def.combo;
+    if (behind && def.backstab) damage *= def.backstab;
+    if (wet && def.wet) damage *= def.wet;
+    return damage;
   }
 
-  private attack(m: Member, charge: number, climb: boolean) {
+  private attack(m: Member, charge: number) {
     const now = this.now();
     if (now < m.attackReadyAt || m.blocking) return;
     const tool = heldTool(m.inv);
@@ -1203,7 +1419,7 @@ export class Room {
     m.charging = false;
 
     let heavy = false;
-    if (kind === "sword") {
+    if (def.combo) {
       m.combo = now - m.lastSwingAt < COMBO_WINDOW ? m.combo + 1 : 1;
       if (m.combo >= 3) {
         heavy = true;
@@ -1211,11 +1427,6 @@ export class Room {
       }
     }
     m.lastSwingAt = now;
-    let power = 1;
-    if (def.charge && def.charge.max > def.charge.min) {
-      const c = clamp(charge, def.charge.min, def.charge.max);
-      power = (c - def.charge.min) / (def.charge.max - def.charge.min);
-    }
     this.broadcast({ t: "swing", by: m.id, kind, heavy });
     if (kind === "axe") this.chopTree(m);
     /* A pickaxe swung at a wall is a climb, not an attack. */
@@ -1225,12 +1436,10 @@ export class Room {
       at: now + def.windup,
       by: m.id,
       kind,
-      fine,
       heavy,
-      power,
+      power: chargePower(def, charge),
       yaw: m.body.yaw,
     });
-    this.wear(m);
   }
 
   private chopTree(m: Member) {
@@ -1275,13 +1484,13 @@ export class Room {
     this.pending = this.pending.filter((p) => p.at > now);
     for (const p of due) {
       const m = this.members.get(p.by);
-      if (!m) continue;
+      if (!m || m.respawnAt !== null) continue;
       const def = weaponDef(p.kind);
       const fx = -Math.sin(p.yaw);
       const fz = -Math.cos(p.yaw);
       this.hitAnimals(m, p, now);
       for (const o of this.members.values()) {
-        if (o === m || o.spectator || o.respawnAt !== null) continue;
+        if (o === m || !this.present(o) || o.respawnAt !== null) continue;
         const dx = o.body.x - m.body.x;
         const dz = o.body.z - m.body.z;
         const d = Math.hypot(dx, dz);
@@ -1289,84 +1498,117 @@ export class Room {
         const nx = dx / (d || 1);
         const nz = dz / (d || 1);
         if (def.arc > -1 && d > 0.7 && nx * fx + nz * fz < def.arc) continue;
+        this.strike(m, o, p, def, nx, nz, fx, fz, now);
+      }
+    }
+  }
 
-        let added = def.stagger;
-        let knock = def.knock;
-        let lift = def.lift;
-        if (p.heavy) {
-          added = 16;
-          knock = 13;
-          lift = 7;
-        }
-        if (p.kind === "flail") {
-          added = 6 + 16 * p.power;
-          knock = 7 + 8 * p.power;
-          lift = 2.5 + 4 * p.power;
-        }
-        /* Which way the victim faces: away from us means a stab in the back. */
-        const ofx = -Math.sin(o.body.yaw);
-        const ofz = -Math.cos(o.body.yaw);
-        const facingAway = ofx * nx + ofz * nz;
-        if (p.kind === "daggers" && facingAway > 0.45) added *= 3;
+  /* One blow landing on one person: block, damage, stagger, then the shove (or the hook). */
+  private strike(
+    m: Member,
+    o: Member,
+    p: PendingHit,
+    def: WeaponDef,
+    nx: number,
+    nz: number,
+    fx: number,
+    fz: number,
+    now: number,
+  ) {
+    let added = def.stagger;
+    let knock = def.knock;
+    let lift = def.lift;
+    if (p.heavy) {
+      added = 16;
+      knock = 13;
+      lift = 7;
+    }
+    if (def.charged !== undefined) {
+      const wound = 0.7 + 0.6 * p.power;
+      added *= wound;
+      knock *= wound;
+      lift *= wound;
+    }
+    /* Which way the victim faces: away from us means a blow in the back. */
+    const facingAway = -Math.sin(o.body.yaw) * nx + -Math.cos(o.body.yaw) * nz;
+    const behind = facingAway > 0.45;
+    if (def.backstab && behind) added *= 3;
+    let damage = this.damageOf(def, p, behind, (o.flags & FLAG.wet) !== 0);
 
-        let blocked = false;
-        let parry = false;
-        if (o.blocking && this.weaponOf(o) === "shield" && -facingAway > 0.2) {
-          blocked = true;
-          parry = now - o.blockSince < PARRY_WINDOW;
-          if (p.kind === "axe") {
-            added *= 0.5;
-            knock *= 0.5;
-            lift *= 0.5;
-          } else {
-            added = 0;
-            knock *= 0.2;
-            lift = 0;
-          }
-          this.wear(o);
-          if (parry) {
-            m.stagger = Math.min(STAGGER_MAX, m.stagger + 15);
-            m.lastHitAt = now;
-            this.push(m, -nx, -nz, 8 * knockScale(m.stagger), 3);
-            this.broadcast({
-              t: "hit",
-              by: o.id,
-              target: m.id,
-              kind: "shield",
-              stagger: Math.round(m.stagger),
-              added: 15,
-              blocked: false,
-              parry: true,
-              heavy: false,
-            });
-          }
-        }
-
-        o.stagger = Math.min(STAGGER_MAX, o.stagger + added);
-        if (added > 0) o.lastHitAt = now;
-        let ix = nx;
-        let iz = nz;
-        if (def.arc > -1) {
-          ix = nx * 0.5 + fx * 0.5;
-          iz = nz * 0.5 + fz * 0.5;
-          const il = Math.hypot(ix, iz) || 1;
-          ix /= il;
-          iz /= il;
-        }
-        this.push(o, ix, iz, knock * knockScale(o.stagger), lift * (1 + o.stagger / 200));
+    let blocked = false;
+    let parry = false;
+    if (o.blocking && this.weaponOf(o) === "shield" && -facingAway > 0.2) {
+      blocked = true;
+      parry = now - o.blockSince < PARRY_WINDOW;
+      if (def.sunders) {
+        added *= 0.5;
+        knock *= 0.5;
+        lift *= 0.5;
+        damage *= 0.5;
+      } else {
+        added = 0;
+        knock *= 0.2;
+        lift = 0;
+        damage = 0;
+      }
+      if (parry) {
+        m.stagger = Math.min(STAGGER_MAX, m.stagger + 15);
+        m.lastHitAt = now;
+        this.push(m, -nx, -nz, 8 * knockScale(m.stagger), 3);
         this.broadcast({
           t: "hit",
-          by: m.id,
-          target: o.id,
-          kind: p.kind,
-          stagger: Math.round(o.stagger),
-          added: Math.round(added),
-          blocked,
-          parry,
-          heavy: p.heavy,
+          by: o.id,
+          target: m.id,
+          kind: "shield",
+          stagger: Math.round(m.stagger),
+          added: 15,
+          damage: 0,
+          blocked: false,
+          parry: true,
+          heavy: false,
         });
       }
     }
+
+    const harm = this.canHarm(m, o);
+    if (!harm) damage = 0;
+    o.stagger = Math.min(STAGGER_MAX, o.stagger + added);
+    if (added > 0 || damage > 0) o.lastHitAt = now;
+
+    if (def.pull && !blocked) {
+      /* Hooked: drawn in toward the swing, not thrown away from it. */
+      this.push(o, -nx, -nz, def.pull * (1 + o.stagger / 300), lift);
+    } else {
+      let ix = nx;
+      let iz = nz;
+      if (def.arc > -1) {
+        ix = nx * 0.5 + fx * 0.5;
+        iz = nz * 0.5 + fz * 0.5;
+        const il = Math.hypot(ix, iz) || 1;
+        ix /= il;
+        iz /= il;
+      }
+      this.push(o, ix, iz, knock * knockScale(o.stagger), lift * (1 + o.stagger / 200));
+    }
+
+    this.broadcast({
+      t: "hit",
+      by: m.id,
+      target: o.id,
+      kind: p.kind,
+      stagger: Math.round(o.stagger),
+      added: Math.round(added),
+      damage: Math.round(damage),
+      blocked,
+      parry,
+      heavy: p.heavy,
+    });
+
+    if (damage <= 0) return;
+    if (def.daze) o.peer.send({ t: "daze", seconds: def.daze });
+    if (def.bleed)
+      o.bleed = { left: def.bleed, per: def.bleed / BLEED_TIME, nextAt: now + 1, by: m.id };
+    this.hurt(o, damage, "hit", m);
   }
 
   private hitAnimals(m: Member, p: PendingHit, now: number) {
@@ -1381,16 +1623,12 @@ export class Room {
       const d = Math.hypot(dx, dz);
       if (d > def.reach + 0.7 || Math.abs(a.y + 0.6 - m.body.y) > 2.4) continue;
       if (def.arc > -1 && d > 0.9 && (dx * fx + dz * fz) / d < def.arc - 0.15) continue;
-      let damage = def.damage * (p.fine ? FINE_DAMAGE : 1) * (p.heavy ? 1.6 : 1);
-      if (p.kind === "flail") damage = 10 + 18 * p.power;
-      /* Daggers from behind. */
-      const afx = -Math.sin(a.yaw);
-      const afz = -Math.cos(a.yaw);
-      if (p.kind === "daggers" && (afx * dx + afz * dz) / (d || 1) > 0.4) damage *= 2.5;
+      /* An animal facing away takes it in the back. */
+      const behind = (-Math.sin(a.yaw) * dx + -Math.cos(a.yaw) * dz) / (d || 1) > 0.4;
+      const damage = this.damageOf(def, p, behind, false) + (def.bleed ?? 0);
       const dead = this.herd.strike(a, this.asPrey(m), damage, now);
       if (dead) {
         this.addItem(m, a.kind);
-        this.saveSoon = true;
       }
       this.broadcast({
         t: "ahit",
@@ -1408,20 +1646,21 @@ export class Room {
   private roster() {
     return [...this.members.values()]
       .filter((o) => !o.spectator)
-      .map((o) => ({ id: o.id, name: o.name }));
+      .map((o) => ({ id: o.id, name: o.name, skin: o.skin }));
   }
 
   private worldInfo(m: Member): WorldInfo {
     return {
-      seed: this.seed,
+      islands: this.world.list(),
+      mine: m.spectator ? null : m.profile ? m.profile.island : (this.world.list()[0]?.id ?? null),
       time: this.time,
       roster: this.roster(),
-      weapons: this.weapons,
       board: this.board,
       prefabs: [...this.prefabs.values()],
       collected: [...this.collected],
       felledTrees: [...this.felledTrees],
       you: m.spectator ? null : { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw },
+      you: this.present(m) ? { x: m.body.x, y: m.body.y, z: m.body.z, yaw: m.body.yaw } : null,
     };
   }
 
@@ -1445,7 +1684,7 @@ export class Room {
   private broadcastSnap(now: number) {
     const p: PlayerSnap[] = [];
     for (const m of this.members.values()) {
-      if (m.spectator) continue;
+      if (!this.present(m)) continue;
       p.push([
         m.id,
         round2(m.body.x),
@@ -1458,7 +1697,6 @@ export class Room {
           (now < m.shoveFlagUntil ? FLAG.shove : 0) |
           (m.blocking ? FLAG.block : 0) |
           (m.charging ? FLAG.charge : 0),
-        Math.round(m.breath),
         weaponIndex(this.weaponOf(m)),
         Math.round(m.stagger),
       ]);
@@ -1483,11 +1721,10 @@ export class Room {
         p,
         a,
         b,
-        me: m.spectator
+        me: !this.present(m)
           ? null
           : {
               health: Math.ceil(m.health),
-              breath: Math.round(m.breath),
               stagger: Math.round(m.stagger),
               dead: m.respawnAt !== null,
             },

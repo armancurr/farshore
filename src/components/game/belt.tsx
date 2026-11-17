@@ -16,11 +16,12 @@ import {
   type Icon,
   KnifeIcon,
   LightningIcon,
-  LinkSimpleIcon,
+  MoonIcon,
   ShieldIcon,
-  ShovelIcon,
+  StarFourIcon,
   SwordIcon,
   TreasureChestIcon,
+  WavesIcon,
 } from "@phosphor-icons/react";
 import { cn } from "cn";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -35,13 +36,20 @@ const TOOL_ICONS: Record<ToolKind, Icon> = {
   sword2: SwordIcon,
   axe: AxeIcon,
   axe2: AxeIcon,
-  spear: ArrowUpRightIcon,
-  spear2: ArrowUpRightIcon,
-  hammer: HammerIcon,
-  pickaxe: ShovelIcon,
+  rod: FishSimpleIcon,
+  rod2: FishSimpleIcon,
   daggers: KnifeIcon,
+  sickle: MoonIcon,
+  machete: KnifeIcon,
+  boardaxe: AxeIcon,
+  spear: ArrowUpRightIcon,
+  trident: WavesIcon,
+  mace: StarFourIcon,
+  halberd: AxeIcon,
+  axe: AxeIcon,
+  greatsword: SwordIcon,
+  hammer: HammerIcon,
   shield: ShieldIcon,
-  flail: LinkSimpleIcon,
 };
 
 const KIT_ICONS: Record<KitId, Icon> = {
@@ -99,29 +107,35 @@ function Vitals(props: { hud: HudState }) {
 }
 
 /*
+ * What the keys and mouse do right now: building, flying, rowing, or the
+ * thing in hand. Phones only get the building line; they have their own buttons.
+ */
+export function controlHint(hud: HudState, touch: boolean) {
+  const build = hud.build;
+  if (build) {
+    if (build.target) return `Right-click to take back the ${build.target.toLowerCase()}`;
+    return build.ok ? "Click to place" : (build.reason ?? "Look at the ground");
+  }
+  return touch ? null : hud.hint;
+}
+
+/*
  * The bottom bar: one dark card with your health and the nine things you can
  * hold. The one in hand is the bright slot. In build mode the slots become
- * the kits you own.
+ * the kits you own. On a desktop the control hints sit top left (see Hud);
+ * on phones the belt is up top, so the building line stays with it.
  */
 export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   const { hud, touch } = props;
   const build = hud.build;
-  const status = build
-    ? build.target
-      ? `Right-click to take back the ${build.target.toLowerCase()}`
-      : build.ok
-        ? "Click to place"
-        : (build.reason ?? "Look at the ground")
-    : touch
-      ? null
-      : hud.hint;
+  const status = touch ? controlHint(hud, touch) : null;
 
   return (
     <div className="flex flex-col items-center gap-2">
       {status && <div className="font-sans text-xs font-bold text-white/70">{status}</div>}
       <div className="pointer-events-auto rounded-[14px] border border-[#242424] bg-[#121212]/90 px-2 pt-[9px] pb-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_24px_48px_-16px_rgba(0,0,0,0.7),0_2px_6px_rgba(0,0,0,0.4)]">
         <Vitals hud={hud} />
-        <div className="flex gap-1 sm:gap-1.5">
+        <div className={cn("flex gap-1", !touch && "sm:gap-1.5")}>
           {build
             ? build.kits.map((kit, i) => {
                 const KitIcon = KIT_ICONS[kit.id];
@@ -130,7 +144,11 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                     key={kit.id}
                     title={kit.name}
                     data-selected={build.index === i}
-                    className={buttonVariants({ variant: "slot", size: "slot" })}
+                    className={cn(
+                      buttonVariants({ variant: "slot", size: "slot" }),
+                      /* Phones: small slots, so the belt fits between the corners. */
+                      touch && "sm:size-[34px]",
+                    )}
                   >
                     <SlotKey n={i + 1} />
                     <KitIcon size={18} weight="fill" />
@@ -166,6 +184,9 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                             : `Empty slot ${i + 1}`))
                     }
                     title={i === 0 ? "Fists" : (tool?.name ?? item?.name)}
+                    className={cn(touch && "sm:size-[34px]")}
+                    aria-label={i === 0 ? "Fists" : (tool?.name ?? `Empty slot ${i + 1}`)}
+                    title={i === 0 ? "Fists" : tool?.name}
                     aria-pressed={selected}
                     data-selected={selected}
                     onClick={() => props.onSelect(i)}
@@ -207,6 +228,7 @@ export function Belt(props: { hud: HudState; touch: boolean; onSelect: (i: numbe
                         indicatorClassName="rounded-full bg-current/60"
                       />
                     )}
+                    {ToolIcon && <ToolIcon size={18} weight="fill" />}
                   </Button>
                 );
               })}

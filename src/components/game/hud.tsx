@@ -3,11 +3,10 @@ import { HandGrabbingIcon } from "@phosphor-icons/react";
 import { useEffect, useRef } from "react";
 import { Progress } from "@/components/ui/progress";
 import type { HudState } from "../../game/client/game";
-import { Belt } from "./belt";
+import { Belt, controlHint } from "./belt";
 import { needleAt, type Strike } from "../../game/shared/fishing";
 
 const DOWN_TEXT: Record<string, string> = {
-  drowned: "The sea took your breath",
   fall: "You fell too far",
   boar: "The boar got the better of you",
   hit: "You were struck down",
@@ -43,30 +42,6 @@ function ActiveBounty(props: { hud: HudState }) {
   );
 }
 
-function BreathRing(props: { breath: number }) {
-  const r = 22;
-  const c = 2 * Math.PI * r;
-  return (
-    <svg
-      className="absolute top-1/2 left-1/2 size-16 -translate-1/2"
-      viewBox="0 0 64 64"
-      aria-hidden="true"
-    >
-      <circle cx="32" cy="32" r={r} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="2" />
-      <circle
-        cx="32"
-        cy="32"
-        r={r}
-        fill="none"
-        stroke="white"
-        strokeWidth="2"
-        strokeDasharray={`${(c * props.breath) / 100} ${c}`}
-        transform="rotate(-90 32 32)"
-      />
-    </svg>
-  );
-}
-
 function Crosshair(props: { hud: HudState }) {
   const h = props.hud;
   return (
@@ -91,6 +66,8 @@ function Crosshair(props: { hud: HudState }) {
           <span className="absolute top-1/2 left-1/2 h-3 w-px -translate-1/2 bg-white/80 mix-blend-difference" />
         </>
       )}
+      <span className="absolute top-1/2 left-1/2 h-px w-3 -translate-1/2 bg-white/80 mix-blend-difference" />
+      <span className="absolute top-1/2 left-1/2 h-3 w-px -translate-1/2 bg-white/80 mix-blend-difference" />
       {h.hitMarker > 0 && (
         /* Hit marker: four ticks round the centre, and what the blow did. */
         <div className="absolute inset-0" style={{ opacity: Math.min(1, h.hitMarker * 1.6) }}>
@@ -135,39 +112,6 @@ function Crosshair(props: { hud: HudState }) {
         </div>
       )}
     </div>
-  );
-}
-
-/* Weapons on the ground: a diamond where they are, or an arrow at the edge. */
-function Markers(props: { hud: HudState }) {
-  return (
-    <>
-      {props.hud.markers.map((m) => (
-        <div
-          key={m.id}
-          className="absolute -translate-1/2"
-          style={{ left: `${m.x * 100}%`, top: `${m.y * 100}%` }}
-        >
-          {m.off ? (
-            <svg
-              viewBox="0 0 16 16"
-              className="size-4 opacity-70"
-              style={{ transform: `rotate(${m.angle}rad)` }}
-              aria-hidden="true"
-            >
-              <polygon points="15,8 3,2 6,8 3,14" fill="white" />
-            </svg>
-          ) : (
-            <div className="flex flex-col items-center gap-0.5">
-              <div className="size-2.5 rotate-45 border border-white" />
-              <div className="font-mono text-[9px] tracking-[0.15em] text-white/70">
-                {Math.round(m.d)}m
-              </div>
-            </div>
-          )}
-        </div>
-      ))}
-    </>
   );
 }
 
@@ -231,35 +175,70 @@ function Fishing(props: { hud: HudState }) {
   );
 }
 
+/* "Space up · Shift down · …" as a short list, one control to a line. */
+function ControlHints(props: { text: string | null }) {
+  if (!props.text) return null;
+  const lines = props.text.split(" · ").map((line) => line.charAt(0).toUpperCase() + line.slice(1));
+  return (
+    <ul className="flex flex-col items-start gap-1.5 text-white/55">
+      {lines.map((line) => (
+        <li key={line}>{line}</li>
+      ))}
+    </ul>
+  );
+}
+
 export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number) => void }) {
   const h = props.hud;
   return (
     <div className="pointer-events-none absolute inset-0 text-white select-none">
-      <div className="absolute top-5 left-5 space-y-3">
+      {/*
+        Top left, in one column: coins, what the controls do right now (one
+        per line), then the feed of what just happened (mode changes, pickups).
+      */}
+      <div
+        className={cn(
+          "absolute flex flex-col items-start gap-4 font-sans text-xs font-bold [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]",
+          /* Phones: a narrow column, clear of the belt in the middle of the top edge. */
+          props.touch
+            ? "top-3 left-4 max-w-[calc(50%-13rem)] gap-2 text-[11px]"
+            : "top-5 left-5 max-w-[min(18rem,calc(100%-2.5rem))] sm:top-6 sm:left-6",
+        )}
+      >
         {h.player && h.economy && (
-          <div className="font-mono text-[13px] tracking-[0.12em] tabular-nums">
+          <div className="font-mono text-[13px] font-normal tracking-[0.12em] tabular-nums">
             <span className="mr-1.5 text-white/45">◎</span>
             {h.inv.coins}
           </div>
         )}
+        {!props.touch && h.player && <ControlHints text={controlHint(h, props.touch)} />}
+        {h.feed.length > 0 && (
+          <div className="flex flex-col items-start gap-1.5 text-white/70">
+            {h.feed.map((item, i) => (
+              <div key={i}>{item.text}</div>
+            ))}
+          </div>
+        )}
       </div>
       {h.player && h.economy && (
-        <div className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-24" : "top-5")}>
+        <div className={cn("absolute left-1/2 -translate-x-1/2", props.touch ? "top-28" : "top-5")}>
           <ActiveBounty hud={h} />
         </div>
       )}
-
-      <div className="absolute top-40 right-5 flex flex-col items-end gap-1 font-mono text-[11px] sm:top-16">
-        {h.feed.map((item, i) => (
-          <div key={i} className="bg-black/50 px-2 py-0.5 text-white/80">
-            {item.text}
-          </div>
-        ))}
-      </div>
+      {/* The Harbor is common ground: nobody can be hurt here. */}
+      {h.player && h.sheltered && !h.economy && (
+        <div
+          className={cn(
+            "absolute left-1/2 -translate-x-1/2 font-mono text-[10px] tracking-[0.2em] whitespace-nowrap text-white/60 uppercase [text-shadow:0_1px_3px_rgba(0,0,0,0.8)]",
+            props.touch ? "top-24" : "top-6",
+          )}
+        >
+          The Harbor · safe from harm
+        </div>
+      )}
 
       {h.player && (
         <>
-          <Markers hud={h} />
           <Crosshair hud={h} />
           <Fishing hud={h} />
           {h.prompt && (
@@ -277,7 +256,7 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
           <div
             className={cn(
               "absolute left-1/2 -translate-x-1/2",
-              props.touch ? "top-5 bottom-auto" : "bottom-6",
+              props.touch ? "top-3 bottom-auto" : "bottom-6",
             )}
           >
             <Belt hud={h} touch={props.touch} onSelect={props.onSelect} />

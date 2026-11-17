@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CONTOUR, GRID, WORLD_SIZE } from "../../shared/constants";
+import { CONTOUR, GRAND_SIZE, GRID, MAX_ISLANDS, TILE_SIZE } from "../../shared/constants";
 import type { Terrain } from "../../shared/terrain";
 import { GLSL_COMMON, shared } from "./materials";
 import { bakeShoreDistance, SHORE_CELL, SHORE_GRID } from "./shore";
@@ -36,6 +36,8 @@ const GLSL_SWASH = /* glsl */ `
  */
 const GLSL_FIELD = /* glsl */ `
   uniform highp sampler2D uHeights;
+  /* The centre of this island's tile on the grand map. */
+  uniform vec2 uOrigin;
   uniform float uHalf;
   uniform float uCell;
   uniform int uGrid;
@@ -50,7 +52,7 @@ const GLSL_FIELD = /* glsl */ `
 
   /* (height, dh/dx, dh/dz) at a point on the ground. */
   vec3 field(vec2 xz) {
-    vec2 g = (xz + uHalf) / uCell;
+    vec2 g = (xz - uOrigin + uHalf) / uCell;
     vec2 i = floor(g);
     vec2 f = g - i;
     vec4 wx, dx, wz, dz;
@@ -203,17 +205,19 @@ const WATER_FRAGMENT = /* glsl */ `
   uniform float uShoreCell;
   varying vec3 vWorld;
 
-  float shoreDistance(vec2 xz) {
-    vec2 uv = ((xz + uHalf) / uShoreCell + 0.5) / uShoreGrid;
-    return texture2D(uShore, clamp(uv, 0.0, 1.0)).r + length(max(abs(xz) - uHalf, 0.0));
+  float shoreDistance(vec2 local) {
+    vec2 uv = ((local + uHalf) / uShoreCell + 0.5) / uShoreGrid;
+    return texture2D(uShore, clamp(uv, 0.0, 1.0)).r + length(max(abs(local) - uHalf, 0.0));
   }
 
   void main() {
     vec2 xz = vWorld.xz;
-    float inside = step(max(abs(xz.x), abs(xz.y)), uHalf);
+    vec2 local = xz - uOrigin;
+    float edge = max(abs(local.x), abs(local.y));
+    float inside = step(edge, uHalf);
     float ground = mix(-30.0, field(xz).x, inside);
     float depth = vWorld.y - ground;
-    float s = shoreDistance(xz);
+    float s = shoreDistance(local);
 
     float ph = 7.0 * log(1.0 + s / 10.6) + uTime / SWASH_PERIOD;
     float w = max(length(vec2(dFdx(ph), dFdy(ph))), 1e-5);
@@ -225,6 +229,8 @@ const WATER_FRAGMENT = /* glsl */ `
     float gaps = smoothstep(0.3, 0.52, vnoise(xz * 0.03 + vec2(id * 7.31, id * 3.17)));
     line *= mix(gaps, 1.0, smoothstep(28.0, 8.0, s));
     line *= 1.0 - smoothstep(95.0, 165.0, s);
+    /* Toward the tile's edge the lines let go, so it meets the open sea (or a neighbour) without a seam. */
+    line *= 1.0 - smoothstep(uHalf - 80.0, uHalf - 8.0, edge);
     float tone = mix(0.17, 0.6, near) + 0.3 * exp(-s / 2.5);
 
     /* The sun's path on the water. */
@@ -261,18 +267,22 @@ function heightTexture(terrain: Terrain) {
   return tex;
 }
 
-/* The ground and the sea, sharing one height texture. */
+/*
+ * One island: its ground and the sea over its tile, sharing one height
+ * texture, both placed at the island's spot on the grand map.
+ */
 export function createLand(terrain: Terrain) {
   const heights = heightTexture(terrain);
   const shore = bakeShoreDistance(terrain.heights);
   const field = {
     uHeights: { value: heights },
-    uHalf: { value: WORLD_SIZE / 2 },
-    uCell: { value: WORLD_SIZE / (GRID - 1) },
+    uOrigin: { value: new THREE.Vector2(terrain.ox, terrain.oz) },
+    uHalf: { value: TILE_SIZE / 2 },
+    uCell: { value: TILE_SIZE / (GRID - 1) },
     uGrid: { value: GRID },
   };
 
-  const geo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, GRID - 1, GRID - 1);
+  const geo = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, GRID - 1, GRID - 1);
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   for (let k = 0; k < pos.count; k++) pos.setY(k, terrain.heights[k]);
@@ -286,8 +296,10 @@ export function createLand(terrain: Terrain) {
   });
   const ground = new THREE.Mesh(geo, groundMat);
   ground.name = "terrain";
+  ground.position.set(terrain.ox, 0, terrain.oz);
 
-  const seaGeo = new THREE.PlaneGeometry(4000, 4000, 1, 1);
+  /* A touch wider than the tile, so it overlaps the open sea rather than leaving a crack. */
+  const seaGeo = new THREE.PlaneGeometry(TILE_SIZE + 1, TILE_SIZE + 1, 1, 1);
   seaGeo.rotateX(-Math.PI / 2);
   const seaMat = new THREE.ShaderMaterial({
     uniforms: {
@@ -306,7 +318,7 @@ export function createLand(terrain: Terrain) {
   const sea = new THREE.Mesh(seaGeo, seaMat);
   sea.name = "water";
   sea.renderOrder = 2;
-  sea.frustumCulled = false;
+  sea.position.set(terrain.ox, 0, terrain.oz);
 
   /* The textures go when the ground does: the world tears down by disposing materials. */
   groundMat.addEventListener("dispose", () => {
@@ -315,4 +327,75 @@ export function createLand(terrain: Terrain) {
   });
 
   return [ground, sea] as const;
+}
+
+/*
+ * The open sea between the islands: plain deep water out to the horizon. It
+ * steps aside wherever an island's own tile of sea is drawn.
+ */
+const OPEN_SEA_FRAGMENT = /* glsl */ `
+  ${GLSL_COMMON}
+  ${GLSL_SWASH}
+  uniform vec4 uTiles[${MAX_ISLANDS}];
+  uniform int uTileCount;
+  varying vec3 vWorld;
+
+  float hash2(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash2(i), hash2(i + vec2(1.0, 0.0)), f.x), mix(hash2(i + vec2(0.0, 1.0)), hash2(i + 1.0), f.x), f.y);
+  }
+
+  void main() {
+    vec2 xz = vWorld.xz;
+    for (int i = 0; i < ${MAX_ISLANDS}; i++) {
+      if (i >= uTileCount) break;
+      vec4 t = uTiles[i];
+      if (max(abs(xz.x - t.x), abs(xz.y - t.y)) < t.z) discard;
+    }
+    vec3 view = normalize(vWorld - cameraPosition);
+    vec3 r = reflect(view, vec3(0.0, 1.0, 0.0));
+    float glint = pow(max(dot(r, uSun), 0.0), 60.0) * uLight;
+    float sparkle = vnoise(xz * 0.9 + uTime * vec2(0.4, 0.25)) * vnoise(xz * vec2(1.7, 2.3) - uTime * vec2(0.3, 0.5));
+    glint *= 0.15 + 0.85 * smoothstep(0.12, 0.45, sparkle);
+    float c = 0.075 + glint * 0.9;
+    float alpha = 1.0;
+    if (!gl_FrontFacing) { c = 0.12; alpha = 0.85; }
+    gl_FragColor = vec4(vec3(applyFog(c, vWorld)), alpha);
+  }
+`;
+
+export class OpenSea {
+  readonly mesh: THREE.Mesh;
+  private tiles = Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector4());
+  private count = { value: 0 };
+
+  constructor() {
+    const geo = new THREE.PlaneGeometry(GRAND_SIZE + 6400, GRAND_SIZE + 6400, 1, 1);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { ...shared, uTiles: { value: this.tiles }, uTileCount: this.count },
+      vertexShader: WATER_VERTEX,
+      fragmentShader: OPEN_SEA_FRAGMENT,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.mesh = new THREE.Mesh(geo, mat);
+    this.mesh.name = "open-sea";
+    this.mesh.renderOrder = 2;
+    this.mesh.frustumCulled = false;
+  }
+
+  /* Where the islands' own seas are. */
+  setTiles(centres: readonly { x: number; z: number }[]) {
+    const n = Math.min(centres.length, MAX_ISLANDS);
+    for (let i = 0; i < n; i++) this.tiles[i].set(centres[i].x, centres[i].z, TILE_SIZE / 2, 0);
+    this.count.value = n;
+  }
 }

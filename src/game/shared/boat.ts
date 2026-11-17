@@ -1,6 +1,6 @@
 import { BOUNDARY, SEA_LEVEL } from "./constants";
 import { clamp, wrapAngle } from "./math";
-import { overSolid, type Terrain } from "./terrain";
+import { type Ground, overSolid } from "./terrain";
 
 /*
  * A rowboat: W and S pull on the oars, A and D turn it. It glides and slows
@@ -32,7 +32,7 @@ const HULL: [number, number][] = [
   [0, 1.85],
 ];
 
-function hullClear(terrain: Terrain, x: number, z: number, rot: number) {
+function hullClear(terrain: Ground, x: number, z: number, rot: number) {
   const c = Math.cos(rot);
   const s = Math.sin(rot);
   for (const [lx, lz] of HULL) {
@@ -52,7 +52,7 @@ export function stepBoat(
   b: BoatState,
   intent: { forward: number; right: number },
   dt: number,
-  terrain: Terrain,
+  terrain: Ground,
 ) {
   const want =
     intent.forward > 0 ? ROW_SPEED * intent.forward : intent.forward < 0 ? -BACK_SPEED : 0;

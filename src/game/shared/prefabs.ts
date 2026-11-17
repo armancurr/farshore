@@ -2,7 +2,7 @@ import { PLAYER_RADIUS, SEA_LEVEL } from "./constants";
 import type { ItemId, KitId } from "./items";
 import type { Block, Tone } from "./structures";
 import { toWorld } from "./structures";
-import type { Solid, Terrain } from "./terrain";
+import type { Ground, Solid } from "./terrain";
 
 /*
  * Things you can build. Each kind is laid out as plain blocks in its own
@@ -417,7 +417,7 @@ function intrudes(s: Solid, kind: KitId, x: number, z: number, rot: number, pad:
  * Both the ghost preview and the room ask this, with the same answer.
  */
 export function checkPlacement(
-  terrain: Terrain,
+  terrain: Ground,
   kind: KitId,
   x: number,
   z: number,
