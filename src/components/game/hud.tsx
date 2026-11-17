@@ -155,11 +155,21 @@ function Fishing(props: { hud: HudState }) {
 }
 
 /* "Space up · Shift down · …" as a short list, one control to a line. */
-function ControlHints(props: { text: string | null }) {
-  if (!props.text) return null;
-  const lines = props.text.split(" · ").map((line) => line.charAt(0).toUpperCase() + line.slice(1));
+/*
+ * What the controls do right now, one per line. What E would do here (get in
+ * the rowboat, open the chest) leads, brighter, unless a line already says it.
+ */
+function ControlHints(props: { text: string | null; prompt: string | null }) {
+  const cap = (line: string) => line.charAt(0).toUpperCase() + line.slice(1);
+  const lines = props.text ? props.text.split(" · ").map(cap) : [];
+  /* "E · Get in the rowboat" reads as a hint line: "E get in the rowboat". */
+  const action = props.prompt?.replace(/^E · (.)/, (_, c: string) => `E ${c.toLowerCase()}`);
+  const lead =
+    action && !lines.some((l) => l.toLowerCase() === action.toLowerCase()) ? action : null;
+  if (!lead && !lines.length) return null;
   return (
     <ul className="flex flex-col items-start gap-1.5 text-white/55">
+      {lead && <li className="text-white">{cap(lead)}</li>}
       {lines.map((line) => (
         <li key={line}>{line}</li>
       ))}
@@ -190,7 +200,9 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
             {h.inv.coins}
           </div>
         )}
-        {!props.touch && h.player && <ControlHints text={controlHint(h, props.touch)} />}
+        {!props.touch && h.player && (
+          <ControlHints text={controlHint(h, props.touch)} prompt={h.prompt} />
+        )}
         {h.feed.length > 0 && (
           <div className="flex flex-col items-start gap-1.5 text-white/70">
             {h.feed.map((item, i) => (
@@ -220,9 +232,10 @@ export function Hud(props: { hud: HudState; touch: boolean; onSelect: (i: number
         <>
           <Crosshair hud={h} />
           <Fishing hud={h} />
-          {h.prompt && (
+          {/* Phones have no hints column: what the action button does sits over the belt. */}
+          {props.touch && h.prompt && (
             <div className="absolute bottom-36 left-1/2 -translate-x-1/2 border border-white/40 bg-black/60 px-3 py-1 font-mono text-[11px] tracking-[0.2em] uppercase">
-              {props.touch ? h.prompt.replace("E · ", "") : h.prompt}
+              {h.prompt.replace("E · ", "")}
             </div>
           )}
           {h.hurt > 0 && (
