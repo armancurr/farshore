@@ -14,7 +14,7 @@ import {
 } from "../src/game/shared/drive.ts";
 import { stepMount } from "../src/game/shared/mount.ts";
 import { parseClientMsg, RIDE_FIELDS } from "../src/game/shared/protocol.ts";
-import { parseWorldSave } from "../src/game/shared/save.ts";
+import { parseWorldSave, WORLD_SAVE_VERSION } from "../src/game/shared/save.ts";
 import {
   RIDER_HIP,
   VEHICLE_KINDS,
@@ -459,11 +459,28 @@ test("a vehicle packs into a snapshot and back, seats and all", () => {
   assert(Math.abs(out.state.speed - 4.57) < 1e-9 && out.state.x === 1.23);
 });
 
+test("saves from before the islands were reshaped wake on the Harbor, without their vehicle", () => {
+  const inv = { coins: 0, slot: 0, items: {}, tools: [], hotbar: [] };
+  const save = parseWorldSave({
+    v: 2,
+    ids: { tool: 1 },
+    players: [
+      {
+        token: "aaaaaaaa",
+        name: "a",
+        saved: { x: 5, y: 1, z: 6, yaw: 0, health: 80, inv, boat: 12 },
+      },
+    ],
+  });
+  assert.equal(save.players[0].saved.vehicle, null);
+  assert.equal(save.players[0].saved.relocate, true);
+});
+
 test("old saves: a rowboat comes back as a rowboat, a desert bike as nothing", () => {
   const inv = { coins: 0, slot: 0, items: {}, tools: [], hotbar: [] };
   const player = (extra) => ({ x: 5, y: 1, z: 6, yaw: 0.5, health: 80, inv, ...extra });
   const save = parseWorldSave({
-    v: 2,
+    v: WORLD_SAVE_VERSION,
     ids: { tool: 1 },
     players: [
       { token: "aaaaaaaa", name: "a", saved: player({ boat: 12 }) },
