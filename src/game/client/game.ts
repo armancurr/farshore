@@ -423,6 +423,9 @@ export class Game {
     this.raf = requestAnimationFrame(this.frame);
   }
 
+  /* Dev/test only: hold the camera at a fixed spot (x, y, z, yaw, pitch in radians), or null to let go. */
+  devCamera: { x: number; y: number; z: number; yaw: number; pitch: number } | null = null;
+
   /* Dev/test only: treat input as live without pointer lock. */
   get forceActive() {
     return this.forced;
@@ -1182,6 +1185,11 @@ export class Game {
     this.herd.update(dt, this.camera.position);
     this.built.update(t);
     this.boats.update(t, dt);
+    if (this.devCamera) {
+      const v = this.devCamera;
+      this.camera.position.set(v.x, v.y, v.z);
+      this.camera.rotation.set(v.pitch, v.yaw, 0, "YXZ");
+    }
     this.sky.follow(this.camera);
 
     const under = this.camera.position.y < SEA_LEVEL + 0.05 ? 1 : 0;
